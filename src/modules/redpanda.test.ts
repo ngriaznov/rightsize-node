@@ -8,7 +8,7 @@ describe("RedpandaContainer", () => {
     const rp = new RedpandaContainer().withBackend(backend).waitingFor(instantReadyWait());
     await rp.start();
     try {
-      assert.equal(backend.lastSpec?.image, "docker.redpanda.com/redpandadata/redpanda:v24.2.4");
+      assert.equal(backend.lastSpec?.image, "redpandadata/redpanda:v24.2.4");
       assert.deepEqual(backend.lastSpec?.ports.map((p) => p.guestPort), [9092, 9093, 8081]);
     } finally {
       await rp.stop();

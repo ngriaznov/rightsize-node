@@ -21,7 +21,7 @@ import { RedisContainer } from "rightsize/modules";
 | [`PostgresContainer`](/modules/postgres) | `postgres:18-alpine` | `connectionString`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
 | [`MySQLContainer`](/modules/mysql) | `mysql:8.4` | `connectionString`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
 | [`MariaDBContainer`](/modules/mariadb) | `mariadb:11.4` | `connectionString`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
-| [`RedpandaContainer`](/modules/redpanda) | `docker.redpanda.com/redpandadata/redpanda:v24.2.4` | `bootstrapServers`, `schemaRegistryUrl` |
+| [`RedpandaContainer`](/modules/redpanda) | `redpandadata/redpanda:v24.2.4` | `bootstrapServers`, `schemaRegistryUrl` |
 | [`KafkaContainer`](/modules/kafka) | `apache/kafka:4.0.0` | `bootstrapServers` (KRaft single node) |
 | [`RabbitMQContainer`](/modules/rabbitmq) | `rabbitmq:4-management-alpine` | `amqpUrl`, `managementUrl`, `username`, `password`, `withUsername`/`withPassword(...)` |
 | [`PinotContainer`](/modules/pinot) | `apachepinot/pinot:1.5.1` | `controllerUrl`, `brokerUrl` (QuickStart `-type EMPTY` single-container cluster) |

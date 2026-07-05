@@ -18,7 +18,7 @@ const INTERNAL_ALIAS = "redpanda";
  * runs), and a versioned tag makes that seed step reproducible.
  */
 export class RedpandaContainer extends GenericContainer {
-  constructor(image = "docker.redpanda.com/redpandadata/redpanda:v24.2.4") {
+  constructor(image = "redpandadata/redpanda:v24.2.4") {
     super(image);
     this.withExposedPorts(EXTERNAL_PORT, INTERNAL_PORT, SCHEMA_REGISTRY_PORT).waitingFor(
       Wait.forLogMessage(".*Successfully started Redpanda.*"),
@@ -26,7 +26,7 @@ export class RedpandaContainer extends GenericContainer {
   }
 
   static override async start(
-    image = "docker.redpanda.com/redpandadata/redpanda:v24.2.4",
+    image = "redpandadata/redpanda:v24.2.4",
   ): Promise<RedpandaContainer> {
     return (await new RedpandaContainer(image).start()) as RedpandaContainer;
   }

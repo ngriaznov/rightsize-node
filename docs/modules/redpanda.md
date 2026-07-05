@@ -6,7 +6,7 @@ registry rate-limits anonymous pulls, and a versioned tag keeps a
 one-time image seed (`docker save ... | msb load`, ahead of microsandbox
 runs) reproducible.
 
-**Default image:** `docker.redpanda.com/redpandadata/redpanda:v24.2.4`
+**Default image:** `redpandadata/redpanda:v24.2.4`
 **Exposed ports:** `9092` (external Kafka API), `9093` (internal, for
 sibling containers on the same `Network`), `8081` (schema registry)
 **Wait strategy:** log message `".*Successfully started Redpanda.*"`
