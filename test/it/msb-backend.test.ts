@@ -1,4 +1,4 @@
-import { describe, itIntegration, assert } from "../harness.js";
+import { describe, itMsbIntegration as itIntegration, assert } from "../harness.js";
 import { MsbCliBackend } from "../../src/backend-msb/backend.js";
 import { ensureInstalled } from "../../src/backend-msb/provisioner.js";
 import { invoke } from "../../src/backend-msb/invoke.js";

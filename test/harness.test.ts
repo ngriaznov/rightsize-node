@@ -15,6 +15,7 @@ describe("test harness", () => {
       "afterEach",
       "assert",
       "itIntegration",
+      "itMsbIntegration",
     ].sort();
     const actualKeys = Object.keys(harness).sort();
     assert.deepEqual(actualKeys, expectedKeys);

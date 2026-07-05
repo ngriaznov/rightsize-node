@@ -7,6 +7,7 @@
 // `before`/`after`; `bun:test` has `beforeAll`/`afterAll` and no `assert`
 // export at all — assertions go through `expect()`). This module detects the
 // engine at import time and re-exports a single shape that papers over both.
+import { PlatformInfo } from "../src/backend-msb/platform.js";
 //
 // Deliberately does NOT statically `import` from `"bun:test"`: the
 // `bun-types` ambient declarations for that module drag in global overrides
@@ -174,6 +175,25 @@ export const assert = api.assert;
  */
 export function itIntegration(name: string, fn: TestFn): void {
   if (process.env["RIGHTSIZE_IT"] !== "1") {
+    return;
+  }
+  it(name, fn);
+}
+
+/**
+ * Like {@link itIntegration}, but only when this machine can actually run
+ * microsandbox: the msb backend suites drive the real binary directly, which
+ * needs working hardware virtualization (KVM access on Linux) and makes no
+ * sense when the run is pinned to the docker backend.
+ */
+export function itMsbIntegration(name: string, fn: TestFn): void {
+  if (process.env["RIGHTSIZE_IT"] !== "1") {
+    return;
+  }
+  if (process.env["RIGHTSIZE_BACKEND"] === "docker") {
+    return;
+  }
+  if (PlatformInfo.current() === undefined || !PlatformInfo.virtualizationAvailable()) {
     return;
   }
   it(name, fn);

@@ -1,4 +1,4 @@
-import { describe, itIntegration, assert } from "../harness.js";
+import { describe, itMsbIntegration as itIntegration, assert } from "../harness.js";
 import { GenericContainer } from "../../src/core/generic-container.js";
 import { Network } from "../../src/core/network.js";
 import { Wait } from "../../src/core/wait.js";
