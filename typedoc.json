@@ -1,0 +1,20 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": [
+    "src/index.ts",
+    "src/modules/index.ts",
+    "src/backend-msb/index.ts",
+    "src/backend-docker/index.ts"
+  ],
+  "out": "docs/.typedoc",
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "disableSources": true,
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "notDocumented": true
+  },
+  "treatWarningsAsErrors": true,
+  "requiredToBeDocumented": ["Class", "Interface", "Method", "Property", "Function", "Accessor", "Enum", "TypeAlias"]
+}

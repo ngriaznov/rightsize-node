@@ -1,0 +1,13 @@
+.superpowers/
+node_modules/
+dist/
+dist-test/
+dist-examples/
+coverage/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+docs/.typedoc/
+.docs-verify/
+bun.lock
+bun.lockb
+.DS_Store

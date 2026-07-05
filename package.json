@@ -1,0 +1,102 @@
+{
+  "name": "rightsize",
+  "version": "0.1.0",
+  "description": "Testcontainers-style integration testing on microsandbox microVMs, with a Docker fallback and an await-using lifecycle. No Docker required.",
+  "keywords": [
+    "testcontainers",
+    "microvm",
+    "microsandbox",
+    "docker",
+    "testing",
+    "integration-testing",
+    "containers"
+  ],
+  "homepage": "https://github.com/ngriaznov/rightsize-node#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ngriaznov/rightsize-node.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ngriaznov/rightsize-node/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "Mykyta Hriaznov (https://github.com/ngriaznov)",
+  "type": "module",
+  "engines": {
+    "node": ">=22.11"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./modules": {
+      "types": "./dist/modules/index.d.ts",
+      "import": "./dist/modules/index.js"
+    },
+    "./backend-msb": {
+      "types": "./dist/backend-msb/index.d.ts",
+      "import": "./dist/backend-msb/index.js"
+    },
+    "./backend-docker": {
+      "types": "./dist/backend-docker/index.d.ts",
+      "import": "./dist/backend-docker/index.js"
+    }
+  },
+  "sideEffects": [
+    "./dist/backend-msb/index.js",
+    "./dist/backend-docker/index.js"
+  ],
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest:node": "tsc -p tsconfig.test.json && npm run copy-test-fixtures",
+    "test:node": "node --test 'dist-test/**/*.test.js'",
+    "test:node:it": "npm run pretest:node && RIGHTSIZE_IT=1 node --test --test-concurrency=1 --test-timeout=120000 'dist-test/**/*.test.js'",
+    "test:bun": "bun test --path-ignore-patterns='dist-test/**'",
+    "test:bun:it": "RIGHTSIZE_IT=1 bun test --path-ignore-patterns='dist-test/**' --timeout=120000",
+    "test": "npm run test:node && npm run test:bun",
+    "verify-async-dispose": "npm run pretest:node && node --test dist-test/src/core/async-dispose-verifier.test.js && bun test dist-test/src/core/async-dispose-verifier.test.js",
+    "copy-test-fixtures": "node scripts/copy-test-fixtures.mjs",
+    "precoverage": "tsc -p tsconfig.test.json && npm run copy-test-fixtures",
+    "coverage": "node --test --experimental-test-coverage 'dist-test/**/*.test.js'",
+    "precoverage:core": "tsc -p tsconfig.test.json && npm run copy-test-fixtures",
+    "coverage:core": "node --test --experimental-test-coverage --test-coverage-include='dist-test/src/core/**' --test-coverage-lines=80 'dist-test/**/*.test.js'",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "predocs:verify": "npm run build",
+    "docs:verify": "node scripts/verify-docs.mjs",
+    "docs:verify:run": "npm run build && RIGHTSIZE_DOCS_RUN=1 node scripts/verify-docs.mjs",
+    "docs:api-check": "typedoc --emit none",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "preexamples:build": "npm run build",
+    "examples:build": "node scripts/link-self.mjs && tsc -p tsconfig.examples.json",
+    "example:redis": "npm run examples:build && node dist-examples/redis-quickstart.js",
+    "example:network": "npm run examples:build && node dist-examples/network-alias.js",
+    "example:test": "npm run examples:build && node --test dist-examples/redis.test.js",
+    "examples:run": "npm run examples:build && node dist-examples/redis-quickstart.js && node dist-examples/network-alias.js && node --test dist-examples/redis.test.js"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.8",
+    "@types/node": "^22.10.5",
+    "@types/pg": "^8.20.0",
+    "amqplib": "^2.0.1",
+    "bun-types": "^1.1.38",
+    "kafkajs": "^2.2.4",
+    "mongodb": "^7.4.0",
+    "mysql2": "^3.22.5",
+    "pg": "^8.22.0",
+    "redis": "^6.1.0",
+    "typedoc": "^0.28.19",
+    "typescript": "^5.7.3",
+    "vitepress": "^1.5.0"
+  },
+  "dependencies": {
+    "tslib": "^2.8.1"
+  }
+}

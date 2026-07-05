@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Weekly run: integration tests pin real upstream artifacts (the msb release,
+  # container image tags) that can drift or disappear between pushes — a scheduled
+  # run surfaces that breakage without waiting for the next commit.
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-typecheck:
+    name: build, typecheck, lint, docs:verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run docs:verify
+
+  unit-node:
+    name: unit tests (node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:node
+
+  unit-bun:
+    name: unit tests (bun)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: bun install
+      - run: npm run test:bun
+
+  msb-linux:
+    name: integration tests (microsandbox, linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/rightsize
+          key: rightsize-msb-linux-${{ hashFiles('src/backend-msb/provisioner.ts') }}
+      - run: npm ci
+      - run: bun install
+      - name: node:test (serial IT)
+        run: RIGHTSIZE_BACKEND=microsandbox npm run test:node:it
+      - name: bun:test (serial IT)
+        run: RIGHTSIZE_BACKEND=microsandbox npm run test:bun:it
+
+  msb-macos:
+    name: integration tests (microsandbox, macos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/rightsize
+          key: rightsize-msb-macos-${{ hashFiles('src/backend-msb/provisioner.ts') }}
+      - run: npm ci
+      - run: bun install
+      - name: node:test (serial IT)
+        run: RIGHTSIZE_BACKEND=microsandbox npm run test:node:it
+      - name: bun:test (serial IT)
+        run: RIGHTSIZE_BACKEND=microsandbox npm run test:bun:it
+
+  docker-fallback:
+    name: integration tests (docker fallback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: npm ci
+      - run: bun install
+      - name: node:test (serial IT)
+        run: RIGHTSIZE_BACKEND=docker npm run test:node:it
+      - name: bun:test (serial IT)
+        run: RIGHTSIZE_BACKEND=docker npm run test:bun:it
+
+  coverage:
+    name: coverage (core, 80% line floor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run coverage:core
