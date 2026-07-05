@@ -56,3 +56,8 @@ doing:
   that leaks a container or a held port is a bug in that test, not
   something a later test should have to tolerate — CI expects the runtime
   to be in the same state after the suite as before it.
+
+> **macOS in CI:** there is no `msb-macos` job — GitHub's hosted Apple Silicon
+> runners are themselves VMs without nested virtualization, so microVMs cannot
+> boot there (Hypervisor.framework rejects VM creation). macOS support is
+> verified on real Apple Silicon hardware before release.

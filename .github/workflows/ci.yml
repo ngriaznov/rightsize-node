@@ -106,43 +106,10 @@ jobs:
           path: ~/.microsandbox/cache
           key: msb-images-${{ runner.os }}-${{ github.run_id }}
 
-  msb-macos:
-    name: integration tests (microsandbox, macos)
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/rightsize
-          key: rightsize-msb-macos-${{ hashFiles('src/backend-msb/provisioner.ts') }}
-      # Image-cache warming is incremental: registries rate-limit the runners'
-      # shared IPs, so each run restores the newest prior cache, pulls what the
-      # quota allows, and saves its grown copy even on failure — after a few
-      # runs the cache is warm and pulls stop entirely.
-      - uses: actions/cache/restore@v4
-        with:
-          path: ~/.microsandbox/cache
-          key: msb-images-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: msb-images-${{ runner.os }}-
-      - run: npm ci
-      - run: bun install
-      - name: node:test (serial IT)
-        run: RIGHTSIZE_BACKEND=microsandbox npm run test:node:it
-      - name: bun:test (serial IT)
-        run: RIGHTSIZE_BACKEND=microsandbox npm run test:bun:it
-      - uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: ~/.microsandbox/cache
-          key: msb-images-${{ runner.os }}-${{ github.run_id }}
-
+  # No msb-macos job: GitHub's hosted Apple Silicon runners are themselves VMs
+  # without nested virtualization, so Hypervisor.framework VM creation fails
+  # (msb: build_microvm VmSetup(VmCreate)). macOS support is verified on real
+  # Apple Silicon hardware; a self-hosted mac runner could restore CI coverage.
   docker-fallback:
     name: integration tests (docker fallback)
     runs-on: ubuntu-latest
