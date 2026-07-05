@@ -85,12 +85,26 @@ jobs:
         with:
           path: ~/.cache/rightsize
           key: rightsize-msb-linux-${{ hashFiles('src/backend-msb/provisioner.ts') }}
+      # Image-cache warming is incremental: registries rate-limit the runners'
+      # shared IPs, so each run restores the newest prior cache, pulls what the
+      # quota allows, and saves its grown copy even on failure — after a few
+      # runs the cache is warm and pulls stop entirely.
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.microsandbox/cache
+          key: msb-images-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: msb-images-${{ runner.os }}-
       - run: npm ci
       - run: bun install
       - name: node:test (serial IT)
         run: RIGHTSIZE_BACKEND=microsandbox npm run test:node:it
       - name: bun:test (serial IT)
         run: RIGHTSIZE_BACKEND=microsandbox npm run test:bun:it
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.microsandbox/cache
+          key: msb-images-${{ runner.os }}-${{ github.run_id }}
 
   msb-macos:
     name: integration tests (microsandbox, macos)
@@ -108,12 +122,26 @@ jobs:
         with:
           path: ~/.cache/rightsize
           key: rightsize-msb-macos-${{ hashFiles('src/backend-msb/provisioner.ts') }}
+      # Image-cache warming is incremental: registries rate-limit the runners'
+      # shared IPs, so each run restores the newest prior cache, pulls what the
+      # quota allows, and saves its grown copy even on failure — after a few
+      # runs the cache is warm and pulls stop entirely.
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.microsandbox/cache
+          key: msb-images-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: msb-images-${{ runner.os }}-
       - run: npm ci
       - run: bun install
       - name: node:test (serial IT)
         run: RIGHTSIZE_BACKEND=microsandbox npm run test:node:it
       - name: bun:test (serial IT)
         run: RIGHTSIZE_BACKEND=microsandbox npm run test:bun:it
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.microsandbox/cache
+          key: msb-images-${{ runner.os }}-${{ github.run_id }}
 
   docker-fallback:
     name: integration tests (docker fallback)
