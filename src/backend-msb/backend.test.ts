@@ -44,7 +44,22 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     delete process.env["RIGHTSIZE_FAKE_MSB_STATE"];
   });
 
+  // fake-msb-wrapper.sh is a POSIX `sh` script run directly as the "msb
+  // binary" via spawn(path, args) — there is no shebang-based interpreter
+  // dispatch on a bare Windows runner, so spawn() there fails structurally
+  // (EFTYPE: not a recognized executable), independent of anything
+  // MsbCliBackend itself does. The real msb-Windows attached-mode/exec/
+  // follow-logs behavior is covered by the msb backend's own IT suite
+  // (test/it/contract.test.ts, test/it/msb-backend.test.ts) against the
+  // real msb.exe, not by this file's shell-script double.
+  function skipOnWindows(): boolean {
+    return process.platform === "win32";
+  }
+
   it("start reaches Running by polling ls, then stop and remove tear it down", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const spec = baseSpec("rz-testrun1-1");
     const handle = await backend.create(spec);
     await backend.start(handle);
@@ -57,6 +72,9 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
   });
 
   it("stop() completes quickly on the normal path: the attached child stays alive until `msb stop` ends it", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     // The fake's `run` process stays alive (msb's own supervisor model —
     // confirmed against the real msb binary) until something ends it: here
     // that's the `msb stop` call stop() itself issues. This asserts the
@@ -75,6 +93,9 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
   });
 
   it("stop() does not hang when the attached child is already dead before stop() is called", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     // Covers the scenario state.attachedExited genuinely guards against:
     // the attached child dying before stop() ever runs (crashed, or killed
     // by something external) rather than as a result of stop()'s own `msb
@@ -106,6 +127,9 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
   });
 
   it("exec returns the fake's echoed result", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const spec = baseSpec("rz-testrun1-2");
     const handle = await backend.create(spec);
     await backend.start(handle);
@@ -117,6 +141,9 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
   });
 
   it("followLogs delivers the fake's boot lines and close() halts delivery without hanging", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const spec = baseSpec("rz-testrun1-3");
     const handle = await backend.create(spec);
     await backend.start(handle);
@@ -134,6 +161,9 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
   });
 
   it("followLogs watchdog quiesces and replays undelivered lines once the sandbox stops", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const spec = baseSpec("rz-testrun1-4");
     const handle = await backend.create(spec);
     await backend.start(handle);

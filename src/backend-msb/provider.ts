@@ -18,7 +18,13 @@ export class MsbBackendProvider implements BackendProvider {
 
   unsupportedReason(): string {
     if (PlatformInfo.current() === undefined) {
-      return `no msb build for ${process.platform}/${process.arch} (Intel Mac/Windows: use the docker backend)`;
+      return `no msb build for ${process.platform}/${process.arch} (Intel Mac: use the docker backend)`;
+    }
+    if (process.platform === "win32") {
+      return (
+        "Windows Hypervisor Platform is not enabled (run 'msb doctor --fix' in an elevated " +
+        "terminal, which may require a reboot), or use the docker backend"
+      );
     }
     return "/dev/kvm is not accessible (need KVM, or run on Apple Silicon macOS)";
   }

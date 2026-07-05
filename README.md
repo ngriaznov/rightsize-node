@@ -135,9 +135,15 @@ rightsize picks a backend automatically; override with
 |---|---|
 | macOS (Apple Silicon) | microsandbox (microVMs) |
 | Linux x86_64 / arm64 with `/dev/kvm` | microsandbox (microVMs) |
+| Windows x86_64 / arm64 (WHP enabled) | microsandbox (microVMs)¹ |
 | Intel Mac | Docker (auto-fallback) |
-| Windows | Docker (auto-fallback) |
+| Windows without WHP | Docker (auto-fallback) |
 | Linux without KVM | Docker (auto-fallback) |
+
+¹ Verified in CI on `windows-2025` hosted runners, where Windows Hypervisor
+Platform is enabled by default. If WHP isn't enabled on your machine, run
+`msb doctor --fix` in an elevated terminal (may require a reboot) or use
+`RIGHTSIZE_BACKEND=docker`.
 
 Both backends satisfy one behavioral contract, verified by a shared test
 suite — the code you write runs unchanged on either. A few edges are
@@ -160,9 +166,10 @@ backend-specific rather than behavioral divergences:
 
 - **Self-provisioning runtime.** A pinned `msb` release (binary + libkrunfw)
   is downloaded once, SHA-256-verified against the release manifest, and
-  installed atomically under `~/.cache/rightsize/` — the binary lands last,
-  so a crashed install is detected and repaired, never half-trusted. A
-  cross-process file lock keeps parallel processes from racing.
+  installed atomically under `~/.cache/rightsize/` (`%LOCALAPPDATA%\rightsize`
+  on Windows) — the binary lands last, so a crashed install is detected and
+  repaired, never half-trusted. A cross-process file lock keeps parallel
+  processes from racing.
 - **Attached-mode supervision.** Each container is a held child process
   supervising its microVM; the image's ENTRYPOINT runs exactly as it would
   under Docker.
@@ -187,7 +194,7 @@ Full detail: [How It Works](https://github.com/ngriaznov/rightsize-node/blob/mai
 |---|---|
 | `RIGHTSIZE_BACKEND` | Force `microsandbox` or `docker` |
 | `MSB_PATH` | Use a pre-installed `msb` binary; skip downloads |
-| `RIGHTSIZE_CACHE_DIR` | Relocate the runtime cache (default `~/.cache/rightsize`) |
+| `RIGHTSIZE_CACHE_DIR` | Relocate the runtime cache (default `~/.cache/rightsize`; `%LOCALAPPDATA%\rightsize` on Windows) |
 | `RIGHTSIZE_MSB_SKIP_DOWNLOAD` | `true` = fail instead of downloading (air-gapped CI) |
 
 ## Runtime support

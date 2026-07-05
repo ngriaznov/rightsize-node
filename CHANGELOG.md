@@ -12,6 +12,49 @@ project has not yet made a tagged release.
   Redis quickstart, a two-container network demo, and a consumer-style
   `node:test` suite), wired into `npm run examples:run` and typechecked as
   part of `docs:verify`.
+- Native Windows support for the microsandbox backend (x86_64 and arm64):
+  platform detection for `win32`, the `.exe`/`.dll` asset names shipped by
+  the pinned msb release, install-target naming (`bin\msb.exe`, suffixless
+  `msb` elsewhere), a `%LOCALAPPDATA%\rightsize` default cache root, and
+  `MSB_PATH`/install-validity checks that don't assume a POSIX execute bit.
+  Verified in CI (`msb-windows` job, `windows-2025`): Windows Hypervisor
+  Platform was found enabled by default on hosted runners, so the job runs
+  the real msb integration suite rather than a Docker-only fallback. Two
+  msb-Windows-specific `logs`/`logs -f` gaps were found and are gated out of
+  the shared contract suite there (documented in `.github/CONTRIBUTING.md`):
+  a trailing line lacking its own newline is never delivered, and
+  `msb logs -f` stalls after the first line when a workload writes its
+  output as a slow trickle rather than all at once.
+- `itDockerIntegration`, a new gate in `test/harness.ts` alongside
+  `itIntegration`/`itMsbIntegration`: skips `test/it/docker-backend.test.ts`
+  cleanly when no Docker-compatible daemon socket is reachable at all
+  (Windows CI runners, unlike GitHub's Linux runners, do not ship one),
+  rather than every test in that file failing identically with a
+  connection-refused error.
+- `.gitattributes` pinning text sources to LF regardless of the checking-out
+  platform's `core.autocrlf` setting — a Windows checkout was converting
+  `src/core/rightsize-fixture.txt`'s committed LF ending to CRLF, breaking
+  `MountableFile`'s exact-content round-trip assertion there.
+
+### Fixed
+
+- `MountableFile`'s test suite resolved its own fixture directory via
+  `new URL(import.meta.url).pathname`, which mangles a Windows drive-letter
+  path; switched to `fileURLToPath`, matching the rest of the codebase's
+  house style for turning `import.meta.url` into a filesystem path.
+- `test:node:it`/`test:bun:it`/`docs:verify:run`'s npm scripts set
+  `RIGHTSIZE_IT=1`/`RIGHTSIZE_DOCS_RUN=1` as bare inline env-var
+  assignments, which only parse under a POSIX shell; wrapped with
+  `cross-env` so they work under PowerShell (the default shell on Windows
+  Actions runners) too.
+- Several unit-test fixtures were POSIX-only and never exercised on Windows
+  before the `msb-windows` CI job existed: real unix-domain-socket servers
+  standing in for a Docker daemon (`src/backend-docker/client.test.ts`) and
+  POSIX `sh` scripts run directly as a fake `msb` binary
+  (`src/backend-msb/backend.test.ts`, `src/backend-msb/invoke.test.ts`) —
+  both fail structurally on Windows (no unix-domain-socket-at-a-filesystem-
+  path concept; no shebang-based interpreter dispatch for `spawn()`) and are
+  now skipped there with the reasoning documented at each site.
 
 ### Changed
 

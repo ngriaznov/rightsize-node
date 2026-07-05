@@ -114,6 +114,57 @@ jobs:
           path: ~/.microsandbox/cache
           key: msb-images-${{ runner.os }}-${{ github.run_id }}
 
+  # Windows Hypervisor Platform, unlike macOS's Hypervisor.framework and
+  # Linux's KVM above, was found ENABLED on hosted windows-2025 runners
+  # (windows-spike findings, 2026-07-05: WHP already Enabled, msb doctor
+  # green, boot/entrypoint/port-publish/exec-stdin all PASS) — so unlike
+  # msb-macos below, this job runs the real msb integration suite, not a
+  # docker-only fallback.
+  msb-windows:
+    name: integration tests (microsandbox, windows)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Same pin as the other bun legs (see msb-linux's comment); verified
+          # a Windows build of this exact version exists
+          # (bun-windows-x64.zip in the v1.3.14 release assets) before pinning
+          # it here rather than falling back to a different version.
+          bun-version: "1.3.14"
+      - uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\rightsize
+          key: rightsize-msb-windows-${{ hashFiles('src/backend-msb/provisioner.ts') }}
+      # Same incremental image-cache warming as msb-linux, windows-suffixed
+      # keys (the cache key already includes ${{ runner.os }}, which resolves
+      # to "Windows" here, but the path itself needs the Windows microsandbox
+      # cache location rather than the Unix ~/.microsandbox/cache).
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~\.microsandbox\cache
+          key: msb-images-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: msb-images-${{ runner.os }}-
+      - run: npm ci
+      - run: bun install
+      - name: node:test (serial IT)
+        run: npm run test:node:it
+        env:
+          RIGHTSIZE_BACKEND: microsandbox
+      - name: bun:test (serial IT)
+        run: npm run test:bun:it
+        env:
+          RIGHTSIZE_BACKEND: microsandbox
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~\.microsandbox\cache
+          key: msb-images-${{ runner.os }}-${{ github.run_id }}
+
   # No msb-macos job: GitHub's hosted Apple Silicon runners are themselves VMs
   # without nested virtualization, so Hypervisor.framework VM creation fails
   # (msb: build_microvm VmSetup(VmCreate)). macOS support is verified on real

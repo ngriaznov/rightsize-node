@@ -16,6 +16,7 @@ describe("test harness", () => {
       "assert",
       "itIntegration",
       "itMsbIntegration",
+      "itDockerIntegration",
     ].sort();
     const actualKeys = Object.keys(harness).sort();
     assert.deepEqual(actualKeys, expectedKeys);
@@ -69,6 +70,14 @@ describe("itIntegration gating", () => {
   // would call it at module scope), not from inside another test callback —
   // both runners register tests eagerly during the describe phase.
   harness.itIntegration("only runs when RIGHTSIZE_IT=1", () => {
+    assert.equal(process.env["RIGHTSIZE_IT"], "1");
+  });
+
+  // Same describe-time-registration constraint as itIntegration above.
+  // Whether this actually executes depends on RIGHTSIZE_IT AND a reachable
+  // Docker socket — both runners register it eagerly regardless, and the
+  // gate itself (not this assertion) decides whether the body ever runs.
+  harness.itDockerIntegration("only runs when RIGHTSIZE_IT=1 and a Docker socket is reachable", () => {
     assert.equal(process.env["RIGHTSIZE_IT"], "1");
   });
 });

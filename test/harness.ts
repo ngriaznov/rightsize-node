@@ -7,7 +7,9 @@
 // `before`/`after`; `bun:test` has `beforeAll`/`afterAll` and no `assert`
 // export at all — assertions go through `expect()`). This module detects the
 // engine at import time and re-exports a single shape that papers over both.
+import * as fs from "node:fs";
 import { PlatformInfo } from "../src/backend-msb/platform.js";
+import { socketPathFromDockerHost } from "../src/backend-docker/client.js";
 //
 // Deliberately does NOT statically `import` from `"bun:test"`: the
 // `bun-types` ambient declarations for that module drag in global overrides
@@ -194,6 +196,50 @@ export function itMsbIntegration(name: string, fn: TestFn): void {
     return;
   }
   if (PlatformInfo.current() === undefined || !PlatformInfo.virtualizationAvailable()) {
+    return;
+  }
+  it(name, fn);
+}
+
+/**
+ * A daemon socket existing on disk is not proof it's live, but it is the
+ * same cheap, synchronous, no-spawn signal the msb gate uses for `/dev/kvm`
+ * — good enough to skip cleanly on a host with no Docker installed at all,
+ * which is the common case this exists for (a Windows runner with no Docker
+ * Desktop/daemon service, unlike GitHub's Linux runners, which always ship
+ * one). A socket that exists but is stale/unresponsive still surfaces as a
+ * real per-test failure, same as today; this only prevents the "no daemon
+ * anywhere on this host" case from producing that same connection-refused
+ * failure on every single test in the file.
+ */
+function dockerSocketPresent(): boolean {
+  const socketPath = socketPathFromDockerHost(process.env["DOCKER_HOST"]);
+  try {
+    return fs.statSync(socketPath).isSocket();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Like {@link itIntegration}, but only when this machine has a Docker/
+ * Podman/Colima-compatible daemon socket reachable at all. `docker-
+ * backend.test.ts` drives `DockerBackend` directly — independent of
+ * whichever backend `RIGHTSIZE_BACKEND` selects for the shared contract
+ * suite — so it is not gated on `RIGHTSIZE_BACKEND` the way
+ * `itMsbIntegration` is gated away from `RIGHTSIZE_BACKEND=docker`: on
+ * Linux CI a Docker daemon is present as an environmental given even in the
+ * `microsandbox`-selected job, and this file has always run there
+ * regardless of the selected backend. The one thing that differs host to
+ * host is whether a daemon exists AT ALL — Windows runners, unlike GitHub's
+ * Linux runners, do not ship one — and every assertion in the file would
+ * otherwise fail identically with a connection-refused error in that case.
+ */
+export function itDockerIntegration(name: string, fn: TestFn): void {
+  if (process.env["RIGHTSIZE_IT"] !== "1") {
+    return;
+  }
+  if (!dockerSocketPresent()) {
     return;
   }
   it(name, fn);

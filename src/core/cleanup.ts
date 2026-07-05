@@ -48,6 +48,16 @@ function installHooksOnce(): void {
   // SIGINT/SIGTERM: run the same synchronous cleanup, then re-raise the
   // signal so the process still exits the way it would have without this
   // handler (correct exit code, no swallowed Ctrl-C).
+  //
+  // On Windows this pair is best-effort, not the real safety net: Node
+  // delivers a synthetic SIGINT for Ctrl+C (and SIGBREAK for Ctrl+Break,
+  // which is not registered here) but there is no real SIGTERM delivery from
+  // another process the way POSIX has it — Windows has no signal-based IPC
+  // for that. The interactive Ctrl+C path still fires this handler as
+  // expected; a `taskkill`-style external termination does not. The `"exit"`
+  // handler above is therefore the one Windows-portable guarantee — it fires
+  // on every normal process exit regardless of platform or what triggered
+  // it — while this signal-handler loop is a POSIX nicety layered on top.
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
       runAll();

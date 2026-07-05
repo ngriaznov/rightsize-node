@@ -1,5 +1,5 @@
 import * as net from "node:net";
-import { describe, itIntegration, assert } from "../harness.js";
+import { describe, itDockerIntegration, assert } from "../harness.js";
 import { DockerBackend } from "../../src/backend-docker/backend.js";
 import { DockerClient } from "../../src/backend-docker/client.js";
 import { PortBindConflictError } from "../../src/core/errors.js";
@@ -77,7 +77,7 @@ function portIsReachable(port: number, timeoutMs = 500): Promise<boolean> {
 }
 
 describe("DockerBackend integration (real daemon)", () => {
-  itIntegration("basic lifecycle: create, start, exec, logs, stop, remove", async () => {
+  itDockerIntegration("basic lifecycle: create, start, exec, logs, stop, remove", async () => {
     const backend = new DockerBackend(DockerClient.fromEnv());
     const spec = baseSpec({ env: [["FOO", "bar"]] });
     await withContainer(backend, spec, async (handle) => {
@@ -93,7 +93,7 @@ describe("DockerBackend integration (real daemon)", () => {
     });
   });
 
-  itIntegration("publishes a TCP port to host loopback", async () => {
+  itDockerIntegration("publishes a TCP port to host loopback", async () => {
     const backend = new DockerBackend(DockerClient.fromEnv());
     const hostPort = await FreePorts.allocate();
     try {
@@ -119,7 +119,7 @@ describe("DockerBackend integration (real daemon)", () => {
     }
   });
 
-  itIntegration("typed port-conflict error on a host port already bound by another container", async () => {
+  itDockerIntegration("typed port-conflict error on a host port already bound by another container", async () => {
     const backend = new DockerBackend(DockerClient.fromEnv());
     const hostPort = await FreePorts.allocate();
     const specA = baseSpec({ ports: [{ hostPort, guestPort: 6379 }], image: "redis:8.6-alpine", command: undefined });
@@ -148,7 +148,7 @@ describe("DockerBackend integration (real daemon)", () => {
     }
   });
 
-  itIntegration("followOutput delivers lines in order and close halts delivery", async () => {
+  itDockerIntegration("followOutput delivers lines in order and close halts delivery", async () => {
     const backend = new DockerBackend(DockerClient.fromEnv());
     const spec = baseSpec({
       command: ["sh", "-c", "for i in 1 2 3 4 5; do echo line-$i; sleep 0.2; done; sleep 30"],
@@ -176,7 +176,7 @@ describe("DockerBackend integration (real daemon)", () => {
     }
   });
 
-  itIntegration("followOutput delivers a final unterminated line exactly once after the workload exits", async () => {
+  itDockerIntegration("followOutput delivers a final unterminated line exactly once after the workload exits", async () => {
     const backend = new DockerBackend(DockerClient.fromEnv());
     // No trailing newline on the last echo -n: proves the LineAssembler's
     // flush-once-at-stream-end path is reached through the real daemon's
@@ -200,7 +200,7 @@ describe("DockerBackend integration (real daemon)", () => {
     }
   });
 
-  itIntegration("native-network alias connect: a sibling reaches this container by alias", async () => {
+  itDockerIntegration("native-network alias connect: a sibling reaches this container by alias", async () => {
     const backend = new DockerBackend(DockerClient.fromEnv());
     const networkId = `rz-net-it-${RunId.value}`;
     await backend.ensureNetwork(networkId);
@@ -248,7 +248,7 @@ describe("DockerBackend integration (real daemon)", () => {
     }
   });
 
-  itIntegration("close() force-removes every container carrying this run's label", async () => {
+  itDockerIntegration("close() force-removes every container carrying this run's label", async () => {
     const backend = new DockerBackend(DockerClient.fromEnv());
     const spec = baseSpec();
     const handle = await backend.create(spec);

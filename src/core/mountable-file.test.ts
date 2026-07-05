@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, assert } from "../../test/harness.js";
 import { MountableFile } from "./mountable-file.js";
 
@@ -25,7 +26,10 @@ describe("MountableFile.forResource", () => {
     const contents = fs.readFileSync(file.path, "utf8");
     assert.equal(contents, "rightsize mountable-file fixture\n");
     // The resolved mount path is a temp copy, not the source file's own path.
-    const sourcePath = path.resolve(path.dirname(new URL(import.meta.url).pathname), "rightsize-fixture.txt");
+    // node:url's fileURLToPath, not new URL().pathname, per house style — the
+    // latter mangles a Windows drive-letter path (e.g. "/C:/foo") into
+    // something path.dirname/path.resolve never round-trips correctly.
+    const sourcePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "rightsize-fixture.txt");
     assert.ok(file.path !== sourcePath);
   });
 

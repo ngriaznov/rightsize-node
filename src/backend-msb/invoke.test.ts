@@ -21,7 +21,23 @@ describe("invoke", () => {
     return p;
   }
 
+  // These fixtures are POSIX `sh` scripts (relying on `>&2`, `seq`, pipes) run
+  // directly as the "msb binary" via spawn(path, args) — there is no `sh` on
+  // a bare Windows runner and no shebang-based interpreter dispatch either
+  // way, so `spawn()` there fails structurally (EFTYPE: not a recognized
+  // executable), independent of anything invoke() itself does. invoke() is a
+  // generic child-process wrapper with no Windows-specific behavior to
+  // verify; the real msb-Windows exec path is covered by the msb backend's
+  // own IT suite (test/it/contract.test.ts, test/it/msb-backend.test.ts)
+  // against the real msb.exe, not by this file's shell-script doubles.
+  function skipOnWindows(): boolean {
+    return process.platform === "win32";
+  }
+
   it("captures stdout, stderr, and the real exit code", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const bin = await fakeMsb(`echo out-line; echo err-line >&2; exit 7`);
     const result = await invoke(bin, [], 5_000);
     assert.equal(result.exitCode, 7);
@@ -30,6 +46,9 @@ describe("invoke", () => {
   });
 
   it("closes stdin so a script waiting for EOF never hangs", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     // cat with no args reads stdin until EOF; if invoke() left stdin open
     // ("pipe" with nothing written and never closed) this would hang until
     // the test's own timeout, not invoke()'s.
@@ -40,6 +59,9 @@ describe("invoke", () => {
   });
 
   it("joins the drain without truncating output that arrives right at process exit", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const bigLine = "x".repeat(5000);
     const bin = await fakeMsb(`for i in $(seq 1 50); do echo "${bigLine}"; done`);
     const result = await invoke(bin, [], 5_000);
@@ -49,6 +71,9 @@ describe("invoke", () => {
   });
 
   it("rejects with a BackendError naming the timeout when the process hangs", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const bin = await fakeMsb(`sleep 10`);
     await assert.rejects(() => invoke(bin, [], 100));
   });

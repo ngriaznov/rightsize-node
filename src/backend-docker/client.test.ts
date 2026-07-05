@@ -6,6 +6,23 @@ import { describe, it, assert } from "../../test/harness.js";
 import { DockerClient, socketPathFromDockerHost } from "./client.js";
 
 /**
+ * These fixtures bind a real unix-domain socket at an arbitrary filesystem
+ * path via `net.createServer().listen(path)` — that is exactly the
+ * mechanism the design's Windows scope excludes: the Docker backend is
+ * unix-socket-only and does not apply on Windows at all (confirmed:
+ * `listen()` on such a path fails there with EACCES, since Windows has no
+ * unix-domain-socket-at-a-filesystem-path concept the way POSIX does).
+ * These are unit-test fixtures standing in for a real daemon, not IT-gated
+ * tests, so they cannot route through `itDockerIntegration`'s daemon-
+ * reachability probe; skipping outright on win32 is the correct behavior
+ * for a mechanism that is structurally POSIX-only, not merely
+ * environment-dependent.
+ */
+function skipOnWindows(): boolean {
+  return process.platform === "win32";
+}
+
+/**
  * A throwaway unix-socket path in a fresh temp dir per fixture — short enough
  * to stay under a unix socket's SUN_LEN limit (~104 bytes on macOS), which is
  * why this doesn't route through `os.tmpdir()` (whose per-process TMPDIR on
@@ -31,6 +48,9 @@ async function fixtureServer(response: Buffer | string): Promise<{ sockPath: str
 
 describe("DockerClient request framing", () => {
   it("parses a Content-Length response", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const { sockPath, close } = await fixtureServer(
       "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{\"Id\":\"abc\"}",
     );
@@ -42,6 +62,9 @@ describe("DockerClient request framing", () => {
   });
 
   it("parses a chunked response", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const { sockPath, close } = await fixtureServer(
       "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
     );
@@ -53,6 +76,9 @@ describe("DockerClient request framing", () => {
   });
 
   it("parses a non-200 status with an empty body", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const { sockPath, close } = await fixtureServer("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
     const client = new DockerClient(sockPath);
     const resp = await client.request("GET", "/images/missing/json");
@@ -62,6 +88,9 @@ describe("DockerClient request framing", () => {
   });
 
   it("parses a 500 with a JSON error body", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const { sockPath, close } = await fixtureServer(
       'HTTP/1.1 500 Internal Server Error\r\nContent-Length: 28\r\n\r\n{"message":"already in use"}',
     );
@@ -73,6 +102,9 @@ describe("DockerClient request framing", () => {
   });
 
   it("sends a JSON body with a matching Content-Length", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const sockPath = freshSocketPath();
     let received = "";
     const server = net.createServer((socket) => {
@@ -101,6 +133,9 @@ describe("DockerClient request framing", () => {
 
 describe("DockerClient connect/response timeout", () => {
   it("rejects with a named error instead of hanging forever when the daemon never responds", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     // Accepts the connection and reads whatever the client sends, but never
     // writes a response — reproduces the hang this timeout exists to bound:
     // without it, send() has nothing that ever settles its promise on a
@@ -130,6 +165,9 @@ describe("DockerClient connect/response timeout", () => {
 
 describe("DockerClient request_stream", () => {
   it("returns headers and a still-open socket positioned after the header block", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
     const { sockPath, close } = await fixtureServer("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
     const client = new DockerClient(sockPath);
     const { status, chunked, contentLength, body } = await client.requestStream("GET", "/x");

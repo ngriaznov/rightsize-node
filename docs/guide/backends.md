@@ -40,9 +40,14 @@ four-step list above is the whole story that matters day to day.
 |---|---|
 | macOS (Apple Silicon) | microsandbox (microVMs) |
 | Linux x86_64 / arm64 with `/dev/kvm` | microsandbox (microVMs) |
+| Windows x86_64 / arm64 (WHP enabled) | microsandbox (microVMs) |
 | Intel Mac | Docker (auto-fallback) |
-| Windows | Docker (auto-fallback) |
+| Windows without WHP | Docker (auto-fallback)¹ |
 | Linux without KVM | Docker (auto-fallback) |
+
+¹ See the Docker unix-socket note below — Windows' Docker fallback needs a
+daemon reachable over a unix socket, which is not Docker Desktop's default
+on Windows.
 
 ## Environment variables
 
@@ -50,7 +55,7 @@ four-step list above is the whole story that matters day to day.
 |---|---|
 | `RIGHTSIZE_BACKEND` | Force `microsandbox` or `docker`, overriding auto-selection. |
 | `MSB_PATH` | Use a pre-installed `msb` binary; skips the download/provisioning step entirely. |
-| `RIGHTSIZE_CACHE_DIR` | Relocate the runtime cache (default `~/.cache/rightsize`). |
+| `RIGHTSIZE_CACHE_DIR` | Relocate the runtime cache (default `~/.cache/rightsize`; `%LOCALAPPDATA%\rightsize` on Windows). |
 | `RIGHTSIZE_MSB_SKIP_DOWNLOAD` | `true` = fail with guidance instead of downloading — for air-gapped CI; pair with `MSB_PATH` or a pre-seeded cache. |
 | `DOCKER_HOST` | A `unix://` socket path (or bare path); the Docker backend only ever dials a unix socket, never a TCP host — see below. |
 
@@ -87,6 +92,15 @@ socket, entirely because of an unrelated dependency bump elsewhere in that
 project's tree. Owning this client end-to-end — it can only ever dial a unix
 socket path — makes that class of misrouting structurally impossible here,
 regardless of what else is in your `node_modules`.
+
+**Windows note:** because the client is unix-socket-only by design, the
+Docker fallback on Windows needs a daemon reachable over a unix socket — not
+Docker Desktop's default named pipe (`//./pipe/docker_engine`). Docker
+Desktop's WSL2 backend exposes a unix socket inside its Linux VM
+(`/var/run/docker.sock`); point `DOCKER_HOST` at a path reachable from the
+Node process (for example, running inside the WSL2 distro itself, or any
+other unix-socket-exposing Docker setup). This is a Windows precondition on
+the Docker backend specifically, unrelated to microsandbox/WHP.
 
 ## Backend differences
 

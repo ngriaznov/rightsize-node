@@ -17,14 +17,53 @@ const STALE_LOCK_AGE_MS = 5 * 60 * 1000;
 const LOCK_POLL_MS = 200;
 const LOCK_WAIT_MAX_MS = 30_000;
 
+/**
+ * `%LOCALAPPDATA%` is the Windows-idiomatic location for a machine-local,
+ * non-roaming native toolchain cache (as opposed to `%USERPROFILE%`, which a
+ * roaming-profile setup can sync, or a Unix-style dotfile under the home
+ * dir). Falls back to `%USERPROFILE%\AppData\Local` if the env var is unset,
+ * matching what `os.homedir()` resolves to on a normal Windows install when
+ * `LOCALAPPDATA` isn't populated (rare, but seen on some minimal/CI images).
+ */
 function defaultCacheDir(): string {
-  return process.env["RIGHTSIZE_CACHE_DIR"] ?? path.join(os.homedir(), ".cache", "rightsize");
+  const override = process.env["RIGHTSIZE_CACHE_DIR"];
+  if (override !== undefined) {
+    return override;
+  }
+  if (process.platform === "win32") {
+    const localAppData = process.env["LOCALAPPDATA"] ?? path.join(os.homedir(), "AppData", "Local");
+    return path.join(localAppData, "rightsize");
+  }
+  return path.join(os.homedir(), ".cache", "rightsize");
+}
+
+/**
+ * "Is this a usable, already-provisioned msb binary": on macOS/Linux this
+ * means POSIX-executable (the release asset ships without the exec bit set,
+ * so a bare `existsSync` would pass on a half-downloaded or permission-wrong
+ * file); Windows has no execute-bit concept, so an existing regular `.exe`
+ * file is the whole check there — `fs.constants.X_OK` on Windows is
+ * documented to reduce to an existence check anyway, but an explicit branch
+ * keeps the intent visible rather than relying on that platform quirk.
+ */
+function isExecutableFile(p: string): boolean {
+  if (process.platform === "win32") {
+    try {
+      return fs.statSync(p).isFile();
+    } catch {
+      return false;
+    }
+  }
+  try {
+    fs.accessSync(p, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isInstalled(msbPath: string, krunPath: string): boolean {
-  try {
-    fs.accessSync(msbPath, fs.constants.X_OK);
-  } catch {
+  if (!isExecutableFile(msbPath)) {
     return false;
   }
   return fs.existsSync(krunPath);
@@ -184,6 +223,15 @@ async function withInstallLock<T>(lockPath: string, fn: () => Promise<T>): Promi
   }
 }
 
+/**
+ * `mode` is a POSIX permission-bits concept; Windows has no execute bit and
+ * `fs.writeFile`'s `mode` option is a documented no-op there for anything
+ * beyond the read-only attribute, which this provisioner never needs to set.
+ * The caller's `executable` flag therefore only matters on macOS/Linux —
+ * passing it through unconditionally is harmless on Windows (Node ignores
+ * it), but the chmod-shaped intent is Windows-irrelevant, so it is spelled
+ * out here rather than left implicit.
+ */
 async function downloadVerified(
   baseUrl: string,
   asset: string,
@@ -207,7 +255,8 @@ async function downloadVerified(
           `— delete ${destDir} and retry, or set MSB_PATH to a trusted msb binary`,
       );
     }
-    await fsp.writeFile(tmp, buf, { mode: executable ? 0o755 : 0o644 });
+    const mode = process.platform === "win32" ? undefined : executable ? 0o755 : 0o644;
+    await fsp.writeFile(tmp, buf, mode !== undefined ? { mode } : undefined);
     ok = true;
     return tmp;
   } finally {
@@ -257,9 +306,10 @@ export async function ensureInstalledAt(
 ): Promise<string> {
   const override = env["MSB_PATH"];
   if (override !== undefined) {
-    try {
-      fs.accessSync(override, fs.constants.X_OK);
-    } catch {
+    // Windows has no execute-bit concept: "is a real file that exists" is
+    // the whole validity check there (see isExecutableFile's doc comment);
+    // macOS/Linux keep requiring the POSIX execute bit.
+    if (!isExecutableFile(override)) {
       throw new ProvisionError(`MSB_PATH='${override}' is not an executable file`);
     }
     return override;
@@ -274,7 +324,7 @@ export async function ensureInstalledAt(
   }
 
   const installDir = path.join(cacheDir, "msb", MSB_VERSION);
-  const msbPath = path.join(installDir, "bin", "msb");
+  const msbPath = path.join(installDir, "bin", PlatformInfo.msbBinaryName(platform));
   // Installed under the canonical name msb resolves (`../lib/` next to its binary),
   // not the release-asset name it is downloaded as — msb never probes the asset name.
   const krunPath = path.join(installDir, "lib", PlatformInfo.krunInstallName(platform));
@@ -309,4 +359,23 @@ export function ensureInstalled(): Promise<string> {
 /** Test-only access to the pure checksum-line parser, exercised against real-shape and malformed input. */
 export function _parseChecksumsForTests(text: string): Map<string, string> {
   return parseChecksums(text);
+}
+
+/**
+ * Test-only seam: `downloadAndInstall` parameterized over an injected
+ * `Platform` value, rather than the real `PlatformInfo.current()`. This is
+ * how the `.exe`/`.dll` install shape (Windows asset names, `bin\msb.exe`,
+ * unversioned `lib\libkrunfw.dll`) is exercised against the real
+ * download-verify-rename pipeline from a non-Windows CI/dev machine — the
+ * public `ensureInstalledAt` always resolves the platform from the real
+ * process, so it can only ever prove the CURRENT host's shape without this.
+ */
+export async function _downloadAndInstallForTests(
+  baseUrl: string,
+  platform: Platform,
+  installDir: string,
+  msbPath: string,
+  krunPath: string,
+): Promise<void> {
+  return downloadAndInstall(baseUrl, platform, installDir, msbPath, krunPath);
 }

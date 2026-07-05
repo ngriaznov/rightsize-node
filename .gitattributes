@@ -1,0 +1,8 @@
+# Force LF line endings for text sources and fixtures regardless of the
+# checking-out platform's core.autocrlf setting. Without this, a Windows
+# checkout (Git's default core.autocrlf=true there) converts LF to CRLF on
+# checkout for anything it detects as text — confirmed to break
+# src/core/rightsize-fixture.txt's exact-content round-trip assertion in
+# mountable-file.test.ts on the msb-windows CI job (fixture read back as
+# "...fixture\r\n" instead of the committed "...fixture\n").
+* text=auto eol=lf

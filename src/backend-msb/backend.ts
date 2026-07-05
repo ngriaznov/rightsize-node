@@ -192,6 +192,16 @@ export class MsbCliBackend implements SandboxBackend {
     // the fact — without this check, stop() would attach a listener for an
     // event that will never come and wait out the full timeout before
     // falling back to SIGKILL.
+    //
+    // `attached.kill("SIGKILL")` below is the escalation path, not the
+    // graceful one — the graceful stop is the `msb stop` invocation above,
+    // which already ran and quiesced the sandbox before this ever fires. On
+    // Windows, `ChildProcess.kill()` ignores the signal name entirely and
+    // always calls `TerminateProcess` (Windows has no real signal delivery
+    // at the Node level), so this escalation is already a hard terminate
+    // there regardless of which signal string is passed; nothing about the
+    // ordering above needs to change because the graceful step was already
+    // the `msb stop` call, not a signal to this child.
     if (attached !== undefined && state !== undefined && !state.attachedExited) {
       const exitedInTime = await new Promise<boolean>((resolveWait) => {
         const timer = setTimeout(() => resolveWait(false), ATTACHED_PROC_STOP_TIMEOUT_MS);

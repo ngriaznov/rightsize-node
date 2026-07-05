@@ -29,9 +29,10 @@ doing:
     `bun test`.
 - Integration tests (real containers, gated behind `RIGHTSIZE_IT=1`):
   - `RIGHTSIZE_BACKEND=microsandbox npm run test:node:it` — needs Apple
-    Silicon or Linux+KVM.
+    Silicon, Linux+KVM, or Windows with Windows Hypervisor Platform enabled.
   - `RIGHTSIZE_BACKEND=docker npm run test:node:it` — needs a reachable
-    Docker daemon.
+    Docker daemon (on Windows, one reachable over a unix socket — see
+    [Backends](../docs/guide/backends.md)).
   - Swap `test:node:it` for `test:bun:it` to run the same integration suite
     under Bun.
 - `npm run coverage:core` — core coverage with an 80% line floor.
@@ -61,3 +62,22 @@ doing:
 > runners are themselves VMs without nested virtualization, so microVMs cannot
 > boot there (Hypervisor.framework rejects VM creation). macOS support is
 > verified on real Apple Silicon hardware before release.
+
+> **Windows in CI:** there IS a `msb-windows` job, unlike `msb-macos` above —
+> a CI spike (2026-07-05) found Windows Hypervisor Platform already enabled
+> on hosted `windows-2022`/`windows-2025` runners, with `msb doctor`,
+> boot-to-Running, ENTRYPOINT execution, port publishing, and exec-stdin all
+> passing. One Windows-specific fact from that spike: the attached `msb run`
+> process's own stdout does not carry the workload's output on Windows (it
+> does on macOS/Linux) — the backend already sources all workload logs from
+> the separate `msb logs` channel for this reason, on every platform.
+>
+> Two further msb-Windows `logs`/`logs -f` gaps found landing this job,
+> confirmed against the real msb 0.6.3 Windows binary and gated out of the
+> contract suite there (`test/it/contract.test.ts`) rather than asserted
+> false: a trailing line lacking its own newline is never delivered on
+> either channel, and `msb logs -f` does not relay a slow trickle of lines
+> (one written every 300ms) at all — the stream stalls after the first line
+> rather than merely arriving late. Both are msb-Windows-specific; the same
+> workloads round-trip normally on macOS/Linux and on Windows against a
+> workload that writes its output essentially all at once.
