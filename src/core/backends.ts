@@ -16,6 +16,16 @@ export function _resetRegistryForTests(): void {
   registered.length = 0;
 }
 
+/**
+ * Test seam: snapshot of the currently registered providers, so an impure
+ * suite that wipes the registry can put the real ones back when it finishes —
+ * under a single-process test runner, whatever it leaves behind is what every
+ * later-loaded test file sees.
+ */
+export function _providersSnapshotForTests(): BackendProvider[] {
+  return [...registered];
+}
+
 function knownNames(providers: readonly BackendProvider[]): string {
   return providers.map((p) => p.name).join(", ");
 }

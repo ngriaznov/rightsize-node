@@ -1,6 +1,6 @@
-import { describe, it, assert, beforeEach } from "../../test/harness.js";
+import { describe, it, assert, beforeEach, after } from "../../test/harness.js";
 import type { BackendProvider, SandboxBackend, SandboxHandle, NetworkLink } from "./backend.js";
-import { registerBackend, resolve, Backends, _resetRegistryForTests } from "./backends.js";
+import { registerBackend, resolve, Backends, _resetRegistryForTests, _providersSnapshotForTests } from "./backends.js";
 
 // A sentinel thrown from create() proves resolution reached this exact
 // provider without needing a real backend implementation.
@@ -133,10 +133,30 @@ describe("resolve (pure function)", () => {
 });
 
 describe("registerBackend + Backends.active (impure, real registry)", () => {
+  // Hermetic despite the impurity: everything this suite mutates is global to
+  // the process, and single-process runners load every test file into one
+  // process — restore the real providers, the memoized backend, and the env
+  // var on the way out or later-loaded suites inherit the fakes.
+  const savedProviders = _providersSnapshotForTests();
+  const savedBackendEnv = process.env["RIGHTSIZE_BACKEND"];
+
   beforeEach(() => {
     _resetRegistryForTests();
     Backends._resetActiveForTests();
     delete process.env["RIGHTSIZE_BACKEND"];
+  });
+
+  after(() => {
+    _resetRegistryForTests();
+    for (const p of savedProviders) {
+      registerBackend(p);
+    }
+    Backends._resetActiveForTests();
+    if (savedBackendEnv === undefined) {
+      delete process.env["RIGHTSIZE_BACKEND"];
+    } else {
+      process.env["RIGHTSIZE_BACKEND"] = savedBackendEnv;
+    }
   });
 
   it("registerBackend makes a provider visible to Backends.active()", () => {
