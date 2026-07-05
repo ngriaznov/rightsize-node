@@ -15,6 +15,17 @@ const KRUN_ASSETS: Record<Platform, string> = {
   "linux-arm64": "libkrunfw-linux-aarch64.so",
 };
 
+// The exact filename msb resolves the library under: it probes `../lib/` next to its
+// own binary for `libkrunfw.so.<version>` on Linux and `libkrunfw.<abi>.dylib` on
+// macOS — never the release-asset name — so the provisioner installs the downloaded
+// asset under this name. The embedded libkrunfw version/ABI is part of the pinned msb
+// release; re-verify both names when bumping the pin.
+const KRUN_INSTALL_NAMES: Record<Platform, string> = {
+  "darwin-arm64": "libkrunfw.5.dylib",
+  "linux-x64": "libkrunfw.so.5.5.0",
+  "linux-arm64": "libkrunfw.so.5.5.0",
+};
+
 function currentPlatform(processPlatform: string, processArch: string): Platform | undefined {
   if (processPlatform === "darwin" && processArch === "arm64") {
     return "darwin-arm64";
@@ -63,9 +74,13 @@ export const PlatformInfo = {
   msbAsset(p: Platform): string {
     return MSB_ASSETS[p];
   },
-  /** The libkrunfw release asset filename for this platform. */
+  /** The libkrunfw release asset filename for this platform — what it is downloaded as. */
   krunAsset(p: Platform): string {
     return KRUN_ASSETS[p];
+  },
+  /** The filename the library must be installed under for msb to resolve it. */
+  krunInstallName(p: Platform): string {
+    return KRUN_INSTALL_NAMES[p];
   },
   /** Whether this machine can actually run msb's microVMs right now (KVM access on Linux; always true once the platform itself resolves on macOS). */
   virtualizationAvailable(): boolean {

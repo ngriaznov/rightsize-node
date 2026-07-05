@@ -275,7 +275,9 @@ export async function ensureInstalledAt(
 
   const installDir = path.join(cacheDir, "msb", MSB_VERSION);
   const msbPath = path.join(installDir, "bin", "msb");
-  const krunPath = path.join(installDir, "lib", PlatformInfo.krunAsset(platform));
+  // Installed under the canonical name msb resolves (`../lib/` next to its binary),
+  // not the release-asset name it is downloaded as — msb never probes the asset name.
+  const krunPath = path.join(installDir, "lib", PlatformInfo.krunInstallName(platform));
 
   if (isInstalled(msbPath, krunPath)) {
     return msbPath;

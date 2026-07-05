@@ -11,6 +11,9 @@ import { PlatformInfo } from "./platform.js";
 const platform = PlatformInfo.current();
 const msbAsset = platform !== undefined ? PlatformInfo.msbAsset(platform) : "msb-darwin-aarch64";
 const krunAsset = platform !== undefined ? PlatformInfo.krunAsset(platform) : "libkrunfw-darwin-aarch64.dylib";
+// Downloads are served under the asset name; the provisioner installs under the
+// canonical name msb resolves.
+const krunInstallName = platform !== undefined ? PlatformInfo.krunInstallName(platform) : "libkrunfw.5.dylib";
 
 const MSB_BYTES = Buffer.from("#!/bin/sh\necho fake-msb\n");
 const KRUN_BYTES = Buffer.from("fake-krun-shared-object");
@@ -119,7 +122,7 @@ describe("MsbProvisioner", () => {
     assert.ok(resolved.endsWith(path.join("bin", "msb")));
     const installed = await fs.readFile(resolved);
     assert.deepEqual(installed, MSB_BYTES);
-    const krunPath = path.join(cacheDir, "msb", MSB_VERSION, "lib", krunAsset);
+    const krunPath = path.join(cacheDir, "msb", MSB_VERSION, "lib", krunInstallName);
     const krunInstalled = await fs.readFile(krunPath);
     assert.deepEqual(krunInstalled, KRUN_BYTES);
   });
@@ -163,7 +166,7 @@ describe("MsbProvisioner", () => {
     await fs.writeFile(path.join(installDir, "bin", "msb"), MSB_BYTES, { mode: 0o755 });
     // krun deliberately absent: isInstalled() must say no, and the repair path fills it in.
     const resolved = await ensureInstalledAt(fixture.baseUrl, cacheDir, {});
-    const krunPath = path.join(installDir, "lib", krunAsset);
+    const krunPath = path.join(installDir, "lib", krunInstallName);
     assert.ok(fsSync.existsSync(krunPath));
     assert.equal(resolved, path.join(installDir, "bin", "msb"));
   });
