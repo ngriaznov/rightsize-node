@@ -69,9 +69,11 @@ function drainTail(stream: NodeJS.ReadableStream, tail: string[]): Promise<void>
  * held child process (`msb run`, no `-d`) because detached mode never
  * executes the image's own ENTRYPOINT/CMD — only attached mode does.
  * Readiness is never inferred from that child's own output; it comes from
- * polling `msb ls --format json` until the name shows `"Running"`, because
- * the attached process's stdout IS the workload's own log stream, which has
- * no reliable "I am ready" signal this backend can generically parse.
+ * polling `msb ls --format json` until the name shows `"Running"`. The
+ * attached child's stdout/stderr carries msb's own boot diagnostics and is
+ * kept only for pre-Running failure messages — it is not a dependable
+ * workload-log source (on Windows it does not relay guest stdout at all);
+ * workload logs are always fetched through the `msb logs` channel.
  *
  * `create()` on the `BackendProvider` interface is synchronous, but locating
  * (and possibly downloading) the pinned `msb` binary is inherently async.
@@ -123,9 +125,12 @@ export class MsbCliBackend implements SandboxBackend {
 
     const child = spawn(msbPath, MsbCommands.run(handle.spec), { stdio: [CLOSED_STDIN, "pipe", "pipe"] });
     state.attached = child;
-    // Merge stdout+stderr into one tail — this process's output IS the
-    // workload's own log stream and diagnostics don't need the two
-    // separated.
+    // Merge stdout+stderr into one tail, kept only for the boot diagnostics
+    // below: this pipe is the sole carrier of msb's own output (registry/pull
+    // errors, crash output printed before the sandbox exists). It is not a
+    // dependable workload-log source — on Windows the attached process does
+    // not relay guest stdout at all — so logs() never reads it; workload
+    // output always comes from a `msb logs` invocation.
     const stdoutDone = drainTail(child.stdout, state.logTail);
     const stderrDone = drainTail(child.stderr, state.logTail);
 
@@ -221,6 +226,17 @@ export class MsbCliBackend implements SandboxBackend {
     return invoke(msbPath, MsbCommands.exec(handle.id, cmd), EXEC_TIMEOUT_MS);
   }
 
+  /**
+   * A fresh `msb logs <name> --tail 1000` invocation, same on every platform.
+   * This is the workload's own output, as distinct from the attached
+   * `msb run` child's pipe (drained in start() into a tail kept only for
+   * pre-Running crash diagnostics): on Windows the attached process does not
+   * relay guest stdout at all, while `msb logs` does everywhere, so this is
+   * the only channel this method can source from. Never rejects on a
+   * missing/removed sandbox — invoke() only rejects on spawn failure or
+   * timeout, never on exit code, so a failing `msb logs` call resolves with
+   * whatever (possibly empty) stdout it produced.
+   */
   async logs(handle: SandboxHandle): Promise<string> {
     const msbPath = await this.msbPath();
     return (await invoke(msbPath, MsbCommands.logs(handle.id), LOGS_TIMEOUT_MS)).stdout;
