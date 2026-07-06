@@ -29,7 +29,10 @@ export class ClickHouseContainer extends GenericContainer {
       .withEnv("CLICKHOUSE_USER", this.usernameState)
       .withEnv("CLICKHOUSE_PASSWORD", this.passwordState)
       .withEnv("CLICKHOUSE_DB", this.databaseState)
-      .waitingFor(Wait.forHttp("/ping").forPort(HTTP_PORT));
+      // 180s: the entrypoint's user/database provisioning runs a second
+      // server pass before the HTTP interface opens; a loaded Windows CI
+      // runner was observed still in early config processing at 120s.
+      .waitingFor(Wait.forHttp("/ping").forPort(HTTP_PORT).withStartupTimeout(180_000));
     // No withMemoryLimit override: measured ~524MB resident at rest well
     // under msb's default ~450MB-and-up microVM sizing headroom in
     // practice (verified booting and answering /ping on msb's default).
