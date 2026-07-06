@@ -10,6 +10,7 @@ import { runningNames } from "./ls-json.js";
 import { invoke, CLOSED_STDIN } from "./invoke.js";
 import { isPortBindConflictOutput } from "./port-conflict.js";
 import { isImageCacheCorruption } from "./image-cache.js";
+import { isMsbMigrationRace } from "./state-db.js";
 import { orphanNames } from "./reaper.js";
 import { undeliveredLines } from "./follow-replay.js";
 import { requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript } from "./network-links.js";
@@ -29,7 +30,7 @@ const TAIL_LINES = 50;
 const TERMINAL_FETCH_FAILURE_BUDGET_MS = 10_000;
 
 /**
- * The one boot failure `start()` heals and retries — carries the `msb run`
+ * The boot failure `start()` heals and retries — carries the `msb run`
  * child's combined output for the second-failure diagnostic. Internal to the
  * boot path: never escapes `start()`, which converts a repeat failure into a
  * `BackendError` naming the heal.
@@ -39,6 +40,25 @@ class ImageCacheCorruptionError extends Error {
     super(`msb image cache corruption:\n${output}`);
   }
 }
+
+/**
+ * The other boot failure `start()` retries — the spawned `msb run` child lost
+ * msb's startup-migration race (see `isMsbMigrationRace`). No heal step: the
+ * race is transient by construction, so a plainly retried boot finds the
+ * schema already migrated. Internal to the boot path, like its sibling above.
+ */
+class MigrationRaceError extends Error {
+  constructor(readonly output: string) {
+    super(`msb startup-migration race:\n${output}`);
+  }
+}
+
+/**
+ * How long to wait before retrying a boot that lost the migration race —
+ * enough for the winning invocation's migration transaction to commit; the
+ * retry's own `msb run` startup dwarfs this either way.
+ */
+const MIGRATION_RACE_RETRY_DELAY_MS = 500;
 
 /**
  * Fetches one msb invocation's stdout byte-exact (CRLF normalized to LF, but
@@ -209,8 +229,11 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
-   * Boots via `bootOnce`; on a first failure carrying msb's image-cache-
-   * corruption signature (see `isImageCacheCorruption`), heals by removing
+   * Boots via `bootOnce`, retrying two classified transient failures once
+   * each. A boot that lost msb's startup-migration race (see
+   * `isMsbMigrationRace`) is retried after a short delay with no heal step —
+   * the race is transient by construction. On a first failure carrying msb's
+   * image-cache-corruption signature (see `isImageCacheCorruption`), heals by removing
    * just the affected image's cache entry (`msb image remove <image>`, result
    * ignored — including "image not found", since the real signal is whether
    * the retried boot succeeds, not whether removal reported success) and
@@ -246,6 +269,27 @@ export class MsbCliBackend implements SandboxBackend {
       await this.bootOnce(msbPath, handle, state);
       return;
     } catch (first) {
+      if (first instanceof MigrationRaceError) {
+        // Transient by construction (see isMsbMigrationRace): the winning msb
+        // invocation's migration commits and a retried boot finds the schema
+        // in place. No heal step, one retry, second loss propagates — the
+        // same one-shot policy as the image-cache heal below.
+        await sleep(MIGRATION_RACE_RETRY_DELAY_MS);
+        try {
+          await this.bootOnce(msbPath, handle, state);
+          return;
+        } catch (second) {
+          if (!(second instanceof MigrationRaceError)) {
+            throw second;
+          }
+          throw new BackendError(
+            `msb run for sandbox ${handle.id} lost msb's startup-migration race twice in a row — ` +
+              `expected at most a transient one-off from concurrent msb invocations; something is ` +
+              `hammering msb's state database on this host.\nfirst attempt:\n${first.output}\n` +
+              `after retry:\n${second.output}`,
+          );
+        }
+      }
       if (!(first instanceof ImageCacheCorruptionError)) {
         throw first;
       }
@@ -314,6 +358,9 @@ export class MsbCliBackend implements SandboxBackend {
         const output = state.logTail.join("\n");
         if (isImageCacheCorruption(output)) {
           throw new ImageCacheCorruptionError(output);
+        }
+        if (isMsbMigrationRace(output)) {
+          throw new MigrationRaceError(output);
         }
         if (isPortBindConflictOutput(output)) {
           throw new PortBindConflictError(

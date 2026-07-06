@@ -5,6 +5,20 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The microsandbox backend retries a boot that lost msb's startup-migration
+  race. Every msb invocation runs schema migrations against its shared SQLite
+  state database on startup, and two concurrent invocations can race them —
+  the loser exits with `database error: ... index ... already exists` (or the
+  `UNIQUE constraint failed: seaql_migrations.version` shape) before doing any
+  work. A boot is never inherently alone (the attached `msb run` races the
+  backend's own state polling), so the failure can fire even under fully
+  serialized tests. It is transient by construction — the winner's migration
+  commits and later invocations find the schema in place — so a boot failing
+  with that signature is retried exactly once after a short delay; a second
+  loss propagates with both attempts' output.
+
 ## [0.1.0] - 2026-07-06
 
 Initial public release.

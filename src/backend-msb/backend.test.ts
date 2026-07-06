@@ -240,4 +240,53 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.deepEqual(after.imageRemoves, ["fake:latest"], "the heal must have run exactly once, not per failure");
     await backend.remove(handle);
   });
+
+  it("start retries once when msb run loses the startup-migration race, with no heal step", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRunsWithMigrationRace = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const spec = baseSpec("rz-testrun1-race");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const after = JSON.parse(await fs.readFile(statePath, "utf8"));
+    assert.deepEqual(
+      after.imageRemoves ?? [],
+      [],
+      "a migration-race retry must not touch the image cache — that heal belongs to the corruption path",
+    );
+    const logs = await backend.logs(handle);
+    assert.match(logs, /ready/);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("start surfaces an actionable error when the migration race repeats after the retry", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRunsWithMigrationRace = 2;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const spec = baseSpec("rz-testrun1-race-twice");
+    const handle = await backend.create(spec);
+    let thrown: Error | undefined;
+    try {
+      await backend.start(handle);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    if (thrown === undefined) {
+      throw new Error("start must reject after two migration-race losses");
+    }
+    assert.match(thrown.message, /migration race twice in a row/);
+    assert.match(thrown.message, /already exists/, "the error must carry msb's own output");
+    await backend.remove(handle);
+  });
 });
