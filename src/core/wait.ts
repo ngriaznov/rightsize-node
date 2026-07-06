@@ -24,7 +24,7 @@ export interface WaitStrategy {
   withStartupTimeout(ms: number): WaitStrategy;
 }
 
-const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = 120_000;
 const POLL_INTERVAL_MS = 250;
 const LOG_TAIL_LINES = 50;
 const READ_PROBE_TIMEOUT_MS = 200;
@@ -64,7 +64,7 @@ async function timeoutError(target: WaitTarget): Promise<ContainerLaunchError> {
  * passes.
  */
 abstract class AbstractWaitStrategy implements WaitStrategy {
-  /** The current startup deadline in milliseconds; defaults to 60s, overridden by `withStartupTimeout`. */
+  /** The current startup deadline in milliseconds; defaults to 120s, overridden by `withStartupTimeout`. */
   protected timeoutMs = DEFAULT_TIMEOUT_MS;
 
   withStartupTimeout(ms: number): this {
