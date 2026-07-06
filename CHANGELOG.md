@@ -5,8 +5,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-06
+
 ### Fixed
 
+- `ClickHouseContainer` readiness now carries a 180-second startup budget:
+  the entrypoint runs a second server pass for user/database provisioning
+  before the HTTP interface opens, and a loaded Windows CI runner was
+  observed still in early config processing at the previous 60-second
+  default. The budget is a deadline, not a wait — readiness returns the
+  moment `/ping` answers.
 - The microsandbox backend retries a boot that lost msb's startup-migration
   race. Every msb invocation runs schema migrations against its shared SQLite
   state database on startup, and two concurrent invocations can race them —
