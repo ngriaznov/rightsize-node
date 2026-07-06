@@ -40,8 +40,8 @@ the same way a `try`/`finally` would, with none of the boilerplate.
 | Docker client | a general-purpose SDK over a shared HTTP stack | **hand-rolled, unix-socket-only — can't be misrouted onto TCP** |
 
 The lifecycle and Docker-client rows above aren't incidental implementation
-choices — see [Lifecycle](https://github.com/ngriaznov/rightsize-node/blob/main/docs/guide/lifecycle.md)
-and [Backends](https://github.com/ngriaznov/rightsize-node/blob/main/docs/guide/backends.md)
+choices — see [Lifecycle](https://ngriaznov.github.io/rightsize-node/guide/lifecycle)
+and [Backends](https://ngriaznov.github.io/rightsize-node/guide/backends)
 for why each one is the way it is. (If you've used Testcontainers, the
 builder shape — `withEnv`, `withExposedPorts`, `waitingFor`, `getMappedPort`
 — will feel familiar; the lifecycle is where this library departs from it
@@ -77,7 +77,7 @@ await using arango = await new GenericContainer("arangodb:3.11")
 const port = arango.getMappedPort(8529); // published on 127.0.0.1
 ```
 
-Full guide: [Quickstart](https://github.com/ngriaznov/rightsize-node/blob/main/docs/guide/quickstart.md).
+Full guide: [Quickstart](https://ngriaznov.github.io/rightsize-node/guide/quickstart).
 
 ## Modules
 
@@ -110,13 +110,13 @@ Some modules raise a memory floor for their image (`withMemoryLimit`):
 heavyweight JVM images — Spring Cloud Config, Keycloak, Neo4j, Flink
 (1024 MB) — and Pinot's multi-JVM QuickStart cluster (4096 MB) — need more
 than the microVM default. That's baked into the module; you don't set it.
-Every module's page under [`docs/modules/`](https://github.com/ngriaznov/rightsize-node/tree/main/docs/modules)
+Every module's page under [`docs/modules/`](https://ngriaznov.github.io/rightsize-node/modules/)
 documents its exact image tag, wait strategy, and the measured reasoning
 behind these choices.
 
 ¹ `withTaskManager()` throws `UnsupportedByBackendError` on microsandbox (the
 Flink image carries no `nc`/busybox for network-link emulation — see
-[Networking](https://github.com/ngriaznov/rightsize-node/blob/main/docs/guide/networking.md));
+[Networking](https://ngriaznov.github.io/rightsize-node/guide/networking));
 a bare JobManager still runs on microsandbox. Run TaskManager topologies
 under `RIGHTSIZE_BACKEND=docker`.
 
@@ -145,7 +145,7 @@ backend-specific rather than behavioral divergences:
 
 - **Network-alias tunnels on microsandbox have real limits** versus Docker's
   native bridge networking — see
-  [Networking](https://github.com/ngriaznov/rightsize-node/blob/main/docs/guide/networking.md).
+  [Networking](https://ngriaznov.github.io/rightsize-node/guide/networking).
 - **Read-only file mounts aren't enforced in-guest on microsandbox 0.6.3.**
   `withCopyFileToContainer`'s read-only flag is honored by Docker; on
   microsandbox the guest currently gets a writable mount regardless. Don't
@@ -180,7 +180,7 @@ backend-specific rather than behavioral divergences:
   the shared contract suite is the referee, with the Docker backend doubling
   as the correctness oracle for the microVM backend.
 
-Full detail: [How It Works](https://github.com/ngriaznov/rightsize-node/blob/main/docs/guide/how-it-works.md).
+Full detail: [How It Works](https://ngriaznov.github.io/rightsize-node/guide/how-it-works).
 
 ## Configuration
 
@@ -228,6 +228,12 @@ RIGHTSIZE_BACKEND=microsandbox npm run example:redis
 is set, so `npm run example:test` is safe to run on a machine with no
 container runtime — pass the flag to actually exercise it:
 `RIGHTSIZE_IT=1 npm run example:test`.
+
+## Documentation
+
+Full documentation (guide, backends, module reference) is at
+**[ngriaznov.github.io/rightsize-node](https://ngriaznov.github.io/rightsize-node/)**,
+built from [`docs/`](docs) by VitePress.
 
 ## Development
 

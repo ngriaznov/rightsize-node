@@ -3,6 +3,9 @@ import { defineConfig } from "vitepress";
 export default defineConfig({
   title: "rightsize",
   description: "Testcontainers-style integration testing on microsandbox microVMs. No Docker required.",
+  // Served as a GitHub Pages project site, so every asset and link lives under
+  // the repository-name path segment.
+  base: "/rightsize-node/",
   cleanUrls: true,
   themeConfig: {
     nav: [

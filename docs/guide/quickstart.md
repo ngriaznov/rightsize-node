@@ -2,7 +2,11 @@
 
 ## Install
 
-Not yet on npm — see the [README](https://github.com/ngriaznov/rightsize-node#status) for the git-dependency form. Once installed:
+```sh
+npm install --save-dev rightsize
+```
+
+Then:
 
 ```ts
 import { RedisContainer } from "rightsize/modules";

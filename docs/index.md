@@ -40,8 +40,11 @@ version and [Lifecycle](/guide/lifecycle) for how disposal actually works.
 
 ## Status
 
-Early — not yet published to npm. Depend on it as a git dependency until a
-tagged release exists; see the [README](https://github.com/ngriaznov/rightsize-node#status) for the exact form.
+On npm as [`rightsize`](https://www.npmjs.com/package/rightsize):
+
+```sh
+npm install --save-dev rightsize
+```
 
 ## License
 
