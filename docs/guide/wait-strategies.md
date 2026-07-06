@@ -13,7 +13,7 @@ await using c = await new GenericContainer("nginx:alpine")
 ```
 
 Every strategy shares the same shape: poll repeatedly (250ms apart) until
-ready or a deadline passes (default 60s, override with
+ready or a deadline passes (default 120s, override with
 `.withStartupTimeout(ms)`), probing at least once even if the deadline has
 already technically passed by the time polling starts — a 1ms timeout still
 gets its one shot. Timing out throws `ContainerLaunchError` with a
