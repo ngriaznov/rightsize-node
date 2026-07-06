@@ -50,12 +50,12 @@ if (cmd === "run") {
     );
     process.exit(1);
   }
-  // Reproduces the real msb binary's startup-migration race loss on demand
-  // (error shape captured verbatim from msb 0.6.3 on Windows), so tests can
-  // drive the backend's classify-retry path without real concurrent msb
-  // invocations.
-  if ((state.failRunsWithMigrationRace ?? 0) > 0) {
-    state.failRunsWithMigrationRace -= 1;
+  // Reproduces the real msb binary's state-database failure on demand (error
+  // shape captured verbatim from msb 0.6.3 on Windows — the startup-migration
+  // race), so tests can drive the backend's classify-retry path without real
+  // concurrent msb invocations.
+  if ((state.failRunsWithStateDbError ?? 0) > 0) {
+    state.failRunsWithStateDbError -= 1;
     writeState(state);
     process.stderr.write(
       "error: database error: Execution Error: error returned from database: " +
