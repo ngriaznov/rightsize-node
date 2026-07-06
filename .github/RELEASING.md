@@ -4,14 +4,19 @@ Releases go to [npm](https://www.npmjs.com/) as the unscoped package
 `rightsize`. npm has no namespace verification — the first publish claims the
 name permanently.
 
+Publishing runs only from CI — the `release` workflow
+(`.github/workflows/release.yml`, manual trigger). No local `npm login` is part
+of the flow.
+
 ## One-time setup
 
 1. Create/log in to the npm account and verify its email address.
-2. Enable two-factor authentication on the account **before** the first publish
-   (Account Settings → Two-Factor Authentication). With 2FA in "auth and
-   writes" mode, every publish prompts for an OTP — that prompt is the only
-   confirmation step in the whole flow.
-3. `npm login` on the publishing machine.
+2. Enable two-factor authentication on the account (Account Settings →
+   Two-Factor Authentication).
+3. Create a granular access token with publish permission for this package and
+   store it as the `NPM_TOKEN` Actions secret in this repository. The token
+   bypasses the 2FA OTP prompt — the deliberate click that replaces it is
+   running the workflow.
 
 ## Per release
 
@@ -28,15 +33,12 @@ name permanently.
 
    The tarball must contain only `dist/`, `LICENSE`, `NOTICE`, `README.md`, and
    `package.json` — no `dist-test`, no fixtures, no sources.
-5. Publish:
-
-   ```sh
-   npm publish
-   ```
-
+5. Push `main`, then publish from CI: Actions → `release` → Run workflow.
    `prepublishOnly` rebuilds `dist/` and runs typecheck + the node unit suite
-   first, so a stale or broken build cannot ship. Unscoped packages default to
-   public — no `--access` flag needed.
+   inside the workflow, so a stale or broken build cannot ship, and
+   `--provenance` attaches a signed attestation linking the tarball to the
+   repository and run. Unscoped packages default to public — no `--access`
+   flag needed.
 6. Tag and push:
 
    ```sh
