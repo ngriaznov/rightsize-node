@@ -49,15 +49,9 @@ most.)
 
 ## Quickstart
 
-> **Status: early, not yet on npm.** Depend on it as a git dependency until a
-> tagged release exists:
->
-> ```jsonc
-> // package.json
-> "devDependencies": {
->   "rightsize": "git+https://github.com/ngriaznov/rightsize-node.git"
-> }
-> ```
+```sh
+npm install --save-dev rightsize
+```
 
 Importing a backend subpath registers it as a side effect — import whichever
 one(s) you want considered, and `rightsize` picks the best supported one
