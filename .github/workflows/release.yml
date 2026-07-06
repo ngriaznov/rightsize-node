@@ -24,6 +24,10 @@ jobs:
           cache: npm
           registry-url: "https://registry.npmjs.org"
       - run: npm ci
-      - run: npm publish --provenance
+      # --access public is required alongside --provenance for a package that
+      # does not exist on the registry yet: npm refuses to infer visibility for
+      # the attestation of a first publish (unscoped packages are public either
+      # way, so the flag is explicitness, not a behavior change).
+      - run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
