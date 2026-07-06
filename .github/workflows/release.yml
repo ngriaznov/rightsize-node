@@ -1,0 +1,29 @@
+# Publishes the package to npm. Manual trigger only. There is no staging step:
+# `npm publish` is immediately live (npm's unpublish window is 72 hours, after
+# which versions are permanent). The `prepublishOnly` script rebuilds dist and
+# runs typecheck + the node unit suite first, so a stale or broken build cannot
+# ship. `--provenance` attaches a signed attestation linking the published
+# tarball to this repository and workflow run. See .github/RELEASING.md.
+name: release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm provenance attestation (OIDC)
+
+jobs:
+  publish-to-npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      - run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
