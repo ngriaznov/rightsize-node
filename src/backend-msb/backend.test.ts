@@ -184,4 +184,60 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.ok(delivered.includes("ready"));
     await backend.remove(handle);
   });
+
+  it("start self-heals a first boot that fails with msb's image-cache corruption signature", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Seed the fake to fail exactly one `run` with the captured cache-error
+    // shape; the backend must classify it, remove the affected image's cache
+    // entry, retry once, and reach Running — all without surfacing an error.
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRunsWithCacheError = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const spec = baseSpec("rz-testrun1-heal");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const after = JSON.parse(await fs.readFile(statePath, "utf8"));
+    assert.deepEqual(
+      after.imageRemoves,
+      ["fake:latest"],
+      "the heal must have removed exactly the affected image's cache entry, once",
+    );
+    const logs = await backend.logs(handle);
+    assert.match(logs, /ready/);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("start surfaces an actionable error when the cache corruption repeats after the heal", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRunsWithCacheError = 2;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const spec = baseSpec("rz-testrun1-heal-twice");
+    const handle = await backend.create(spec);
+    let thrown: Error | undefined;
+    try {
+      await backend.start(handle);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    if (thrown === undefined) {
+      throw new Error("start must reject after two identical cache failures");
+    }
+    assert.match(thrown.message, /twice in a row/);
+    assert.match(thrown.message, /fake:latest/, "the error must name the affected image");
+    assert.match(thrown.message, /image cache/, "the error must name the attempted heal");
+
+    const after = JSON.parse(await fs.readFile(statePath, "utf8"));
+    assert.deepEqual(after.imageRemoves, ["fake:latest"], "the heal must have run exactly once, not per failure");
+    await backend.remove(handle);
+  });
 });

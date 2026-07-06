@@ -20,11 +20,15 @@ project has not yet made a tagged release.
   Verified in CI (`msb-windows` job, `windows-2025`): Windows Hypervisor
   Platform was found enabled by default on hosted runners, so the job runs
   the real msb integration suite rather than a Docker-only fallback. Two
-  msb-Windows-specific `logs`/`logs -f` gaps were found and are gated out of
-  the shared contract suite there (documented in `.github/CONTRIBUTING.md`):
-  a trailing line lacking its own newline is never delivered, and
-  `msb logs -f` stalls after the first line when a workload writes its
-  output as a slow trickle rather than all at once.
+  msb-Windows-specific `logs`/`logs -f` gaps were found (documented in
+  `.github/CONTRIBUTING.md`): a trailing line lacking its own newline is
+  never delivered while the sandbox runs, and `msb logs -f` stalls after
+  the first line when a workload writes its output as a slow trickle
+  rather than all at once. `followOutput` on Windows therefore polls fresh
+  `msb logs` snapshots instead of holding a `logs -f` pipe (a failed msb
+  invocation reads as no-signal, and the terminal tail is delivered
+  exactly once after the sandbox stops, including a final line with no
+  trailing newline), so the full contract suite runs un-gated there.
 - `itDockerIntegration`, a new gate in `test/harness.ts` alongside
   `itIntegration`/`itMsbIntegration`: skips `test/it/docker-backend.test.ts`
   cleanly when no Docker-compatible daemon socket is reachable at all
@@ -38,6 +42,15 @@ project has not yet made a tagged release.
 
 ### Fixed
 
+- The microsandbox backend self-heals msb's image-cache race: concurrent
+  pulls of images sharing base layers can corrupt msb's image cache — the
+  losing pull reads a layer tarball the winner's cleanup already deleted,
+  and every later boot of that image fails with `cache error at
+  .../layers/<sha>.tar.gz: No such file or directory`. A boot failing with
+  that signature now removes the affected image from msb's cache
+  (`msb image remove`, scoped to the one reference) and retries the boot
+  exactly once; any other failure, or a second failure after the heal,
+  propagates unchanged.
 - `MountableFile`'s test suite resolved its own fixture directory via
   `new URL(import.meta.url).pathname`, which mangles a Windows drive-letter
   path; switched to `fileURLToPath`, matching the rest of the codebase's

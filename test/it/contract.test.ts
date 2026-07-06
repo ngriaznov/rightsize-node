@@ -207,25 +207,12 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
   );
 
   itIntegration("followOutput streams lines in order and close halts delivery", async () => {
-    // Confirmed against the real msb 0.6.3 Windows binary, reproduced twice
-    // in CI: `msb logs -f` does not relay a slow trickle of lines (this
-    // test's workload writes one line every 300ms) at all on Windows —
-    // widening the wait budget from 15s to 60s still only delivered
-    // "line-1" and then nothing further for the rest of the 60s window, so
-    // this is a genuine delivery stall, not merely added latency a longer
-    // wait would paper over. The same followOutput() plumbing round-trips
-    // normally (under ~7s) for this file's other real-workload follow tests
-    // (the genuinely-empty-interior-line case just below, and the
-    // disposal-unreachability case), which write their handful of lines
-    // essentially all at once rather than trickled over 1.5s — so the
-    // defect is specific to a slow/trickled writer, not followOutput or
-    // `msb logs -f` in general. Skipped on Windows against microsandbox
-    // rather than asserted false; tracked as a Windows-only msb defect
-    // separate from the already-documented "attached stdout isn't a log
-    // source" and "unterminated final line isn't delivered" gaps.
-    if (process.platform === "win32" && BACKEND_NAME === "microsandbox") {
-      return;
-    }
+    // This case previously skipped on Windows against microsandbox: the old
+    // `msb logs -f` pipe-based follow never relayed a slow trickle of lines
+    // there (confirmed against the real binary — a 60s window still delivered
+    // only "line-1"). followOutput on Windows no longer touches that channel:
+    // it polls non-follow `msb logs` snapshots, which carry trickled lines
+    // the whole time, so this case now runs everywhere.
     await using c = await new GenericContainer("alpine:3.19")
       .withBackend(makeBackend())
       .withCommand("sh", "-c", "for i in 1 2 3 4 5; do echo line-$i; sleep 0.3; done; sleep 60")
@@ -263,18 +250,14 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
   itIntegration(
     "followOutput delivers a final unterminated line after the workload exits, exactly once",
     async () => {
-      // Confirmed against the real msb 0.6.3 Windows binary: neither the
-      // attached stdout channel nor `msb logs` delivers a trailing line that
-      // lacks its own newline — a gap beyond the "attached stdout isn't a
-      // log source on Windows" fact (that one is about WHICH channel to
-      // read; this one is that the channel itself drops an unterminated
-      // tail). The watchdog's final-line replay contract cannot hold there,
-      // so this case is skipped on Windows against microsandbox rather than
-      // asserted false; on Windows against docker it never runs at all
-      // (the docker backend is unix-socket-only and does not apply there).
-      if (process.platform === "win32" && BACKEND_NAME === "microsandbox") {
-        return;
-      }
+      // This case previously skipped on Windows against microsandbox: the
+      // old `msb logs -f` pipe-based follow never observed a trailing
+      // unterminated line there on either the live stream or the watchdog's
+      // replay fetch. followOutput on Windows no longer touches that channel:
+      // it polls non-follow `msb logs` snapshots, whose terminal fetch after
+      // the sandbox stops does surface a trailing unterminated line, so this
+      // case now runs everywhere.
+      //
       // A brief sleep BEFORE the two lines gives msb's readiness poll (every
       // 300ms against `msb ls`) a window to observe the sandbox as "Running"
       // before the workload exits — msb's start() throws if the attached

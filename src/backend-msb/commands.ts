@@ -61,4 +61,16 @@ export const MsbCommands = {
     // No `--json` flag exists on `ls` — that spelling belongs to `logs`.
     return ["ls", "--format", "json"];
   },
+
+  /**
+   * `msb image remove <reference>` deletes one cached image's entry (manifest
+   * + layer bookkeeping) so the next run/pull re-fetches it from scratch.
+   * Scoped to the single image reference; never touches sandbox state or any
+   * other cached image, including ones sharing layers with it (confirmed
+   * empirically: removing one image and re-pulling it left a sibling's
+   * already-materialized shared base layer untouched and bootable).
+   */
+  imageRemove(reference: string): string[] {
+    return ["image", "remove", reference];
+  },
 };

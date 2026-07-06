@@ -72,12 +72,15 @@ doing:
 > does on macOS/Linux) — the backend already sources all workload logs from
 > the separate `msb logs` channel for this reason, on every platform.
 >
-> Two further msb-Windows `logs`/`logs -f` gaps found landing this job,
-> confirmed against the real msb 0.6.3 Windows binary and gated out of the
-> contract suite there (`test/it/contract.test.ts`) rather than asserted
-> false: a trailing line lacking its own newline is never delivered on
-> either channel, and `msb logs -f` does not relay a slow trickle of lines
+> Two further msb-Windows `logs`/`logs -f` gaps were found landing this job,
+> confirmed against the real msb 0.6.3 Windows binary: a trailing line
+> lacking its own newline is never delivered on either channel while the
+> sandbox runs, and `msb logs -f` does not relay a slow trickle of lines
 > (one written every 300ms) at all — the stream stalls after the first line
 > rather than merely arriving late. Both are msb-Windows-specific; the same
-> workloads round-trip normally on macOS/Linux and on Windows against a
-> workload that writes its output essentially all at once.
+> workloads round-trip normally on macOS/Linux. The backend compensates on
+> Windows: `followOutput` polls fresh `msb logs` snapshots instead of
+> holding a `logs -f` pipe, and delivers the terminal tail exactly once
+> after the sandbox stops — including a final line with no trailing
+> newline — so the full contract suite, those two cases included, runs
+> un-gated on Windows.

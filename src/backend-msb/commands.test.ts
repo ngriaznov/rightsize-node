@@ -123,4 +123,12 @@ describe("MsbCommands", () => {
   it("ls: --format json, never --json", () => {
     assert.deepEqual(MsbCommands.ls(), ["ls", "--format", "json"]);
   });
+
+  it("image remove targets one reference", () => {
+    assert.deepEqual(MsbCommands.imageRemove("floci/floci-az:0.8.0"), [
+      "image",
+      "remove",
+      "floci/floci-az:0.8.0",
+    ]);
+  });
 });

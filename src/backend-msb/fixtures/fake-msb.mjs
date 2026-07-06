@@ -36,6 +36,20 @@ if (cmd === "run") {
   const nameIdx = args.indexOf("--name");
   const name = args[nameIdx + 1];
   const state = readState();
+  // Reproduces the real msb binary's image-cache corruption failure on
+  // demand: while the counter is positive, a `run` decrements it and exits
+  // with the exact error shape a corrupted cache produces (captured verbatim
+  // from msb 0.6.3, digest shortened), so tests can drive the backend's
+  // classify-heal-retry path without a real cache race.
+  if ((state.failRunsWithCacheError ?? 0) > 0) {
+    state.failRunsWithCacheError -= 1;
+    writeState(state);
+    process.stderr.write(
+    "error: image error: cache error at /tmp/fake-msb/cache/layers/sha256_deadbeef.tar.gz: " +
+      "No such file or directory (os error 2)\n",
+    );
+    process.exit(1);
+  }
   state.sandboxes[name] = { status: "Running", logs: [`booting ${name}`, "ready"] };
   writeState(state);
   process.stdout.write(`booting ${name}\nready\n`);
@@ -88,6 +102,15 @@ if (cmd === "run") {
     process.exit(0);
   }
   process.stdout.write(`exec-ok:${rest.join(" ")}\n`);
+  process.exit(0);
+} else if (cmd === "image" && args[1] === "remove") {
+  // Records the removal so tests can assert the heal targeted exactly the
+  // affected image reference; always succeeds, like the real command does
+  // for a present image.
+  const ref = args[2];
+  const state = readState();
+  state.imageRemoves = [...(state.imageRemoves ?? []), ref];
+  writeState(state);
   process.exit(0);
 } else if (cmd === "logs") {
   const name = args[1];
