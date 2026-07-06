@@ -56,11 +56,17 @@ export class MySQLContainer extends GenericContainer {
       // Anchored on the real server's line (see the class doc for the
       // captured log excerpt and why an unanchored "port: 3306" or a naive
       // times=2 both misfire on the temp-server boot).
-      .waitingFor(Wait.forLogMessage(".*mysqld: ready for connections.*port: 3306($|[^0-9]).*", 1));
-    // No withMemoryLimit override: boots clean on msb's default ~450M
-    // microVM RAM well under 60s — unlike SpringCloudConfig's Paketo JVM
-    // image, MySQL 8.4's InnoDB default footprint fits the default, so no
-    // module-level memory floor is warranted here.
+      // First boot initializes the datafiles and boots mysqld twice (the
+      // temp server for init scripts, then the real one). On a fast host
+      // that finishes well under 60s, but a loaded Windows CI runner's
+      // first boot overruns the 60s default — 120s absorbs the slow case
+      // without masking a real hang.
+      .waitingFor(
+        Wait.forLogMessage(".*mysqld: ready for connections.*port: 3306($|[^0-9]).*", 1).withStartupTimeout(120_000),
+      );
+    // No withMemoryLimit override: unlike SpringCloudConfig's Paketo JVM
+    // image, MySQL 8.4's InnoDB default footprint fits msb's default ~450M
+    // microVM RAM, so no module-level memory floor is warranted here.
   }
 
   static override async start(image = "mysql:8.4"): Promise<MySQLContainer> {

@@ -51,6 +51,11 @@ project has not yet made a tagged release.
   (`msb image remove`, scoped to the one reference) and retries the boot
   exactly once; any other failure, or a second failure after the heal,
   propagates unchanged.
+- `MySQLContainer` readiness now carries a 120-second startup budget:
+  MySQL's first boot initializes the datafiles and boots mysqld twice (a
+  temp server for init scripts, then the real one), and while that finishes
+  well under the 60-second default on a fast host, a loaded Windows CI
+  runner overruns it.
 - `MountableFile`'s test suite resolved its own fixture directory via
   `new URL(import.meta.url).pathname`, which mangles a Windows drive-letter
   path; switched to `fileURLToPath`, matching the rest of the codebase's
