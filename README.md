@@ -146,14 +146,14 @@ backend-specific rather than behavioral divergences:
 - **Network-alias tunnels on microsandbox have real limits** versus Docker's
   native bridge networking — see
   [Networking](https://ngriaznov.github.io/rightsize-node/guide/networking).
-- **Read-only file mounts aren't enforced in-guest on microsandbox 0.6.3.**
+- **Read-only file mounts aren't enforced in-guest on microsandbox 0.6.6.**
   `withCopyFileToContainer`'s read-only flag is honored by Docker; on
   microsandbox the guest currently gets a writable mount regardless. Don't
   rely on guest-side write protection under `RIGHTSIZE_BACKEND=microsandbox`.
 - **`followOutput` delivers the same ordered, no-duplicate log stream on
   both backends**, but on microsandbox the final tail can arrive shortly
   after the sandbox reports stopped, rather than exactly at stream EOF
-  (`msb logs -f` doesn't close on sandbox stop in 0.6.3, so the backend
+  (`msb logs -f` doesn't close on sandbox stop in 0.6.6, so the backend
   replays the not-yet-delivered tail once stop is confirmed).
 
 ## How it works

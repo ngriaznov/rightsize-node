@@ -10,7 +10,7 @@ import type { ContainerSpec } from "../../src/core/model.js";
 import type { SandboxHandle } from "../../src/core/backend.js";
 
 /**
- * Live gates against the real `msb 0.6.3` binary at `~/.cache/rightsize`
+ * Live gates against the real `msb 0.6.6` binary at `~/.cache/rightsize`
  * (`RIGHTSIZE_IT=1`). Every sandbox this file creates carries the
  * `rz-<RunId.value>-*` naming convention the reaper filters on, and every
  * test cleans up its own sandbox before returning so `msb ls` is empty both
@@ -54,7 +54,7 @@ async function withSandbox<T>(
   }
 }
 
-describe("MsbCliBackend integration (real msb 0.6.3 binary)", () => {
+describe("MsbCliBackend integration (real msb 0.6.6 binary)", () => {
   itIntegration("attached-mode boot reaches Running; exec and logs work against it", async () => {
     const backend = new MsbCliBackend(ensureInstalled());
     const spec = baseSpec({ env: [["FOO", "bar"]] });

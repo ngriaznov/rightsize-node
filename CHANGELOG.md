@@ -5,6 +5,18 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-09
+
+### Changed
+
+- The pinned microsandbox runtime is 0.6.6 (was 0.6.3). The provisioner
+  downloads and SHA-256-verifies the new release on first use; existing
+  `0.6.3` caches are left in place and simply stop being used. The behaviors
+  the msb backend compensates for were re-verified as still present on 0.6.6:
+  detached `msb run` never starts the image ENTRYPOINT, `msb logs -f` never
+  exits after its sandbox stops, and read-only mounts remain advisory
+  in-guest.
+
 ## [0.1.1] - 2026-07-06
 
 ### Fixed

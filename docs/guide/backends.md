@@ -62,7 +62,7 @@ on Windows.
 ## `backend-msb` deep-dive
 
 **Provisioning.** On first use, if no runtime is cached (and `MSB_PATH` isn't
-set), rightsize downloads a pinned `msb` release (currently `0.6.3`) plus its
+set), rightsize downloads a pinned `msb` release (currently `0.6.6`) plus its
 `libkrunfw` companion library from GitHub releases, matched to your
 OS/architecture. Every asset is SHA-256-verified against the release's
 `checksums.sha256` before anything trusts it. Installation is atomic and
@@ -108,7 +108,7 @@ The two backends are contract-equivalent — the same shared test suite passes
 against both — but a handful of edges are genuinely backend-specific rather
 than incidental timing quirks:
 
-- **Read-only mounts aren't enforced in-guest on microsandbox 0.6.3.**
+- **Read-only mounts aren't enforced in-guest on microsandbox 0.6.6.**
   `withCopyFileToContainer`'s read-only flag is honored by the Docker
   backend — the bind mount is genuinely read-only inside the container. On
   microsandbox, the guest currently gets a writable mount regardless. Don't

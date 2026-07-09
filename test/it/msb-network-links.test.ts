@@ -7,7 +7,7 @@ import { ensureInstalled } from "../../src/backend-msb/provisioner.js";
 
 /**
  * End-to-end reachability of the exec-tunnel network-link emulation
- * (`installNetworkLinks`, `ExecTunnel`) against the real `msb 0.6.3` binary —
+ * (`installNetworkLinks`, `ExecTunnel`) against the real `msb 0.6.6` binary —
  * the one thing `msb-backend.test.ts`'s reject-fast cases can't prove, since
  * those never get past validation into an actual byte-pumped connection.
  *
@@ -16,7 +16,7 @@ import { ensureInstalled } from "../../src/backend-msb/provisioner.js";
  * "FETCH-OK" once the fetch through the tunnel actually succeeds.
  */
 
-describe("msb exec-tunnel network-link reachability (real msb 0.6.3 binary)", () => {
+describe("msb exec-tunnel network-link reachability (real msb 0.6.6 binary)", () => {
   itIntegration("a consumer sandbox reaches a sibling by alias over the exec-tunnel", async () => {
     await using network = Network.newNetwork();
 
