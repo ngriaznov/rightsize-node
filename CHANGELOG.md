@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-07-12
+
 ### Added
 
 - Orphan reaping: an on-disk ledger under the rightsize cache dir tracks
