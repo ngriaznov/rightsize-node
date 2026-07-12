@@ -82,9 +82,11 @@ backstops exist under that:
    Node's `"exit"` handler can't `await`, so each backend tears its live
    containers down with a blocking primitive instead (`child_process.spawnSync`
    for msb, a blocking unix-socket call for Docker).
-2. **An orphan reaper at backend startup.** Each new process sweeps up
-   containers left behind by a run that died via `SIGKILL` (which bypasses
-   even the exit handler), identified by everything NOT carrying this
-   process's own run id.
+2. **Orphan reaping**, for the one case that skips even the exit handler:
+   `SIGKILL`. An init-time sweep (always on, unless `RIGHTSIZE_REAPER=off`)
+   cleans up containers left behind by a run that died this way, judged by
+   an on-disk ledger rather than by name — and an optional watchdog process
+   reaps within seconds of the crash instead of waiting for the next sweep.
 
-See [How It Works](/guide/how-it-works) for the full mechanics of both.
+See [Orphan reaping](/guide/reaping) for the full mechanics of both, and
+[How It Works](/guide/how-it-works) for the rest of the exit-path story.

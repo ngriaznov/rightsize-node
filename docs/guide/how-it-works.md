@@ -33,26 +33,26 @@ rejection, a hard kill), so two backstops sit under that path:
    --unix-socket`) for Docker. `SIGINT`/`SIGTERM` handlers run the same
    synchronous cleanup, then re-raise the signal so the process still exits
    the way it would have without the handler.
-2. **An orphan reaper at backend construction.** `SIGKILL` bypasses even the
-   exit handler — nothing runs at all. Each backend therefore sweeps, on its
-   own startup, for containers left behind by a *previous* run that died
-   this way: every sandbox/container whose name or label does not match this
-   process's own run id gets stopped and removed. A run's own live containers
-   are never touched (matched by prefix), so this is safe to run
-   unconditionally on every backend construction, not just after a crash.
+2. **Orphan reaping.** `SIGKILL` bypasses even the exit handler — nothing
+   runs at all. An on-disk ledger (never name/label parsing) tracks every
+   sandbox a process has live at any moment; an init-time sweep judges every
+   OTHER run's ledger entry by pid+start-time liveness and reaps whatever's
+   dead, and an optional per-run watchdog process reaps within seconds of
+   the crash instead of waiting for the next sweep. Full mechanics:
+   [Orphan reaping](/guide/reaping).
 
 ## `RunId`: one value per process, shared across both backends
 
 Every container this process creates is named `rz-<runId>-<seq>`, where
 `runId` is one 8-character value computed once at process start and exported
 from the library's core — imported by *both* backend modules, never
-recomputed independently by either. This sharing is a correctness
-requirement, not a style choice: the microsandbox reaper and the Docker
-label-based cleanup both filter against this same value to distinguish "this
-run's own live containers" from "leftovers of a crashed prior run." If a
-backend computed its own run id instead, the two values would differ, and
-the reaper would either delete this run's own containers (mistaking them for
-someone else's orphan) or fail to notice a genuinely stale one.
+recomputed independently by either. Both backends' own `close()` (this
+run's own normal-exit cleanup, not the crash-recovery reaper above) filters
+against this same value: Docker by the `dev.rightsize.runId` label, msb by
+the set of names this backend instance itself started. If a backend
+computed its own run id instead, the two values would differ and `close()`
+could either miss this run's own containers or, in principle, reach for
+another run's.
 
 ## The msb backend: attached-mode supervision
 

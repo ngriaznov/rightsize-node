@@ -1,9 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
-import { RunId } from "../core/run-id.js";
 import { BackendError, PortBindConflictError, UnsupportedByBackendError } from "../core/errors.js";
-import type { SandboxBackend, SandboxHandle, FollowHandle, NetworkLink } from "../core/backend.js";
+import type { SandboxBackend, SandboxHandle, FollowHandle, NetworkLink, ReaperKillCommand, BackendCapabilities } from "../core/backend.js";
 import type { ContainerSpec, ExecResult } from "../core/model.js";
 import { MsbCommands } from "./commands.js";
 import { runningNames } from "./ls-json.js";
@@ -11,7 +10,6 @@ import { invoke, CLOSED_STDIN } from "./invoke.js";
 import { isPortBindConflictOutput } from "./port-conflict.js";
 import { isImageCacheCorruption } from "./image-cache.js";
 import { isMsbStateDbError } from "./state-db.js";
-import { orphanNames } from "./reaper.js";
 import { undeliveredLines } from "./follow-replay.js";
 import { requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript } from "./network-links.js";
 import { ExecTunnel } from "./exec-tunnel.js";
@@ -198,6 +196,13 @@ export class MsbCliBackend implements SandboxBackend {
   /** `"microsandbox"` — matched against `RIGHTSIZE_BACKEND` and used in `dev.rightsize.runId`-style diagnostics. */
   readonly name = "microsandbox";
   readonly supportsNativeNetworks = false;
+  /** Each sandbox is its own microVM with its own kernel; no upstream microVM snapshot support yet. */
+  readonly capabilities: BackendCapabilities = {
+    /** Each sandbox is a microVM with its own kernel. */
+    hardwareIsolated: true,
+    /** No upstream microVM snapshot/restore support yet. */
+    checkpoint: false,
+  };
 
   private readonly handles = new Map<string, HandleState>();
   private readonly startedNames = new Set<string>();
@@ -320,8 +325,8 @@ export class MsbCliBackend implements SandboxBackend {
 
   /**
    * One boot attempt: spawns the attached `msb run` child and polls until the
-   * sandbox reaches Running. `state.attached` and `startedNames` are
-   * populated only on success; on any failure the child is reaped here (for
+   * sandbox reaches Running. `state.attached` and (for non-keepAlive specs)
+   * `startedNames` are populated only on success; on any failure the child is reaped here (for
    * the classified early-exit failures it has already exited; a readiness
    * timeout leaves it alive and it is hard-killed) so a failed attempt leaves
    * no live process or registered cleanup state behind — the caller owns
@@ -376,7 +381,12 @@ export class MsbCliBackend implements SandboxBackend {
       }
       if ((await this.runningSandboxNames(msbPath)).has(handle.id)) {
         state.attached = child;
-        this.startedNames.add(handle.id);
+        // keepAlive (reuse) sandboxes must survive this process's own exit —
+        // see close() below — so they are never added to the own-run
+        // cleanup set in the first place (addendum item 6).
+        if (!handle.spec.keepAlive) {
+          this.startedNames.add(handle.id);
+        }
         return;
       }
       if (Date.now() >= deadline) {
@@ -445,6 +455,22 @@ export class MsbCliBackend implements SandboxBackend {
     await invoke(msbPath, MsbCommands.rm(handle.id), STOP_TIMEOUT_MS).catch(() => {});
     this.startedNames.delete(handle.id);
     this.handles.delete(handle.id);
+  }
+
+  /**
+   * Defensive only: `GenericContainer.checkpoint()` gates on
+   * `capabilities.checkpoint` (`false` here) before ever calling this, so
+   * this throw is unreachable in normal use — it exists so a caller that
+   * somehow invokes the backend directly still gets a typed rejection
+   * instead of a silent no-op or a confusing CLI error.
+   */
+  async commitToImage(_handle: SandboxHandle, _imageRef: string): Promise<void> {
+    throw new UnsupportedByBackendError(
+      "checkpoint/restore",
+      this.name,
+      "set RIGHTSIZE_BACKEND=docker — checkpoint/restore is implemented via image commit there; native microVM " +
+        "snapshots for microsandbox are on the roadmap",
+    );
   }
 
   private async runningSandboxNames(msbPath: string): Promise<Set<string>> {
@@ -745,13 +771,16 @@ export class MsbCliBackend implements SandboxBackend {
     }
   }
 
+  // This process's own-run cleanup sweep. `startedNames` never contains a
+  // keepAlive sandbox's name (bootOnce skips adding it), so this loop leaves
+  // reuse sandboxes running by construction — no keepAlive check needed here.
   async close(): Promise<void> {
     const msbPath = await this.msbPath().catch(() => undefined);
     if (msbPath === undefined) {
       return;
     }
     for (const name of [...this.startedNames]) {
-      await this.silently(msbPath, name);
+      await this.removeByName(name);
     }
   }
 
@@ -784,17 +813,50 @@ export class MsbCliBackend implements SandboxBackend {
     }
   }
 
-  /** Remove leftover `rz-<other-runid>-*` sandboxes from a crashed prior run — never this run's own. */
-  async sweepOrphans(): Promise<void> {
+  /**
+   * Best-effort stop+remove of a sandbox identified by NAME — the shape the
+   * reaping ledger and sweep need, since they only ever store names (a
+   * sweep running in a different process, or a different rightsize
+   * language entirely, never held a handle here). "Not found" is silently
+   * fine. Each step is retried once if it hits msb's own state-database
+   * error (see `isMsbStateDbError`) — the same startup-migration race the
+   * boot path retries, which a sweep can just as easily race against a
+   * concurrent `msb` invocation from another process.
+   */
+  async removeByName(name: string): Promise<void> {
     const msbPath = await this.msbPath();
-    const result = await invoke(msbPath, MsbCommands.ls(), LOGS_TIMEOUT_MS);
-    for (const name of orphanNames(result.stdout, RunId.value)) {
-      await this.silently(msbPath, name);
+    await this.invokeRemoveStepWithRetry(msbPath, MsbCommands.stop(name));
+    await this.invokeRemoveStepWithRetry(msbPath, MsbCommands.rm(name));
+  }
+
+  private async invokeRemoveStepWithRetry(msbPath: string, args: readonly string[]): Promise<void> {
+    const result = await invoke(msbPath, args, STOP_TIMEOUT_MS).catch(() => undefined);
+    const output = result === undefined ? "" : `${result.stdout}\n${result.stderr}`;
+    if (isMsbStateDbError(output)) {
+      await sleep(STATE_DB_RETRY_DELAY_MS);
+      await invoke(msbPath, args, STOP_TIMEOUT_MS).catch(() => {});
     }
   }
 
-  private async silently(msbPath: string, name: string): Promise<void> {
-    await invoke(msbPath, MsbCommands.stop(name), STOP_TIMEOUT_MS).catch(() => {});
-    await invoke(msbPath, MsbCommands.rm(name), STOP_TIMEOUT_MS).catch(() => {});
+  /**
+   * Reuse's adopt-path liveness check: `spec.name` is running iff it shows
+   * up in `msb ls`'s `"Running"` set, the same source `bootOnce`'s own
+   * readiness poll uses. This never touches `this.handles` — a name found
+   * running here was very possibly created by an earlier process this
+   * backend instance never itself called `create()` for.
+   */
+  async findRunning(spec: ContainerSpec): Promise<SandboxHandle | undefined> {
+    const msbPath = await this.msbPath();
+    const running = await this.runningSandboxNames(msbPath);
+    if (!running.has(spec.name)) {
+      return undefined;
+    }
+    return { id: spec.name, spec };
+  }
+
+  /** The reaper watchdog's kill-command prefixes: the provisioned `msb` binary plus the same `stop`/`rm` subcommands `removeByName` itself invokes. msb has no native network object, so `removeNetwork` is empty. */
+  async reaperKillCommand(): Promise<ReaperKillCommand> {
+    const msbPath = await this.msbPath();
+    return { stop: [msbPath, "stop"], remove: [msbPath, "rm"], removeNetwork: [] };
   }
 }

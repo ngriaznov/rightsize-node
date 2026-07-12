@@ -62,3 +62,66 @@ export class ProvisionError extends Error {
     this.name = "ProvisionError";
   }
 }
+
+/**
+ * Thrown at `start()` when a container is both marked `withReuse()` and
+ * joined to a `Network` via `withNetwork()` — reuse's identity hash covers
+ * only the container's own spec, never cross-container network topology, so
+ * an adopted sandbox from an earlier process could never be correctly
+ * re-linked to today's siblings. Thrown only once reuse is actually double
+ * opt-in active (API marker AND `RIGHTSIZE_REUSE`); an API-marked-but-env-
+ * disabled container never reaches this check; the whole start() attempt is
+ * still aborted before any port allocation, ledger tracking, or backend call.
+ */
+export class ReuseWithNetworkError extends Error {
+  constructor() {
+    super(
+      "withReuse() cannot be combined with withNetwork() — reuse's identity hash does not cover network " +
+        "topology, so an adopted sandbox could not be correctly re-linked to today's siblings. Drop either " +
+        "withReuse() or withNetwork() on this container.",
+    );
+    this.name = "ReuseWithNetworkError";
+  }
+}
+
+/**
+ * Thrown at `start()` when a container is marked `withRequireIsolation()`
+ * but the active backend's `capabilities.hardwareIsolated` is `false` — the
+ * docker fallback shares the host kernel and cannot provide the
+ * hardware-virtualized isolation the caller demanded. Thrown before any
+ * create/network work: no sandbox is created.
+ */
+export class IsolationRequiredError extends Error {
+  constructor(
+    /** The active backend's name (e.g. `"docker"`). */
+    readonly backend: string,
+  ) {
+    super(
+      `withRequireIsolation() demands hardware-virtualized isolation, but the active backend ('${backend}') ` +
+        "does not provide it — set RIGHTSIZE_BACKEND=microsandbox to use the microsandbox backend, or drop " +
+        "withRequireIsolation() to accept the docker fallback's shared-kernel isolation.",
+    );
+    this.name = "IsolationRequiredError";
+  }
+}
+
+/**
+ * Thrown by `checkpoint()` when the active backend's
+ * `capabilities.checkpoint` is `false` — microsandbox has no upstream
+ * microVM snapshot support today. Thrown before any backend call: the
+ * generic layer gates on the capability itself rather than letting the
+ * backend's own `commitToImage` reject.
+ */
+export class CheckpointUnsupportedError extends Error {
+  constructor(
+    /** The active backend's name (e.g. `"microsandbox"`). */
+    readonly backend: string,
+  ) {
+    super(
+      `checkpoint() is not supported by the '${backend}' backend — checkpoint/restore is implemented via image ` +
+        "commit on the docker backend today; native microVM memory snapshots for microsandbox are on the " +
+        "roadmap. Set RIGHTSIZE_BACKEND=docker to use checkpoint/restore.",
+    );
+    this.name = "CheckpointUnsupportedError";
+  }
+}

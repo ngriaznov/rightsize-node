@@ -2,15 +2,29 @@ import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { randomBytes } from "node:crypto";
 import { describe, itIntegration, assert } from "../harness.js";
 import { GenericContainer } from "../../src/core/generic-container.js";
 import { Wait } from "../../src/core/wait.js";
 import { MountableFile } from "../../src/core/mountable-file.js";
 import type { SandboxBackend } from "../../src/core/backend.js";
+import { IsolationRequiredError, CheckpointUnsupportedError } from "../../src/core/errors.js";
+import { diagnostics } from "../../src/core/diagnostics.js";
 import { MsbCliBackend } from "../../src/backend-msb/backend.js";
 import { ensureInstalled } from "../../src/backend-msb/provisioner.js";
 import { DockerBackend } from "../../src/backend-docker/backend.js";
 import { DockerClient } from "../../src/backend-docker/client.js";
+// Side-effect imports: registers both providers with the core registry so
+// the sweep test below can drive a real `Backends.reaperReady()` bring-up
+// for whichever backend this file is currently parameterized on.
+import "../../src/backend-msb/index.js";
+import "../../src/backend-docker/index.js";
+import { Backends } from "../../src/core/backends.js";
+import { cacheDir } from "../../src/core/cache-dir.js";
+import { deleteRunRecordFiles, writeRunRecord, appendSandboxName } from "../../src/core/reaper/ledger.js";
+import { recordPath, type RunRecord } from "../../src/core/reaper/run-record.js";
+import { reuseHash, reuseName } from "../../src/core/reuse/hash.js";
+import { readRegistry, removeRegistry } from "../../src/core/reuse/registry.js";
 
 /**
  * The behavioral contract every backend must honor, executed against BOTH
@@ -308,4 +322,432 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
       assert.equal(stillReachable, false, "expected the port to be unreachable after await-using disposal");
     },
   );
+
+  // The reaping ledger and sweep only ever address a sandbox by NAME —
+  // never a SandboxHandle — because a sweep runs in a different process
+  // (possibly a different rightsize language implementation entirely) that
+  // never held one. Both backends must honor that contract identically:
+  // exercised directly against `create`/`start`/`removeByName` here, below
+  // `GenericContainer`, the same way the per-backend IT suites do.
+  itIntegration("removeByName stops and removes a sandbox created directly through this backend, identified only by its name", async () => {
+    const backend = makeBackend();
+    const name = `rz-contract-it-removebyname-${Date.now()}`;
+    const spec: import("../../src/core/model.js").ContainerSpec = {
+      name,
+      image: "alpine:3.19",
+      env: [],
+      command: ["sleep", "60"],
+      ports: [],
+      mounts: [],
+      networkId: undefined,
+      aliases: [],
+      runId: "contractit",
+      memoryLimitMb: undefined,
+      keepAlive: false,
+    };
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    await backend.removeByName(name);
+
+    // No handle-based lookup exists to assert "gone" generically across
+    // both backends here — exec-against-the-dead-handle is the one probe
+    // both implementations can answer, but they don't necessarily answer it
+    // the same way (docker's HTTP call rejects on a 404; msb's `invoke()`
+    // never rejects on a nonzero exit code, only on spawn failure or
+    // timeout — see invoke.ts). Either "it threw" or "it resolved with a
+    // failing exit code" proves the sandbox is actually gone; a clean
+    // exitCode 0 would not.
+    let exitCode: number | undefined;
+    try {
+      exitCode = (await backend.exec(handle, ["true"])).exitCode;
+    } catch {
+      exitCode = undefined; // threw outright — also proof enough
+    }
+    assert.ok(exitCode !== 0, "expected exec against a removed sandbox to fail, not silently succeed");
+  });
+
+  itIntegration(
+    "removeByName: a name that was never created (or already removed) is a silent no-op on both backends",
+    async () => {
+      const backend = makeBackend();
+      await backend.removeByName(`rz-contract-it-never-existed-${Date.now()}`);
+    },
+  );
+
+  // The init-time sweep (core/reaper/sweep.ts) is only ever exercised
+  // end-to-end against the msb backend in test/it/reaper.test.ts — this is
+  // the parallel proof for docker, run from the SAME parameterized suite so
+  // both backends are held to the identical fabricated-dead-run contract.
+  itIntegration(
+    "a dead run's real sandbox, fabricated under a fake run id, is reaped by this process's own init-time sweep",
+    async () => {
+      const scratchBackend = makeBackend();
+      const fakeRunId = `deadit${Date.now().toString(16).slice(-10)}`;
+      const name = `rz-${fakeRunId}-1`;
+      const spec: import("../../src/core/model.js").ContainerSpec = {
+        name,
+        image: "alpine:3.19",
+        env: [],
+        command: ["sleep", "60"],
+        ports: [],
+        mounts: [],
+        networkId: undefined,
+        aliases: [],
+        runId: fakeRunId,
+        memoryLimitMb: undefined,
+        keepAlive: false,
+      };
+      const handle = await scratchBackend.create(spec);
+      await scratchBackend.start(handle);
+
+      const dir = cacheDir();
+      // A pid essentially guaranteed not to be a live process on any CI
+      // runner, paired with a start time far enough in the past that even a
+      // pid collision would fail the ±2s liveness match.
+      const record: RunRecord =
+        BACKEND_NAME === "docker"
+          ? { pid: 999_999, startedIso: "2000-01-01T00:00:00.000Z", backend: "docker" }
+          : { pid: 999_999, startedIso: "2000-01-01T00:00:00.000Z", backend: "msb", msbPath: await ensureInstalled() };
+      await writeRunRecord(dir, fakeRunId, record);
+      await appendSandboxName(dir, fakeRunId, name);
+
+      // A fresh reaper bring-up in THIS process: real Backends.active() +
+      // Backends.reaperReady() against a genuinely registered provider for
+      // this suite's backend (the "internal reset hook" the feature spec
+      // allows as an alternative to spawning a whole new process).
+      process.env["RIGHTSIZE_BACKEND"] = BACKEND_NAME;
+      Backends._resetActiveForTests();
+      try {
+        await Backends.reaperReady();
+      } finally {
+        delete process.env["RIGHTSIZE_BACKEND"];
+      }
+
+      // No handle-based lookup exists to assert "gone" generically across
+      // both backends — the same exec-against-the-dead-handle probe the
+      // removeByName contract test above uses is the one both
+      // implementations can answer identically.
+      const gone = await waitUntil(async () => {
+        try {
+          const result = await scratchBackend.exec(handle, ["true"]);
+          return result.exitCode !== 0;
+        } catch {
+          return true;
+        }
+      }, 30_000);
+      assert.ok(gone, `expected the init-time sweep to have reaped fabricated dead run '${fakeRunId}'s sandbox within 30s`);
+
+      const ledgerStillThere = fs.existsSync(recordPath(dir, fakeRunId));
+      assert.equal(ledgerStillThere, false, "expected the sweep to have deleted the dead run's ledger files");
+
+      if (!gone) {
+        // Test-failure-path cleanup only: don't leave a real sandbox running
+        // on the CI runner just because this assertion failed.
+        await scratchBackend.removeByName(name).catch(() => {});
+      }
+      await deleteRunRecordFiles(dir, fakeRunId);
+    },
+  );
+
+  // Reuse (02-reuse.md's own "Testing requirements" names this suite
+  // explicitly: gating, hash vector, adopt, stop semantics). The fake-backend
+  // unit suite (generic-container.reuse.test.ts) already covers the full
+  // state machine in isolation; these entries hold both real backends to the
+  // identical observable contract end to end.
+  itIntegration(
+    "reuse hash: the pinned cross-language contract vector matches on this backend's own runtime",
+    async () => {
+      const hash = await reuseHash({
+        image: "redis:7-alpine",
+        env: [["A", "1"], ["B", "2"]],
+        command: undefined,
+        exposedPorts: [6379],
+        memoryLimitMb: undefined,
+        copies: [],
+      });
+      assert.equal(hash, "799aad5a3338ce3d36999c7ff2733d4673c0592d417563f334544693ec1907a5");
+      assert.equal(reuseName(hash), "rz-reuse-799aad5a3338");
+    },
+  );
+
+  itIntegration(
+    "reuse gating: withReuse() alone (RIGHTSIZE_REUSE unset) starts an ordinary, non-reused container",
+    async () => {
+      const savedReuseEnv = process.env["RIGHTSIZE_REUSE"];
+      delete process.env["RIGHTSIZE_REUSE"];
+      const dir = cacheDir();
+      const hash = await reuseHash({
+        image: "alpine:3.19",
+        env: [],
+        command: ["sleep", "60"],
+        exposedPorts: [],
+        memoryLimitMb: undefined,
+        copies: [],
+      });
+      try {
+        const container = new GenericContainer("alpine:3.19")
+          .withBackend(makeBackend())
+          .withReuse()
+          .withCommand("sleep", "60");
+        await container.start();
+        try {
+          assert.equal(container.isRunning, true);
+          // The one observable, backend-agnostic proxy for "took the
+          // ordinary ephemeral path, not the reuse one": no registry entry
+          // gets written — only startReuse()'s adopt-or-create ever writes
+          // reuse/<hash>.json.
+          const registry = await readRegistry(dir, hash);
+          assert.equal(registry.kind, "missing", "expected no reuse registry entry when RIGHTSIZE_REUSE is unset");
+        } finally {
+          await container.stop();
+        }
+      } finally {
+        if (savedReuseEnv === undefined) {
+          delete process.env["RIGHTSIZE_REUSE"];
+        } else {
+          process.env["RIGHTSIZE_REUSE"] = savedReuseEnv;
+        }
+      }
+    },
+  );
+
+  itIntegration(
+    "reuse adopt: a second equivalent GenericContainer adopts the first's sandbox — same name, same mapped port, one create",
+    async () => {
+      const savedReuseEnv = process.env["RIGHTSIZE_REUSE"];
+      process.env["RIGHTSIZE_REUSE"] = "true";
+      const dir = cacheDir();
+      // A unique identity per run: env is part of the reuse hash, so a
+      // random nonce here mints a fresh `rz-reuse-<hash12>` name every time
+      // this test executes — a sandbox left running by an earlier, failed
+      // run of this same test can never collide with this run's own name.
+      const nonce = randomBytes(8).toString("hex");
+      const hash = await reuseHash({
+        image: "python:3.12-alpine",
+        env: [["RZ_TEST_NONCE", nonce]],
+        command: ["python3", "-m", "http.server", "8000"],
+        exposedPorts: [8000],
+        memoryLimitMb: undefined,
+        copies: [],
+      });
+      const name = reuseName(hash);
+
+      let first: GenericContainer | undefined;
+      let second: GenericContainer | undefined;
+      try {
+        first = await new GenericContainer("python:3.12-alpine")
+          .withBackend(makeBackend())
+          .withReuse()
+          .withEnv("RZ_TEST_NONCE", nonce)
+          .withCommand("python3", "-m", "http.server", "8000")
+          .withExposedPorts(8000)
+          .waitingFor(Wait.forHttp("/").forPort(8000).withStartupTimeout(30_000))
+          .start();
+
+        const afterFirst = await readRegistry(dir, hash);
+        assert.equal(afterFirst.kind, "found", "expected the first start() to have written the reuse registry");
+        const firstPort = first.getMappedPort(8000);
+
+        second = await new GenericContainer("python:3.12-alpine")
+          .withBackend(makeBackend())
+          .withReuse()
+          .withEnv("RZ_TEST_NONCE", nonce)
+          .withCommand("python3", "-m", "http.server", "8000")
+          .withExposedPorts(8000)
+          .waitingFor(Wait.forHttp("/").forPort(8000).withStartupTimeout(30_000))
+          .start();
+
+        assert.equal(second.getMappedPort(8000), firstPort, "expected the adopting instance to report the SAME mapped port");
+
+        const afterSecond = await readRegistry(dir, hash);
+        assert.equal(afterSecond.kind, "found");
+        if (afterFirst.kind === "found" && afterSecond.kind === "found") {
+          // Adoption never rewrites the registry — same createdIso proves
+          // the second start() never re-created (and re-registered) it,
+          // i.e. backend create was called exactly once across both starts.
+          assert.equal(afterSecond.entry.createdIso, afterFirst.entry.createdIso);
+          assert.equal(afterSecond.entry.name, name);
+        }
+
+        const stillRunning = await makeBackend().findRunning({
+          name,
+          image: "python:3.12-alpine",
+          env: [["RZ_TEST_NONCE", nonce]],
+          command: ["python3", "-m", "http.server", "8000"],
+          ports: [],
+          mounts: [],
+          networkId: undefined,
+          aliases: [],
+          runId: "contractit",
+          memoryLimitMb: undefined,
+          keepAlive: true,
+        });
+        assert.ok(stillRunning !== undefined, "expected the reuse sandbox to be running under its deterministic name");
+      } finally {
+        // stop() deliberately leaves the sandbox running (that's the
+        // feature) — this test removes it itself so CI never leaks it.
+        await first?.stop();
+        await second?.stop();
+        await makeBackend().removeByName(name).catch(() => {});
+        await removeRegistry(dir, hash);
+        if (savedReuseEnv === undefined) {
+          delete process.env["RIGHTSIZE_REUSE"];
+        } else {
+          process.env["RIGHTSIZE_REUSE"] = savedReuseEnv;
+        }
+      }
+    },
+  );
+
+  // The ledger-append claim ("never appended to .sandboxes") is exercised
+  // against the real Backends.active() ledger wiring in the fake-backend
+  // unit suite (generic-container.reuse.test.ts) — that mechanism is core
+  // logic, not backend-specific, so it isn't re-asserted per-backend here.
+  // This entry holds the part that IS backend-specific to the contract:
+  // the backend-native sandbox is genuinely still running after stop().
+  itIntegration(
+    "reuse stop semantics: stop() leaves the sandbox genuinely running on the backend-native side",
+    async () => {
+      const savedReuseEnv = process.env["RIGHTSIZE_REUSE"];
+      process.env["RIGHTSIZE_REUSE"] = "true";
+      const dir = cacheDir();
+      // A unique identity per run — see the "reuse adopt" test above for
+      // why: a leftover sandbox from an earlier, failed run of this same
+      // test can never collide with this run's own deterministic name.
+      const nonce = randomBytes(8).toString("hex");
+      const hash = await reuseHash({
+        image: "alpine:3.19",
+        env: [["RZ_TEST_NONCE", nonce]],
+        command: ["sleep", "60"],
+        exposedPorts: [],
+        memoryLimitMb: undefined,
+        copies: [],
+      });
+      const name = reuseName(hash);
+
+      let container: GenericContainer | undefined;
+      try {
+        container = await new GenericContainer("alpine:3.19")
+          .withBackend(makeBackend())
+          .withReuse()
+          .withEnv("RZ_TEST_NONCE", nonce)
+          .withCommand("sleep", "60")
+          .waitingFor(Wait.forLogMessage(".*", 0))
+          .start();
+
+        await container.stop();
+        assert.equal(container.isRunning, false, "in-process bookkeeping must clear");
+
+        const stillRunning = await makeBackend().findRunning({
+          name,
+          image: "alpine:3.19",
+          env: [["RZ_TEST_NONCE", nonce]],
+          command: ["sleep", "60"],
+          ports: [],
+          mounts: [],
+          networkId: undefined,
+          aliases: [],
+          runId: "contractit",
+          memoryLimitMb: undefined,
+          keepAlive: true,
+        });
+        assert.ok(stillRunning !== undefined, "expected the backend-native sandbox to still be running after stop()");
+      } finally {
+        await makeBackend().removeByName(name).catch(() => {});
+        await removeRegistry(dir, hash);
+        if (savedReuseEnv === undefined) {
+          delete process.env["RIGHTSIZE_REUSE"];
+        } else {
+          process.env["RIGHTSIZE_REUSE"] = savedReuseEnv;
+        }
+      }
+    },
+  );
+
+  itIntegration(
+    `capabilities: hardwareIsolated is ${BACKEND_NAME === "docker" ? "false" : "true"} for this backend, checkpoint is ${
+      BACKEND_NAME === "docker" ? "true" : "false"
+    }`,
+    async () => {
+      const backend = makeBackend();
+      if (BACKEND_NAME === "docker") {
+        assert.deepEqual(backend.capabilities, { hardwareIsolated: false, checkpoint: true });
+      } else {
+        assert.deepEqual(backend.capabilities, { hardwareIsolated: true, checkpoint: false });
+      }
+    },
+  );
+
+  itIntegration(
+    `requireIsolation: ${BACKEND_NAME === "docker" ? "docker rejects before any create call" : "msb honors it and starts normally"}`,
+    async () => {
+      if (BACKEND_NAME === "docker") {
+        let thrown: unknown;
+        try {
+          await new GenericContainer("alpine:3.19").withBackend(makeBackend()).withRequireIsolation().withCommand("sleep", "60").start();
+        } catch (err) {
+          thrown = err;
+        }
+        assert.ok(thrown instanceof IsolationRequiredError, `expected IsolationRequiredError, got: ${String(thrown)}`);
+      } else {
+        await using c = await new GenericContainer("alpine:3.19")
+          .withBackend(makeBackend())
+          .withRequireIsolation()
+          .withCommand("sleep", "60")
+          .start();
+        assert.equal(c.isRunning, true);
+      }
+    },
+  );
+
+  // The full checkpoint→restore round trip (exec a marker file, checkpoint,
+  // stop the original, restore, assert the marker survived, clean up the
+  // committed image) is docker-only and lives in docker-backend.test.ts —
+  // what belongs HERE, identically across both backends, is the gating
+  // contract itself: docker allows checkpoint() on a running container,
+  // msb rejects it with a typed error before any backend call is ever made.
+  itIntegration(
+    `checkpoint gating: ${BACKEND_NAME === "docker" ? "docker allows checkpoint() on a running container" : "msb rejects checkpoint() with a typed error before any backend call"}`,
+    async () => {
+      const container = new GenericContainer("alpine:3.19").withBackend(makeBackend()).withCommand("sleep", "60");
+      await container.start();
+      try {
+        if (BACKEND_NAME === "docker") {
+          const cp = await container.checkpoint();
+          assert.match(cp.imageRef, /^rightsize\/checkpoint:[0-9a-f]{12}$/);
+          assert.equal(cp.spec.image, "alpine:3.19");
+          const client = DockerClient.fromEnv();
+          await client.request("DELETE", `/images/${encodeURIComponent(cp.imageRef)}`).catch(() => {});
+        } else {
+          let thrown: unknown;
+          try {
+            await container.checkpoint();
+          } catch (err) {
+            thrown = err;
+          }
+          assert.ok(thrown instanceof CheckpointUnsupportedError, `expected CheckpointUnsupportedError, got: ${String(thrown)}`);
+          // Rejected before any backend call: the container itself is
+          // unaffected and still running.
+          assert.equal(container.isRunning, true);
+        }
+      } finally {
+        await container.stop();
+      }
+    },
+  );
+
+  itIntegration("diagnostics() reports a live container's name, image, ports, and a log tail", async () => {
+    await using c = await new GenericContainer("alpine:3.19")
+      .withBackend(makeBackend())
+      .withCommand("sh", "-c", "echo diagnostics-marker; sleep 60")
+      .waitingFor(Wait.forLogMessage("diagnostics-marker").withStartupTimeout(30_000))
+      .start();
+
+    const report = await diagnostics();
+    assert.match(report, /^== rightsize diagnostics: \d+ running container\(s\) ==/);
+    assert.ok(report.includes("(alpine:3.19)"));
+    assert.ok(report.includes("state: running   host: 127.0.0.1   ports:"));
+    assert.ok(report.includes("diagnostics-marker"));
+  });
 });

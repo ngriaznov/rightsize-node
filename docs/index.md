@@ -37,6 +37,9 @@ version and [Lifecycle](/guide/lifecycle) for how disposal actually works.
   catalog of eighteen preconfigured containers.
 - **Choosing a backend, or hitting a backend-specific limit?** See
   [Backends](/guide/backends) and [Networking](/guide/networking).
+- **Using rightsize across Kotlin, Rust, and TypeScript?** See
+  [Cross-language parity](/guide/parity) for the shared behavioral contract
+  and how it's enforced.
 
 ## Status
 

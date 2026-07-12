@@ -85,6 +85,19 @@ if (cmd === "run") {
 } else if (cmd === "stop") {
   const name = args[1];
   const state = readState();
+  // Reproduces the real msb binary's state-database failure on a stop/rm
+  // invocation, the same way "run" above does — so removeByName's own
+  // retry-once-on-db-error path (mirroring the boot path's classifier) can
+  // be driven without a real concurrent-migration race.
+  if ((state.failRemovesWithStateDbError ?? 0) > 0) {
+    state.failRemovesWithStateDbError -= 1;
+    writeState(state);
+    process.stderr.write(
+      "error: database error: Execution Error: error returned from database: " +
+        "(code: 1) index idx_manifest_layers_unique already exists\n",
+    );
+    process.exit(1);
+  }
   if (state.sandboxes[name]) {
     state.sandboxes[name].status = "Stopped";
   }
@@ -93,6 +106,15 @@ if (cmd === "run") {
 } else if (cmd === "rm") {
   const name = args[1];
   const state = readState();
+  if ((state.failRemovesWithStateDbError ?? 0) > 0) {
+    state.failRemovesWithStateDbError -= 1;
+    writeState(state);
+    process.stderr.write(
+      "error: database error: Execution Error: error returned from database: " +
+        "(code: 1) index idx_manifest_layers_unique already exists\n",
+    );
+    process.exit(1);
+  }
   delete state.sandboxes[name];
   writeState(state);
   process.exit(0);

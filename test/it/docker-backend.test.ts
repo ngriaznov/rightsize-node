@@ -2,6 +2,7 @@ import * as net from "node:net";
 import { describe, itDockerIntegration, assert } from "../harness.js";
 import { DockerBackend } from "../../src/backend-docker/backend.js";
 import { DockerClient } from "../../src/backend-docker/client.js";
+import { GenericContainer } from "../../src/core/generic-container.js";
 import { PortBindConflictError } from "../../src/core/errors.js";
 import { RunId } from "../../src/core/run-id.js";
 import { FreePorts } from "../../src/core/free-ports.js";
@@ -34,6 +35,7 @@ function baseSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     aliases: [],
     runId: RunId.value,
     memoryLimitMb: undefined,
+    keepAlive: false,
     ...overrides,
   };
 }
@@ -92,6 +94,47 @@ describe("DockerBackend integration (real daemon)", () => {
       assert.equal(typeof logs, "string");
     });
   });
+
+  itDockerIntegration(
+    "removeByName resolves the container's name to its daemon id and force-removes it; a name that no longer (or never did) exist is a silent no-op",
+    async () => {
+      const backend = new DockerBackend(DockerClient.fromEnv());
+      const spec = baseSpec({ command: ["sleep", "60"] });
+      const handle = await backend.create(spec);
+      await backend.start(handle);
+
+      await backend.removeByName(spec.name);
+      await assert.rejects(() => backend.exec(handle, ["true"]), "expected the container to actually be gone");
+
+      // Idempotent: an already-removed name, and a name that never existed, are both silent no-ops.
+      await backend.removeByName(spec.name);
+      await backend.removeByName("rz-does-not-exist-at-all-00000000");
+    },
+  );
+
+  itDockerIntegration(
+    "removeByName does not touch a DIFFERENT container whose name is a substring of the target name",
+    async () => {
+      const backend = new DockerBackend(DockerClient.fromEnv());
+      const targetSpec = baseSpec({ command: ["sleep", "60"] });
+      const prefixName = `${targetSpec.name}-extra`;
+      const prefixSpec = baseSpec({ name: prefixName, command: ["sleep", "60"] });
+      const target = await backend.create(targetSpec);
+      await backend.start(target);
+      const prefixHandle = await backend.create(prefixSpec);
+      await backend.start(prefixHandle);
+      try {
+        await backend.removeByName(targetSpec.name);
+        await assert.rejects(() => backend.exec(target, ["true"]));
+        // The unrelated container sharing a textual prefix must survive.
+        const stillThere = await backend.exec(prefixHandle, ["true"]);
+        assert.equal(stillThere.exitCode, 0);
+      } finally {
+        await backend.stop(prefixHandle).catch(() => {});
+        await backend.remove(prefixHandle).catch(() => {});
+      }
+    },
+  );
 
   itDockerIntegration("publishes a TCP port to host loopback", async () => {
     const backend = new DockerBackend(DockerClient.fromEnv());
@@ -247,6 +290,43 @@ describe("DockerBackend integration (real daemon)", () => {
       await backend.removeNetwork(networkId).catch(() => {});
     }
   });
+
+  itDockerIntegration(
+    "checkpoint/restore round trip: a marker file written after checkpoint survives into the restored container",
+    async () => {
+      const client = DockerClient.fromEnv();
+      const source = new GenericContainer("alpine:3.19")
+        .withBackend(new DockerBackend(client))
+        .withCommand("sleep", "60");
+      await source.start();
+
+      let cp;
+      try {
+        const marker = await source.exec("sh", "-c", "echo checkpoint-marker > /marker.txt");
+        assert.equal(marker.exitCode, 0);
+
+        cp = await source.checkpoint();
+        assert.match(cp.imageRef, /^rightsize\/checkpoint:[0-9a-f]{12}$/);
+      } finally {
+        await source.stop();
+      }
+
+      const restored = GenericContainer.fromCheckpoint(cp)
+        .withBackend(new DockerBackend(client))
+        .withCommand("sleep", "60");
+      try {
+        await restored.start();
+        const read = await restored.exec("cat", "/marker.txt");
+        assert.equal(read.exitCode, 0);
+        assert.equal(read.stdout.trim(), "checkpoint-marker");
+      } finally {
+        await restored.stop();
+        // Checkpoint images are never auto-reaped (they're images, not
+        // containers) — clean up the one this test committed.
+        await client.request("DELETE", `/images/${encodeURIComponent(cp.imageRef)}`).catch(() => {});
+      }
+    },
+  );
 
   itDockerIntegration("close() force-removes every container carrying this run's label", async () => {
     const backend = new DockerBackend(DockerClient.fromEnv());

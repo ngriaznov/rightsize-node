@@ -1,6 +1,47 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it, assert, beforeEach, after } from "../../test/harness.js";
 import type { BackendProvider, SandboxBackend, SandboxHandle, NetworkLink } from "./backend.js";
 import { registerBackend, resolve, Backends, _resetRegistryForTests, _providersSnapshotForTests } from "./backends.js";
+
+/**
+ * Runs `fn` with `RIGHTSIZE_CACHE_DIR`/`RIGHTSIZE_REAPER` set (or cleared)
+ * for its duration, restoring whatever was there before on the way out —
+ * every `reaperReady()` test needs its own throwaway cache dir so it never
+ * touches the real `~/.cache/rightsize` a developer or CI runner has.
+ */
+async function withReaperEnv(
+  opts: { cacheDir: string | undefined; reaperMode: string | undefined },
+  fn: () => Promise<void>,
+): Promise<void> {
+  const savedCacheDir = process.env["RIGHTSIZE_CACHE_DIR"];
+  const savedReaperMode = process.env["RIGHTSIZE_REAPER"];
+  if (opts.cacheDir === undefined) {
+    delete process.env["RIGHTSIZE_CACHE_DIR"];
+  } else {
+    process.env["RIGHTSIZE_CACHE_DIR"] = opts.cacheDir;
+  }
+  if (opts.reaperMode === undefined) {
+    delete process.env["RIGHTSIZE_REAPER"];
+  } else {
+    process.env["RIGHTSIZE_REAPER"] = opts.reaperMode;
+  }
+  try {
+    await fn();
+  } finally {
+    if (savedCacheDir === undefined) {
+      delete process.env["RIGHTSIZE_CACHE_DIR"];
+    } else {
+      process.env["RIGHTSIZE_CACHE_DIR"] = savedCacheDir;
+    }
+    if (savedReaperMode === undefined) {
+      delete process.env["RIGHTSIZE_REAPER"];
+    } else {
+      process.env["RIGHTSIZE_REAPER"] = savedReaperMode;
+    }
+  }
+}
 
 // A sentinel thrown from create() proves resolution reached this exact
 // provider without needing a real backend implementation.
@@ -17,10 +58,15 @@ function fakeBackend(name: string): SandboxBackend {
   return {
     name,
     supportsNativeNetworks: false,
+    capabilities: { hardwareIsolated: false, checkpoint: false },
     create: (): Promise<SandboxHandle> => notImplemented(),
     start: (): Promise<void> => notImplemented(),
     stop: (): Promise<void> => notImplemented(),
     remove: (): Promise<void> => notImplemented(),
+    commitToImage: (): Promise<void> => notImplemented(),
+    removeByName: (): Promise<void> => notImplemented(),
+    findRunning: (): Promise<SandboxHandle | undefined> => notImplemented(),
+    reaperKillCommand: (): Promise<import("./backend.js").ReaperKillCommand> => notImplemented(),
     exec: (): Promise<import("./model.js").ExecResult> => notImplemented(),
     logs: (): Promise<string> => notImplemented(),
     followLogs: (): Promise<import("./backend.js").FollowHandle> => notImplemented(),
@@ -225,5 +271,109 @@ describe("registerBackend + Backends.active (impure, real registry)", () => {
 
     assert.equal(closeCalls, 1);
     process.removeListener("beforeExit", installedByBackends);
+  });
+
+  it("after beforeExit's close() settles, this run's ledger record is deleted (addendum item 5's own-run cleanup rule)", async () => {
+    const provider: BackendProvider = {
+      name: "docker",
+      priority: 10,
+      isSupported: () => true,
+      unsupportedReason: () => "n/a",
+      create: () => ({
+        ...fakeBackend("docker"),
+        removeByName: async () => {},
+        reaperKillCommand: async () => ({ stop: [], remove: ["docker", "rm", "-f"], removeNetwork: ["docker", "network", "rm"] }),
+        close: async () => {},
+      }),
+    };
+    registerBackend(provider);
+
+    const tmpCacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-backends-close-ledger-test-"));
+    try {
+      await withReaperEnv({ cacheDir: tmpCacheDir, reaperMode: "sweep" }, async () => {
+        await Backends.reaperReady();
+        const before = await fs.readdir(path.join(tmpCacheDir, "runs"));
+        assert.equal(before.filter((f) => f.endsWith(".json")).length, 1, "expected the run record to exist before close()");
+
+        const listeners = process.listeners("beforeExit") as Array<() => void>;
+        const installedByBackends = listeners[listeners.length - 1];
+        assert.ok(installedByBackends !== undefined, "expected Backends.active() to have installed a beforeExit listener");
+        if (installedByBackends === undefined) {
+          return;
+        }
+        installedByBackends();
+        // Let the close().then(afterClose) chain settle.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        process.removeListener("beforeExit", installedByBackends);
+
+        const after = await fs.readdir(path.join(tmpCacheDir, "runs")).catch(() => []);
+        assert.equal(after.filter((f) => f.endsWith(".json")).length, 0, "expected the run record to be deleted after close() settled");
+      });
+    } finally {
+      await fs.rm(tmpCacheDir, { recursive: true, force: true });
+    }
+  });
+
+  it("RIGHTSIZE_REAPER=off: reaperReady() resolves the same backend active() would, but never calls reaperKillCommand at all", async () => {
+    let reaperKillCommandCalls = 0;
+    let createCalls = 0;
+    const provider: BackendProvider = {
+      name: "docker",
+      priority: 10,
+      isSupported: () => true,
+      unsupportedReason: () => "n/a",
+      create: () => {
+        createCalls += 1;
+        return {
+          ...fakeBackend("docker"),
+          removeByName: async () => {},
+          reaperKillCommand: async () => {
+            reaperKillCommandCalls += 1;
+            return { stop: [], remove: ["docker", "rm", "-f"], removeNetwork: ["docker", "network", "rm"] };
+          },
+        };
+      },
+    };
+    registerBackend(provider);
+
+    await withReaperEnv({ cacheDir: undefined, reaperMode: "off" }, async () => {
+      await Backends.reaperReady();
+      await Backends.reaperReady();
+      assert.equal(Backends.active(), Backends.active()); // still memoized to one instance
+      assert.equal(createCalls, 1, "expected only one backend instance to ever have been created");
+      assert.equal(reaperKillCommandCalls, 0, "RIGHTSIZE_REAPER=off must skip reaperKillCommand entirely");
+    });
+  });
+
+  it("RIGHTSIZE_REAPER=sweep: reaperReady() writes the run record and initializes exactly once across repeated calls", async () => {
+    let reaperKillCommandCalls = 0;
+    const provider: BackendProvider = {
+      name: "docker",
+      priority: 10,
+      isSupported: () => true,
+      unsupportedReason: () => "n/a",
+      create: () => ({
+        ...fakeBackend("docker"),
+        removeByName: async () => {},
+        reaperKillCommand: async () => {
+          reaperKillCommandCalls += 1;
+          return { stop: [], remove: ["docker", "rm", "-f"], removeNetwork: ["docker", "network", "rm"] };
+        },
+      }),
+    };
+    registerBackend(provider);
+
+    const tmpCacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-backends-reaper-test-"));
+    try {
+      await withReaperEnv({ cacheDir: tmpCacheDir, reaperMode: "sweep" }, async () => {
+        await Promise.all([Backends.reaperReady(), Backends.reaperReady()]);
+        await Backends.reaperReady();
+        assert.equal(reaperKillCommandCalls, 1);
+        const runsDirEntries = await fs.readdir(path.join(tmpCacheDir, "runs"));
+        assert.equal(runsDirEntries.filter((f) => f.endsWith(".json")).length, 1);
+      });
+    } finally {
+      await fs.rm(tmpCacheDir, { recursive: true, force: true });
+    }
   });
 });

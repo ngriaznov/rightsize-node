@@ -1,13 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { BackendError, PortBindConflictError } from "../core/errors.js";
-import type { FollowHandle, NetworkLink, SandboxBackend, SandboxHandle } from "../core/backend.js";
+import type { BackendCapabilities, FollowHandle, NetworkLink, ReaperKillCommand, SandboxBackend, SandboxHandle } from "../core/backend.js";
 import type { ContainerSpec, ExecResult } from "../core/model.js";
 import { RunId } from "../core/run-id.js";
 import { DockerClient } from "./client.js";
 import { FrameDemuxer, LineAssembler } from "./frames.js";
 import { extractIds, extractNumber, extractString } from "./json.js";
 import { isPortBindConflictMessage } from "./port-conflict.js";
-import { labelFilterQuery, RUN_ID_LABEL_KEY } from "./labels.js";
+import { labelFilterQuery, containerLabels } from "./labels.js";
 
 const STOP_TIMEOUT_SECS = 10;
 
@@ -45,7 +45,7 @@ interface CreateContainerBody {
   };
 }
 
-/** Builds the `POST /containers/create` JSON body: port bindings pinned to `127.0.0.1`, read-only/read-write binds, the `host.docker.internal` extra host, and the run-id label. */
+/** Builds the `POST /containers/create` JSON body: port bindings pinned to `127.0.0.1`, read-only/read-write binds, the `host.docker.internal` extra host, and the run-id (or reuse) label — see `containerLabels`. */
 function buildCreateBody(spec: ContainerSpec): CreateContainerBody {
   const exposedPorts: Record<string, Record<string, never>> = {};
   const portBindings: Record<string, Array<{ HostIp: string; HostPort: string }>> = {};
@@ -61,7 +61,7 @@ function buildCreateBody(spec: ContainerSpec): CreateContainerBody {
     Image: spec.image,
     Env: spec.env.map(([k, v]) => `${k}=${v}`),
     ExposedPorts: exposedPorts,
-    Labels: { [RUN_ID_LABEL_KEY]: spec.runId },
+    Labels: containerLabels(spec),
     HostConfig: {
       PortBindings: portBindings,
       Binds: binds,
@@ -110,6 +110,13 @@ export class DockerBackend implements SandboxBackend {
   /** `"docker"` — matched against `RIGHTSIZE_BACKEND`. */
   readonly name = "docker";
   readonly supportsNativeNetworks = true;
+  /** Shares the host kernel; can checkpoint a sandbox by committing it to an image. */
+  readonly capabilities: BackendCapabilities = {
+    /** Containers share the host kernel — no microVM boundary. */
+    hardwareIsolated: false,
+    /** Commit-to-image checkpointing is available today. */
+    checkpoint: true,
+  };
 
   private readonly networkIds = new Map<string, string>();
 
@@ -145,21 +152,34 @@ export class DockerBackend implements SandboxBackend {
     }
   }
 
+  /**
+   * Resolves a network NAME to its daemon-assigned id via a list filter,
+   * never throwing — "not found" (an empty list, or the list call itself
+   * failing) resolves to `undefined` rather than rejecting, since both
+   * callers (`ensureNetworkGetId`'s create-if-missing path and
+   * `removeNetwork`'s best-effort fallback) treat "not found" as their own
+   * case rather than an error.
+   */
+  private async lookupNetworkIdByName(networkId: string): Promise<string | undefined> {
+    const filters = JSON.stringify({ name: [networkId] });
+    const listPath = `/networks?filters=${encodeQueryValue(filters)}`;
+    const list = await this.client.request("GET", listPath).catch(() => undefined);
+    if (list === undefined || list.status !== 200) {
+      return undefined;
+    }
+    return extractIds(list.body.toString())[0];
+  }
+
   private async ensureNetworkGetId(networkId: string): Promise<string> {
     const cached = this.networkIds.get(networkId);
     if (cached !== undefined) {
       return cached;
     }
 
-    const filters = JSON.stringify({ name: [networkId] });
-    const listPath = `/networks?filters=${encodeQueryValue(filters)}`;
-    const list = await this.client.request("GET", listPath);
-    if (list.status === 200) {
-      const ids = extractIds(list.body.toString());
-      if (ids.length > 0 && ids[0] !== undefined) {
-        this.networkIds.set(networkId, ids[0]);
-        return ids[0];
-      }
+    const found = await this.lookupNetworkIdByName(networkId);
+    if (found !== undefined) {
+      this.networkIds.set(networkId, found);
+      return found;
     }
 
     const createBody = JSON.stringify({ Name: networkId });
@@ -226,6 +246,76 @@ export class DockerBackend implements SandboxBackend {
   async remove(handle: SandboxHandle): Promise<void> {
     const path = `/containers/${handle.id}?force=true`;
     await this.client.request("DELETE", path).catch(() => {}); // best-effort
+  }
+
+  /**
+   * Checkpoint's backend call: the engine's `POST /commit` endpoint, which
+   * commits a container's current filesystem to a new image in one call —
+   * `imageRef` is always `rightsize/checkpoint:<12-hex>` (minted by
+   * `GenericContainer.checkpoint()`), split into repo/tag the same way
+   * `pullIfMissing`'s image argument is.
+   */
+  async commitToImage(handle: SandboxHandle, imageRef: string): Promise<void> {
+    const [repo, tag] = splitRepoTag(imageRef);
+    const path = `/commit?container=${encodeQueryValue(handle.id)}&repo=${encodeQueryValue(repo)}&tag=${encodeQueryValue(tag)}`;
+    const resp = await this.client.request("POST", path);
+    if (resp.status >= 400) {
+      throw new BackendError(
+        `docker could not commit container ${handle.id} to image '${imageRef}' (HTTP ${resp.status}): ${resp.body.toString()}`,
+      );
+    }
+  }
+
+  /**
+   * Best-effort stop+remove of a container identified by NAME — the shape
+   * the reaping ledger and sweep need, since they only ever store names,
+   * never a daemon-assigned id. Resolves name to id via a list filter
+   * first (this backend's `SandboxHandle.id` is always the daemon id, never
+   * the name, so there is no shortcut around this lookup); `^/<name>$`
+   * anchors the filter to an EXACT match — Docker's name filter is
+   * substring-by-default, and an unanchored filter for `rz-abc123-1` would
+   * also match `rz-abc123-10`. "Not found" (an empty list, or the list
+   * call itself failing) is silently fine.
+   */
+  async removeByName(name: string): Promise<void> {
+    const filters = JSON.stringify({ name: [`^/${name}$`] });
+    const listPath = `/containers/json?all=true&filters=${encodeQueryValue(filters)}`;
+    const listed = await this.client.request("GET", listPath).catch(() => undefined);
+    if (listed === undefined || listed.status !== 200) {
+      return;
+    }
+    const id = extractIds(listed.body.toString())[0];
+    if (id === undefined) {
+      return;
+    }
+    await this.client.request("DELETE", `/containers/${id}?force=true`).catch(() => {});
+  }
+
+  /**
+   * Reuse's adopt-path liveness check: resolves `spec.name` to a daemon id
+   * via the same exact-match name filter `removeByName` uses, but restricted
+   * to RUNNING containers only (no `all=true`, matching this method's
+   * "found and running" contract) — a stopped-but-not-yet-removed container
+   * of the same name must never be handed back as adoptable. Not found (or
+   * the list call itself failing) resolves to `undefined`.
+   */
+  async findRunning(spec: ContainerSpec): Promise<SandboxHandle | undefined> {
+    const filters = JSON.stringify({ name: [`^/${spec.name}$`] });
+    const listPath = `/containers/json?filters=${encodeQueryValue(filters)}`;
+    const listed = await this.client.request("GET", listPath).catch(() => undefined);
+    if (listed === undefined || listed.status !== 200) {
+      return undefined;
+    }
+    const id = extractIds(listed.body.toString())[0];
+    if (id === undefined) {
+      return undefined;
+    }
+    return { id, spec };
+  }
+
+  /** The reaper watchdog's kill-command prefixes: `docker rm -f` does both stop and remove in one call, so `stop` is empty. */
+  async reaperKillCommand(): Promise<ReaperKillCommand> {
+    return { stop: [], remove: ["docker", "rm", "-f"], removeNetwork: ["docker", "network", "rm"] };
   }
 
   async exec(handle: SandboxHandle, cmd: ReadonlyArray<string>): Promise<ExecResult> {
@@ -356,8 +446,18 @@ export class DockerBackend implements SandboxBackend {
     await this.ensureNetworkGetId(networkId);
   }
 
+  /**
+   * Resolves the network's daemon id from this instance's own cache when
+   * available (the common case: this process created the network earlier in
+   * its own lifetime), but falls back to the same by-name daemon lookup
+   * `ensureNetworkGetId` uses when it isn't — the reaper sweep and watchdog
+   * both call this through a FRESH `DockerBackend` instance that never
+   * itself called `ensureNetwork` for a network some other (possibly dead)
+   * process created, so an in-memory-cache-only lookup would silently no-op
+   * every cross-process reap. "Not found" is silently fine either way.
+   */
   async removeNetwork(networkId: string): Promise<void> {
-    const daemonId = this.networkIds.get(networkId);
+    const daemonId = this.networkIds.get(networkId) ?? (await this.lookupNetworkIdByName(networkId));
     this.networkIds.delete(networkId);
     if (daemonId !== undefined) {
       await this.client.request("DELETE", `/networks/${daemonId}`).catch(() => {}); // best-effort

@@ -34,6 +34,48 @@ export interface FollowHandle {
 }
 
 /**
+ * The argv PREFIXES a backend's own CLI uses to stop/remove a sandbox, or
+ * remove a network, by NAME — a sandbox/network name is appended by the
+ * caller to whichever prefix applies. This is for the reaper watchdog: a
+ * detached, out-of-process script spawned to outlive this process's own
+ * SIGKILL, which therefore cannot call back into this backend's normal
+ * async methods and instead shells out directly. `stop`/`removeNetwork` may
+ * be empty arrays where a backend has no separate stop step (docker's
+ * `rm -f` does both in one call) or no native network object to remove (msb
+ * emulates networks entirely in-guest — there is nothing to tear down).
+ */
+export interface ReaperKillCommand {
+  /** Argv prefix for this backend's "stop" step; empty if the backend has none (docker's `rm -f` does both in one call). */
+  readonly stop: ReadonlyArray<string>;
+  /** Argv prefix for this backend's "remove" step. */
+  readonly remove: ReadonlyArray<string>;
+  /** Argv prefix for removing a network by id/name; empty if the backend has no native network object (msb emulates networks entirely in-guest). */
+  readonly removeNetwork: ReadonlyArray<string>;
+}
+
+/**
+ * Capability flags describing what a backend's own execution model can and
+ * cannot guarantee — distinct from `supportsNativeNetworks` (a networking
+ * detail), this is the seam API-level requirements like
+ * `withRequireIsolation()` and `checkpoint()` gate on. A value is set once
+ * per backend and never changes at runtime.
+ */
+export interface BackendCapabilities {
+  /**
+   * `true` when each sandbox runs in its own hardware-virtualized microVM
+   * with its own kernel (msb); `false` when sandboxes share the host kernel
+   * (docker). `withRequireIsolation()` demands `true`.
+   */
+  readonly hardwareIsolated: boolean;
+  /**
+   * `true` when the backend can checkpoint/restore a sandbox's state
+   * (docker: commit-to-image; msb: no upstream microVM snapshot support
+   * yet). `GenericContainer.checkpoint()` demands `true`.
+   */
+  readonly checkpoint: boolean;
+}
+
+/**
  * The one interface every container backend implements. Host ports arrive
  * in `ContainerSpec.ports` already chosen (see `FreePorts`) — a backend
  * binds them, it never allocates its own.
@@ -43,6 +85,8 @@ export interface SandboxBackend {
   readonly name: string;
   /** `true` for docker (native bridge networks); `false` for msb, which emulates links over exec-stream tunnels instead. */
   readonly supportsNativeNetworks: boolean;
+  /** This backend's isolation/checkpoint capability flags — see `BackendCapabilities`. */
+  readonly capabilities: BackendCapabilities;
   /** Allocate the backend-native container without starting it. Must not bind ports or run the workload yet. */
   create(spec: ContainerSpec): Promise<SandboxHandle>;
   /** Boot the workload. On a bind conflict, throw (or wrap a cause chain ending in) `PortBindConflictError` so `GenericContainer`'s retry loop can classify it. */
@@ -51,6 +95,37 @@ export interface SandboxBackend {
   stop(handle: SandboxHandle): Promise<void>;
   /** Best-effort removal of the backend-native resource; callers swallow failures during teardown. */
   remove(handle: SandboxHandle): Promise<void>;
+  /**
+   * Commits `handle`'s current filesystem to a new image tagged `imageRef` —
+   * `GenericContainer.checkpoint()`'s backend call, gated on
+   * `capabilities.checkpoint` BEFORE this is ever reached, so an
+   * unsupported backend never has to implement this for real (it may throw
+   * defensively). Docker: the engine's commit endpoint. Never called on a
+   * backend whose `capabilities.checkpoint` is `false`.
+   */
+  commitToImage(handle: SandboxHandle, imageRef: string): Promise<void>;
+  /**
+   * Best-effort stop+remove of a sandbox identified by NAME rather than a
+   * `SandboxHandle` — the reaping ledger only ever stores names (it must be
+   * legible to a sweep running in a different process, possibly a
+   * different rightsize language implementation entirely, that never held
+   * a handle for this sandbox). "Not found" is silently fine: sweeps are
+   * idempotent and may race another process's sweep for the same name.
+   */
+  removeByName(name: string): Promise<void>;
+  /**
+   * Checks whether a sandbox named `spec.name` is currently running and, if
+   * so, returns a handle for it — reuse's adopt path, which never held a
+   * handle for a sandbox a possibly-earlier process created. The returned
+   * handle's `spec` is `spec` itself, embedded verbatim: this call never
+   * re-derives a `ContainerSpec` from backend-native inspection data, it
+   * only confirms liveness under the NAME the caller already built a spec
+   * for. `undefined` means not running — including "the backend has no
+   * record of this name at all."
+   */
+  findRunning(spec: ContainerSpec): Promise<SandboxHandle | undefined>;
+  /** This backend's reaper watchdog kill-command prefixes — see `ReaperKillCommand`'s own doc. */
+  reaperKillCommand(): Promise<ReaperKillCommand>;
   /** Run a one-shot command inside a running container and wait for it to exit. */
   exec(handle: SandboxHandle, cmd: ReadonlyArray<string>): Promise<ExecResult>;
   /** Fetch everything logged so far (bounded tail), for a one-shot read. */

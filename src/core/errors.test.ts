@@ -5,6 +5,8 @@ import {
   ContainerLaunchError,
   BackendError,
   ProvisionError,
+  ReuseWithNetworkError,
+  IsolationRequiredError,
 } from "./errors.js";
 import type { ContainerSpec, FileMount } from "./model.js";
 
@@ -23,6 +25,7 @@ function makeSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     aliases: [],
     runId: "deadbeef",
     memoryLimitMb: undefined,
+    keepAlive: false,
     ...overrides,
   };
 }
@@ -89,6 +92,28 @@ describe("ContainerLaunchError / BackendError / ProvisionError", () => {
     const provision = new ProvisionError("checksum mismatch");
     assert.ok(provision instanceof Error);
     assert.equal(provision.name, "ProvisionError");
+  });
+});
+
+describe("ReuseWithNetworkError", () => {
+  it("is an Error with the right name and names both builder calls in its message", () => {
+    const err = new ReuseWithNetworkError();
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "ReuseWithNetworkError");
+    assert.match(err.message, /withReuse\(\)/);
+    assert.match(err.message, /withNetwork\(\)/);
+  });
+});
+
+describe("IsolationRequiredError", () => {
+  it("is an Error with the right name, names the active backend, and gives the RIGHTSIZE_BACKEND remedy", () => {
+    const err = new IsolationRequiredError("docker");
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "IsolationRequiredError");
+    assert.equal(err.backend, "docker");
+    assert.match(err.message, /withRequireIsolation\(\)/);
+    assert.match(err.message, /'docker'/);
+    assert.match(err.message, /RIGHTSIZE_BACKEND=microsandbox/);
   });
 });
 

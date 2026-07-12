@@ -173,12 +173,34 @@ backend-specific rather than behavioral divergences:
 - **Two-tier cleanup, no async `Drop`.** The happy path is `await using` or
   an explicit, awaited `stop()`. The fallback — a process that exits before
   either runs — falls back to a synchronous, blocking teardown registered
-  per container (Node's `"exit"` handler can't `await`), with a run-id-scoped
-  orphan reaper at backend startup as the backstop for a hard `SIGKILL` that
-  bypasses even that.
+  per container (Node's `"exit"` handler can't `await`), with a ledger-based
+  orphan reaper (sweep + optional watchdog) as the backstop for a hard
+  `SIGKILL` that bypasses even that. See
+  [Orphan reaping](https://ngriaznov.github.io/rightsize-node/guide/reaping).
+- **Container reuse.** `.withReuse()` plus the double opt-in
+  `RIGHTSIZE_REUSE` adopts an already-running sandbox from a prior process
+  instead of booting a fresh one, keyed by a content hash of the
+  reuse-relevant spec — a local-dev-loop speedup, not a CI default. See
+  [Container reuse](https://ngriaznov.github.io/rightsize-node/guide/reuse).
+- **Failure diagnostics.** `diagnostics()` renders every currently-running
+  container's image, mapped ports, and a bounded log tail into one
+  human-readable report, wireable into a test framework's own failure hook.
+  See [Failure diagnostics](https://ngriaznov.github.io/rightsize-node/guide/diagnostics).
+- **Isolation on demand.** `.withRequireIsolation()` fails a `start()`
+  fast, before any boot work, if the active backend can't provide
+  hardware-virtualized isolation — for workloads that shouldn't silently
+  degrade to a shared-kernel fallback. See
+  [Isolation](https://ngriaznov.github.io/rightsize-node/guide/isolation).
+- **Checkpoint / restore (Docker).** `checkpoint()` commits a running
+  container's filesystem to an image; `fromCheckpoint()` boots fresh
+  containers from it — skip repeated boot-and-seed work across a suite.
+  See [Checkpoint / restore](https://ngriaznov.github.io/rightsize-node/guide/checkpoints).
 - **One interface, two backends.** `SandboxBackend` is a small interface;
   the shared contract suite is the referee, with the Docker backend doubling
-  as the correctness oracle for the microVM backend.
+  as the correctness oracle for the microVM backend — and the same
+  interface behavior is a **cross-language contract**, verified against the
+  Kotlin and Rust implementations too. See
+  [Cross-language parity](https://ngriaznov.github.io/rightsize-node/guide/parity).
 
 Full detail: [How It Works](https://ngriaznov.github.io/rightsize-node/guide/how-it-works).
 
@@ -190,6 +212,8 @@ Full detail: [How It Works](https://ngriaznov.github.io/rightsize-node/guide/how
 | `MSB_PATH` | Use a pre-installed `msb` binary; skip downloads |
 | `RIGHTSIZE_CACHE_DIR` | Relocate the runtime cache (default `~/.cache/rightsize`; `%LOCALAPPDATA%\rightsize` on Windows) |
 | `RIGHTSIZE_MSB_SKIP_DOWNLOAD` | `true` = fail instead of downloading (air-gapped CI) |
+| `RIGHTSIZE_REAPER` | `on` (default) / `sweep` / `off` — see [Orphan reaping](https://ngriaznov.github.io/rightsize-node/guide/reaping) |
+| `RIGHTSIZE_REUSE` | `true` or `1` — second half of reuse's double opt-in — see [Container reuse](https://ngriaznov.github.io/rightsize-node/guide/reuse) |
 
 ## Runtime support
 

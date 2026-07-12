@@ -3,6 +3,7 @@ import type {
   SandboxHandle,
   NetworkLink,
   FollowHandle,
+  ReaperKillCommand,
 } from "../core/backend.js";
 import type { ContainerSpec, ExecResult } from "../core/model.js";
 
@@ -16,6 +17,7 @@ import type { ContainerSpec, ExecResult } from "../core/model.js";
 export class FakeModuleBackend implements SandboxBackend {
   readonly name: string = "fake-module-backend";
   readonly supportsNativeNetworks = true;
+  readonly capabilities = { hardwareIsolated: true, checkpoint: false };
   private idSeq = 0;
   lastSpec: ContainerSpec | undefined;
   /** Test seam: scripts exec() responses for modules whose containerIsStarted hook polls via exec (e.g. Mongo's rs.initiate). */
@@ -30,6 +32,14 @@ export class FakeModuleBackend implements SandboxBackend {
   async start(_handle: SandboxHandle): Promise<void> {}
   async stop(_handle: SandboxHandle): Promise<void> {}
   async remove(_handle: SandboxHandle): Promise<void> {}
+  async commitToImage(_handle: SandboxHandle, _imageRef: string): Promise<void> {}
+  async removeByName(_name: string): Promise<void> {}
+  async findRunning(_spec: ContainerSpec): Promise<SandboxHandle | undefined> {
+    return undefined;
+  }
+  async reaperKillCommand(): Promise<ReaperKillCommand> {
+    return { stop: [], remove: [], removeNetwork: [] };
+  }
 
   async exec(_handle: SandboxHandle, cmd: ReadonlyArray<string>): Promise<ExecResult> {
     if (this.execImpl !== undefined) {

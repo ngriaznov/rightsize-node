@@ -157,10 +157,12 @@ export const assert = api.assert;
  *
  * Integration-test FILES must also run serially, never in parallel, across
  * processes: `node --test` and `bun test` each start one process per test
- * file, and each process computes its own `RunId` and runs its own orphan
- * reaper (see `src/backend-msb`'s `sweepOrphans`). Two concurrent IT
- * processes would each treat the other's live containers as orphans of a
- * crashed run and reap them.
+ * file, and each process computes its own `RunId`, runs its own init-time
+ * reaping sweep (see `src/core/reaper`), and races the others over msb's
+ * own shared state database and host ports. The reaping sweep itself is
+ * liveness-aware (pid+start-time, not name matching) and leaves another
+ * live process's sandboxes alone, but the other sources of cross-process
+ * contention are not — concurrent IT processes still need to be serialized.
  *
  * The two runners need different fixes because they parallelize at
  * different granularities: `node --test` spawns one child process per test

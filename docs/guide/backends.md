@@ -6,7 +6,8 @@ rightsize ships two implementations of one `SandboxBackend` interface:
 unix-socket HTTP client). Both satisfy the same behavioral contract, verified
 by a shared test suite that runs against each — code you write targets
 `GenericContainer` and never a backend directly, so the same code runs
-unchanged on either.
+unchanged on either. That same contract also holds across languages — see
+[Cross-language parity](/guide/parity).
 
 Importing a backend subpath registers it as a side effect:
 
@@ -57,6 +58,7 @@ on Windows.
 | `MSB_PATH` | Use a pre-installed `msb` binary; skips the download/provisioning step entirely. |
 | `RIGHTSIZE_CACHE_DIR` | Relocate the runtime cache (default `~/.cache/rightsize`; `%LOCALAPPDATA%\rightsize` on Windows). |
 | `RIGHTSIZE_MSB_SKIP_DOWNLOAD` | `true` = fail with guidance instead of downloading — for air-gapped CI; pair with `MSB_PATH` or a pre-seeded cache. |
+| `RIGHTSIZE_REAPER` | `on` (default) / `sweep` / `off` — controls the orphan-reaping sweep and watchdog. See [Orphan reaping](/guide/reaping). |
 | `DOCKER_HOST` | A `unix://` socket path (or bare path); the Docker backend only ever dials a unix socket, never a TCP host — see below. |
 
 ## `backend-msb` deep-dive

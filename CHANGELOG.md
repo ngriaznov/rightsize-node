@@ -5,6 +5,94 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Orphan reaping: an on-disk ledger under the rightsize cache dir tracks
+  every sandbox/network a process has live, an init-time sweep judges every
+  other run's ledger entry by pid+start-time liveness and reaps whatever's
+  dead, and an optional per-run watchdog process reaps within seconds of a
+  `SIGKILL` instead of waiting for the next sweep. Controlled by
+  `RIGHTSIZE_REAPER` (`on` default / `sweep` / `off`). See
+  [Orphan reaping](https://ngriaznov.github.io/rightsize-node/guide/reaping).
+- `SandboxBackend.removeByName(name)`: best-effort stop+remove of a sandbox
+  identified by name rather than a handle, for the sweep and watchdog (which
+  never hold one). Implemented on both backends; the Docker backend gets a
+  liveness-aware orphan sweep for the first time — previously only msb had
+  one, and it was liveness-blind (any sandbox not matching this run's own
+  name was treated as an orphan, unsafe for concurrent runs).
+- Container reuse: `GenericContainer.withReuse()`, gated by the double
+  opt-in `RIGHTSIZE_REUSE` (`true`/`1`) environment variable. A reuse-active
+  container is named `rz-reuse-<hash12>`, where the hash is a sha256 over a
+  canonical JSON form of its reuse-relevant spec (image, env, command,
+  exposed ports, memory limit, and copied-file content) — a cross-language
+  contract shared with the Kotlin and Rust implementations. `start()` reads
+  `<cacheDir>/reuse/<hash>.json` (written atomically) and, if it names a
+  sandbox the active backend confirms is running and ready, ADOPTS it — no
+  `create()` call at all — instead of booting a fresh one; a stale or
+  corrupt registry entry is best-effort cleaned up and falls through to a
+  fresh create, and a name collision on create (another process won the
+  race) retries the adopt path once. `stop()` on a reuse-active container
+  leaves the sandbox running and clears only in-process bookkeeping. Reuse
+  plus `withNetwork()` is rejected with a new `ReuseWithNetworkError` — the
+  identity hash does not cover cross-container network topology. New SPI:
+  `ContainerSpec.keepAlive` (default `false`, `true` for a reuse-active
+  container) keeps a sandbox out of every own-run cleanup path and out of
+  the reaping ledger; `SandboxBackend.findRunning(spec)` checks whether a
+  sandbox named `spec.name` is currently running and, if so, returns a
+  handle for it — reuse's adoption check. Both implemented on both
+  backends. See
+  [Container reuse](https://ngriaznov.github.io/rightsize-node/guide/reuse).
+- Failure diagnostics: `diagnostics()` renders every container this process
+  currently has running (image, mapped ports, and a bounded 50-line log
+  tail) into one human-readable report — identical format across the
+  Kotlin, Rust, and TypeScript implementations. A failing `logs()` call
+  degrades to a one-line `logs: unavailable (<reason>)` instead of
+  throwing. `registerDiagnostics(onTestFailed)` is a dependency-free helper
+  for wiring the report into a test framework's own failure hook (e.g.
+  vitest's `onTestFailed`). See
+  [Failure diagnostics](https://ngriaznov.github.io/rightsize-node/guide/diagnostics).
+- Isolation requirement: `SandboxBackend.capabilities` exposes
+  `hardwareIsolated` (`true` for msb, `false` for docker) and `checkpoint`
+  (`false` for msb, `true` for docker — see checkpoint/restore below).
+  `GenericContainer.withRequireIsolation()` makes `start()` throw a new
+  `IsolationRequiredError` — naming the active backend and the
+  `RIGHTSIZE_BACKEND=microsandbox` remedy — before any create/network work
+  if the active backend isn't hardware-isolated, instead of silently
+  degrading. See
+  [Isolation](https://ngriaznov.github.io/rightsize-node/guide/isolation).
+- Checkpoint / restore: `GenericContainer.checkpoint()` commits a running
+  container's filesystem to a new image (`rightsize/checkpoint:<12-hex>`,
+  random per checkpoint) and returns a `Checkpoint` carrying that image
+  reference plus the source container's spec.
+  `GenericContainer.fromCheckpoint(checkpoint)` builds a normal, ephemeral
+  container from it — image is the checkpoint's, env/command/exposed
+  ports/memory limit default to the source spec, callers can still override.
+  A restored container is ordinary in every respect once started: fresh
+  host ports, normal reaping-ledger tracking, normal `stop()`. Gated by the
+  new `capabilities.checkpoint` flag (`true` for docker, implemented via the
+  engine's commit endpoint; `false` for msb, no upstream microVM snapshot
+  support yet) — `checkpoint()` throws a new typed
+  `CheckpointUnsupportedError` before any backend call on an unsupported
+  backend, and a state error on a non-running container. Checkpoint images
+  are never auto-reaped (they're images, not containers). See
+  [Checkpoint / restore](https://ngriaznov.github.io/rightsize-node/guide/checkpoints).
+- A [Cross-language parity](https://ngriaznov.github.io/rightsize-node/guide/parity)
+  page documenting the behavioral contract verified across the Kotlin,
+  Rust, and TypeScript implementations — the claim, every verified behavior
+  area, and where the contract suite that enforces it lives.
+
+### Changed
+
+- The msb backend's orphan sweep (`sweepOrphans`, name-prefix-based,
+  liveness-blind) is replaced by the shared ledger-based sweep above, which
+  also runs for the Docker backend and correctly leaves a still-alive run's
+  sandboxes alone even if they don't belong to the current process.
+- The msb toolchain cache-dir resolution (`RIGHTSIZE_CACHE_DIR` override,
+  `~/.cache/rightsize` / `%LOCALAPPDATA%\rightsize` default) moved from
+  `backend-msb`'s provisioner into core, since the reaping ledger needs it
+  even in a docker-only process. Behavior is unchanged; the msb provisioner
+  now delegates to it.
+
 ## [0.1.2] - 2026-07-09
 
 ### Changed

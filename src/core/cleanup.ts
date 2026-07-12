@@ -1,7 +1,12 @@
 /**
  * Best-effort exit-path cleanup — the JVM-shutdown-hook / Rust-cleanup-
  * thread analog for a process that dies (or is asked to die) before its
- * `await using` scopes unwind normally.
+ * `await using` scopes unwind normally. Doubles as the process-local
+ * registry of currently running containers the failure-diagnostics report
+ * (`diagnostics.ts`) reads from — one live-container registry, not two: a
+ * container is registered here the instant `GenericContainer.start()`
+ * confirms it booted, and deregistered the instant `stop()` tears it down,
+ * which is exactly the "currently running" window diagnostics needs too.
  *
  * Node's `process.on("exit", ...)` handler runs SYNCHRONOUSLY and cannot
  * `await` — by the time it fires, the event loop is already being torn
@@ -19,16 +24,23 @@
  * case, sweeping up `rz-<other-runid>-*` leftovers from a crashed prior
  * run.
  */
+import type { SandboxBackend, SandboxHandle } from "./backend.js";
 
 export type SyncCleanup = () => void;
 
-const registered = new Map<string, SyncCleanup>();
+interface RegisteredContainer {
+  readonly handle: SandboxHandle;
+  readonly backend: SandboxBackend;
+  readonly cleanup: SyncCleanup;
+}
+
+const registered = new Map<string, RegisteredContainer>();
 let hooksInstalled = false;
 
 function runAll(): void {
-  for (const cleanupFn of registered.values()) {
+  for (const entry of registered.values()) {
     try {
-      cleanupFn();
+      entry.cleanup();
     } catch {
       // Best-effort: a failure to clean up one container must not block
       // cleanup of the others, and the process is exiting regardless.
@@ -67,15 +79,24 @@ function installHooksOnce(): void {
   }
 }
 
-/** Registers a synchronous teardown for a live container, keyed by handle id. */
-export function registerSyncCleanup(handleId: string, cleanupFn: SyncCleanup): void {
+/** Registers a synchronous teardown for a live container, keyed by handle id — and, by the same call, adds it to the live-container registry `liveContainers()` exposes. */
+export function registerSyncCleanup(handle: SandboxHandle, backend: SandboxBackend, cleanupFn: SyncCleanup): void {
   installHooksOnce();
-  registered.set(handleId, cleanupFn);
+  registered.set(handle.id, { handle, backend, cleanup: cleanupFn });
 }
 
-/** Unregisters a container's teardown once it has been stopped/removed normally. */
+/** Unregisters a container's teardown once it has been stopped/removed normally — and removes it from the live-container registry. */
 export function unregisterSyncCleanup(handleId: string): void {
   registered.delete(handleId);
+}
+
+/**
+ * The process-local registry of currently running containers — every
+ * container `registerSyncCleanup` currently holds, in start order. This is
+ * `diagnostics.ts`'s data source; nothing else needs a second registry.
+ */
+export function liveContainers(): ReadonlyArray<{ readonly handle: SandboxHandle; readonly backend: SandboxBackend }> {
+  return Array.from(registered.values(), ({ handle, backend }) => ({ handle, backend }));
 }
 
 /** Test seam: clears registered cleanups without running them. */

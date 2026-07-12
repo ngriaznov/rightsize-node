@@ -1,12 +1,18 @@
-import { describe, it, assert } from "../../test/harness.js";
+import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { describe, it, assert, beforeEach, afterEach, after } from "../../test/harness.js";
 import { GenericContainer } from "./generic-container.js";
 import { Network } from "./network.js";
 import type { WaitStrategy } from "./wait.js";
 import { PortBindConflictError } from "./errors.js";
 import { FreePorts } from "./free-ports.js";
-import type { SandboxBackend, SandboxHandle, NetworkLink } from "./backend.js";
-import type { ExecResult } from "./model.js";
+import type { SandboxBackend, SandboxHandle, NetworkLink, ReaperKillCommand, BackendProvider } from "./backend.js";
+import type { ContainerSpec, ExecResult } from "./model.js";
 import { _runAllForTests as runAllRegisteredCleanupsForTest } from "./cleanup.js";
+import { registerBackend, Backends, _resetRegistryForTests, _providersSnapshotForTests } from "./backends.js";
+import { readSandboxNames, readNetworkIds } from "./reaper/ledger.js";
 
 interface FakeBackendOptions {
   startFailuresBeforeSuccess?: number;
@@ -23,6 +29,7 @@ interface FakeCall {
 class FakeBackend implements SandboxBackend {
   readonly name = "fake";
   readonly supportsNativeNetworks = true;
+  readonly capabilities = { hardwareIsolated: true, checkpoint: false };
   readonly calls: FakeCall[] = [];
   readonly createdHandles: SandboxHandle[] = [];
   readonly cleanupSyncCalls: string[] = [];
@@ -60,6 +67,18 @@ class FakeBackend implements SandboxBackend {
 
   async remove(handle: SandboxHandle): Promise<void> {
     this.calls.push({ op: "remove", handleId: handle.id });
+  }
+
+  async commitToImage(_handle: SandboxHandle, _imageRef: string): Promise<void> {}
+
+  async removeByName(_name: string): Promise<void> {}
+
+  async findRunning(_spec: import("./model.js").ContainerSpec): Promise<SandboxHandle | undefined> {
+    return undefined;
+  }
+
+  async reaperKillCommand(): Promise<ReaperKillCommand> {
+    return { stop: [], remove: [], removeNetwork: [] };
   }
 
   async exec(_handle: SandboxHandle, _cmd: ReadonlyArray<string>): Promise<ExecResult> {
@@ -373,6 +392,30 @@ describe("GenericContainer — registered sync cleanup actually reaches the back
     runAllRegisteredCleanupsForTest();
     assert.deepEqual(backend.cleanupSyncCalls, []);
   });
+
+  // customizeSpec is a seam that sets keepAlive directly, isolated from the
+  // env-gating and hashing logic the reuse builder itself exercises (see
+  // generic-container.reuse.test.ts).
+  class KeepAliveContainer extends GenericContainer {
+    protected override customizeSpec(spec: ContainerSpec, _mapped: (guest: number) => number): ContainerSpec {
+      return { ...spec, keepAlive: true };
+    }
+  }
+
+  it("start() never registers a sync cleanup for a keepAlive container (addendum item 6)", async () => {
+    const backend = new FakeBackend();
+    const container = new KeepAliveContainer("alpine:3.19").withBackend(backend).withExposedPorts(80).waitingFor(instantReady());
+    await container.start();
+
+    assert.ok(backend.createdHandles[0] !== undefined);
+    runAllRegisteredCleanupsForTest();
+    // A registered cleanup would have called backend.cleanupSync(handle.id);
+    // a keepAlive container must never be torn down by the exit-path
+    // registry at all.
+    assert.deepEqual(backend.cleanupSyncCalls, []);
+
+    await container.stop();
+  });
 });
 
 describe("GenericContainer — U8 mapped-port cause disambiguation + memory limit", () => {
@@ -474,5 +517,110 @@ describe("GenericContainer — containerIsStarting fires before any boot work", 
     await container.start();
     assert.equal(container.isRunning, true);
     await container.stop();
+  });
+});
+
+describe("GenericContainer wired to the real reaping ledger (via Backends.active(), never withBackend())", () => {
+  // Hermetic despite the impurity, same discipline as backends.test.ts's own
+  // "registerBackend + Backends.active" suite: everything here mutates
+  // process-global state (the provider registry, Backends' memoized backend,
+  // env vars), and a single-process test runner loads every file's tests
+  // into the same process — restore it all on the way out.
+  const savedProviders = _providersSnapshotForTests();
+  const savedBackendEnv = process.env["RIGHTSIZE_BACKEND"];
+  const savedCacheDirEnv = process.env["RIGHTSIZE_CACHE_DIR"];
+  const savedReaperEnv = process.env["RIGHTSIZE_REAPER"];
+  let ledgerCacheDir: string;
+
+  beforeEach(async () => {
+    ledgerCacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-gc-ledger-test-"));
+    _resetRegistryForTests();
+    Backends._resetActiveForTests();
+    delete process.env["RIGHTSIZE_BACKEND"];
+    process.env["RIGHTSIZE_CACHE_DIR"] = ledgerCacheDir;
+    // "sweep": exercises the ledger for real without spawning a watchdog
+    // child process this test suite would otherwise need to clean up.
+    process.env["RIGHTSIZE_REAPER"] = "sweep";
+  });
+
+  afterEach(async () => {
+    await fs.rm(ledgerCacheDir, { recursive: true, force: true });
+  });
+
+  after(() => {
+    _resetRegistryForTests();
+    for (const p of savedProviders) {
+      registerBackend(p);
+    }
+    Backends._resetActiveForTests();
+    if (savedBackendEnv === undefined) {
+      delete process.env["RIGHTSIZE_BACKEND"];
+    } else {
+      process.env["RIGHTSIZE_BACKEND"] = savedBackendEnv;
+    }
+    if (savedCacheDirEnv === undefined) {
+      delete process.env["RIGHTSIZE_CACHE_DIR"];
+    } else {
+      process.env["RIGHTSIZE_CACHE_DIR"] = savedCacheDirEnv;
+    }
+    if (savedReaperEnv === undefined) {
+      delete process.env["RIGHTSIZE_REAPER"];
+    } else {
+      process.env["RIGHTSIZE_REAPER"] = savedReaperEnv;
+    }
+  });
+
+  function registerFakeProvider(): void {
+    const provider: BackendProvider = {
+      name: "docker",
+      priority: 10,
+      isSupported: () => true,
+      unsupportedReason: () => "n/a",
+      create: () => new FakeBackend(),
+    };
+    registerBackend(provider);
+  }
+
+  async function soleRunId(): Promise<string> {
+    const entries = await fs.readdir(path.join(ledgerCacheDir, "runs"));
+    const jsonFile = entries.find((f) => f.endsWith(".json"));
+    assert.ok(jsonFile !== undefined, "expected the reaper to have written exactly one run record");
+    return (jsonFile as string).slice(0, -".json".length);
+  }
+
+  it("start() appends the sandbox name to the ledger before create(); stop() removes it after teardown", async () => {
+    registerFakeProvider();
+    const container = new GenericContainer("alpine:3.19").withExposedPorts(80).waitingFor(instantReady());
+    await container.start();
+
+    const runId = await soleRunId();
+    assert.equal((await readSandboxNames(ledgerCacheDir, runId)).length, 1);
+
+    await container.stop();
+    assert.deepEqual(await readSandboxNames(ledgerCacheDir, runId), []);
+  });
+
+  it("a network's id is tracked while a member is running and untracked on Network.close()", async () => {
+    registerFakeProvider();
+    const net = Network.newNetwork();
+    const container = new GenericContainer("alpine:3.19").withNetwork(net).withExposedPorts(80).waitingFor(instantReady());
+    await container.start();
+
+    const runId = await soleRunId();
+    assert.deepEqual(await readNetworkIds(ledgerCacheDir, runId), [net.id]);
+
+    await container.stop();
+    await net.close();
+    assert.deepEqual(await readNetworkIds(ledgerCacheDir, runId), []);
+  });
+
+  it("a container started via an explicit withBackend() override never touches the ledger at all", async () => {
+    registerFakeProvider(); // registered but irrelevant — withBackend() bypasses resolution entirely
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).withExposedPorts(80).waitingFor(instantReady());
+    await container.start();
+    await container.stop();
+
+    assert.equal(fsSync.existsSync(path.join(ledgerCacheDir, "runs")), false);
   });
 });

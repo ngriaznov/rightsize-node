@@ -1,4 +1,5 @@
 import type { BackendProvider, SandboxBackend } from "./backend.js";
+import { ensureReaperInitialized, notifyBackendClosed, _resetReaperForTests } from "./reaper/init.js";
 
 // The ServiceLoader analog: an explicit process-global registry. Each
 // backend subpath (`rightsize/backend-msb`, `rightsize/backend-docker`)
@@ -92,8 +93,8 @@ function active(): SandboxBackend {
       // This is best-effort and NOT the primary safety net: a process that
       // dies via SIGKILL, or exits through the synchronous "exit" path
       // before beforeExit ever fires, is instead covered by the per-
-      // container cleanupSync registered in cleanup.ts and by the orphan
-      // reaper each backend runs at construction.
+      // container cleanupSync registered in cleanup.ts and by the
+      // ledger-based reaper (see reaperReady() below and core/reaper/init.ts).
       //
       // "beforeExit" re-fires every time the event loop would otherwise go
       // idle. close() is async — it awaits HTTP/subprocess calls — so
@@ -109,14 +110,24 @@ function active(): SandboxBackend {
           return;
         }
         closeStarted = true;
+        // Run-record cleanup rule (see reaper/init.ts's notifyBackendClosed
+        // doc): once close()'s own-run cleanup has settled — success or
+        // failure, since close() is itself best-effort and there is no
+        // caller left to report a failure to — this run's ledger files are
+        // stale and get deleted. notifyBackendClosed is itself best-effort
+        // (never rejects in a way that escapes here).
+        const afterClose = (): void => {
+          notifyBackendClosed().catch(() => {});
+        };
         // Best-effort: a backend whose close() rejects — or, as a defensive
         // fake in a test can do, throws synchronously before ever producing
         // a Promise to attach .catch() to — must not crash the process on
         // its way out. There is no caller left to report the failure to.
         try {
-          activeBackend?.close().catch(() => {});
+          activeBackend?.close().then(afterClose, afterClose);
         } catch {
           // Swallowed for the same reason as the .catch() above.
+          afterClose();
         }
       });
     }
@@ -124,10 +135,33 @@ function active(): SandboxBackend {
   return activeBackend;
 }
 
-/** Test seam: forces the next `Backends.active()` call to re-resolve. */
+let reaperReadyPromise: Promise<void> | undefined;
+
+/**
+ * Awaits the reaper's one-time-per-process bring-up (run record, sweep,
+ * watchdog — see `core/reaper/init.ts`) against whatever `active()` resolves.
+ * Colocated with `active()`'s own memoization so the kickoff happens right
+ * after resolution succeeds, but kept as a SEPARATE function (rather than
+ * folded into `active()` itself) so `active()` stays synchronous — its
+ * existing callers, including test code that resolves a backend without
+ * ever wanting reaper side effects, are unaffected. `GenericContainer.start()`
+ * awaits this before its first `backend.create()` call, for every container
+ * that resolves its backend from here (not one pinned via `withBackend()`).
+ */
+function reaperReady(): Promise<void> {
+  const backend = active();
+  if (reaperReadyPromise === undefined) {
+    reaperReadyPromise = ensureReaperInitialized(backend);
+  }
+  return reaperReadyPromise;
+}
+
+/** Test seam: forces the next `Backends.active()` call to re-resolve, and the next `reaperReady()` call to redo the reaper's bring-up. */
 function _resetActiveForTests(): void {
   activeBackend = undefined;
   exitHookInstalled = false;
+  reaperReadyPromise = undefined;
+  _resetReaperForTests();
 }
 
 /** The library's single entry point for obtaining the active `SandboxBackend`. */
@@ -136,6 +170,8 @@ export const Backends = {
   resolve,
   /** The memoized, per-process active backend — resolved from whatever's registered plus `RIGHTSIZE_BACKEND`. */
   active,
-  /** Test seam: forces the next `active()` call to re-resolve. Never call from library code. */
+  /** Awaits the reaper's one-time bring-up against the active backend — see the doc above. */
+  reaperReady,
+  /** Test seam: forces the next `active()`/`reaperReady()` call to re-resolve/redo bring-up. Never call from library code. */
   _resetActiveForTests,
 };

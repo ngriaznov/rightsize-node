@@ -3,9 +3,9 @@ import * as fsp from "node:fs/promises";
 import * as http from "node:http";
 import * as https from "node:https";
 import * as path from "node:path";
-import * as os from "node:os";
 import { createHash } from "node:crypto";
 import { ProvisionError } from "../core/errors.js";
+import { cacheDir as defaultCacheDir } from "../core/cache-dir.js";
 import { PlatformInfo } from "./platform.js";
 import type { Platform } from "./platform.js";
 
@@ -16,26 +16,6 @@ const CONNECT_READ_TIMEOUT_MS = 300_000;
 const STALE_LOCK_AGE_MS = 5 * 60 * 1000;
 const LOCK_POLL_MS = 200;
 const LOCK_WAIT_MAX_MS = 30_000;
-
-/**
- * `%LOCALAPPDATA%` is the Windows-idiomatic location for a machine-local,
- * non-roaming native toolchain cache (as opposed to `%USERPROFILE%`, which a
- * roaming-profile setup can sync, or a Unix-style dotfile under the home
- * dir). Falls back to `%USERPROFILE%\AppData\Local` if the env var is unset,
- * matching what `os.homedir()` resolves to on a normal Windows install when
- * `LOCALAPPDATA` isn't populated (rare, but seen on some minimal/CI images).
- */
-function defaultCacheDir(): string {
-  const override = process.env["RIGHTSIZE_CACHE_DIR"];
-  if (override !== undefined) {
-    return override;
-  }
-  if (process.platform === "win32") {
-    const localAppData = process.env["LOCALAPPDATA"] ?? path.join(os.homedir(), "AppData", "Local");
-    return path.join(localAppData, "rightsize");
-  }
-  return path.join(os.homedir(), ".cache", "rightsize");
-}
 
 /**
  * "Is this a usable, already-provisioned msb binary": on macOS/Linux this

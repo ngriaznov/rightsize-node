@@ -3,7 +3,7 @@ import { FreePorts } from "../src/core/free-ports.js";
 import { GenericContainer } from "../src/core/generic-container.js";
 import { PortBindConflictError } from "../src/core/errors.js";
 import type { WaitStrategy } from "../src/core/wait.js";
-import type { SandboxBackend, SandboxHandle, NetworkLink, FollowHandle } from "../src/core/backend.js";
+import type { SandboxBackend, SandboxHandle, NetworkLink, FollowHandle, ReaperKillCommand } from "../src/core/backend.js";
 import type { ContainerSpec, ExecResult } from "../src/core/model.js";
 import { isPortBindConflictOutput } from "../src/backend-msb/port-conflict.js";
 import { isPortBindConflictMessage } from "../src/backend-docker/port-conflict.js";
@@ -48,6 +48,7 @@ interface FollowFakeOptions {
 class FollowFakeBackend implements SandboxBackend {
   readonly name = "follow-fake";
   readonly supportsNativeNetworks = true;
+  readonly capabilities = { hardwareIsolated: true, checkpoint: false };
 
   constructor(private readonly opts: FollowFakeOptions = {}) {}
 
@@ -58,6 +59,14 @@ class FollowFakeBackend implements SandboxBackend {
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
   async remove(): Promise<void> {}
+  async commitToImage(): Promise<void> {}
+  async removeByName(): Promise<void> {}
+  async findRunning(): Promise<SandboxHandle | undefined> {
+    return undefined;
+  }
+  async reaperKillCommand(): Promise<ReaperKillCommand> {
+    return { stop: [], remove: [], removeNetwork: [] };
+  }
 
   async exec(): Promise<ExecResult> {
     return { exitCode: 0, stdout: "", stderr: "" };
@@ -195,6 +204,7 @@ describe("isPortBindConflict truth table", () => {
     const backend: SandboxBackend = {
       name: "wrapped-conflict-fake",
       supportsNativeNetworks: true,
+      capabilities: { hardwareIsolated: true, checkpoint: false },
       async create(spec: ContainerSpec) {
         return { id: `wrapped-${attempts}`, spec };
       },
@@ -206,6 +216,14 @@ describe("isPortBindConflict truth table", () => {
       },
       async stop() {},
       async remove() {},
+      async commitToImage() {},
+      async removeByName() {},
+      async findRunning() {
+        return undefined;
+      },
+      async reaperKillCommand(): Promise<ReaperKillCommand> {
+        return { stop: [], remove: [], removeNetwork: [] };
+      },
       async exec() {
         return { exitCode: 0, stdout: "", stderr: "" };
       },

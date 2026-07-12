@@ -59,4 +59,27 @@ export interface ContainerSpec {
   readonly runId: string;
   /** An explicit memory ceiling in MB, if the module or caller set one via `withMemoryLimit`. */
   readonly memoryLimitMb: number | undefined;
+  /**
+   * `true` for a container meant to outlive this process — set by
+   * `GenericContainer`'s reuse builder (`.withReuse()`), `false` otherwise.
+   * Backends and the reaping ledger consult it to keep a reusable sandbox
+   * out of every own-run cleanup path; a container carrying this flag is
+   * never appended to the ledger's `.sandboxes` file at all, so a sweep can
+   * never reach it.
+   */
+  readonly keepAlive: boolean;
+}
+
+/**
+ * The result of `GenericContainer.checkpoint()`: a committed image plus the
+ * source container's spec, everything `GenericContainer.fromCheckpoint()`
+ * needs to boot an equivalent container. A checkpoint is a FILESYSTEM
+ * capture, not a memory snapshot — a restored container's processes start
+ * from scratch against the committed filesystem.
+ */
+export interface Checkpoint {
+  /** The committed image reference, `rightsize/checkpoint:<12-hex>` — random per checkpoint, never reused. */
+  readonly imageRef: string;
+  /** The source container's spec (env, command, exposed ports, memory limit — everything needed to boot an equivalent container from `imageRef`). */
+  readonly spec: ContainerSpec;
 }

@@ -14,6 +14,7 @@ function baseSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     aliases: [],
     runId: "abc12345",
     memoryLimitMb: undefined,
+    keepAlive: false,
     ...overrides,
   };
 }

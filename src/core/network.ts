@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { SandboxBackend, NetworkLink } from "./backend.js";
+import { untrackNetwork } from "./reaper/init.js";
 
 /**
  * The subset of a running container `Network` needs in order to compute
@@ -104,6 +105,7 @@ export class Network implements AsyncDisposable {
     if (this.lastBackend !== undefined) {
       await this.lastBackend.removeNetwork(this.id);
     }
+    await untrackNetwork(this.id);
   }
 
   /** `= close()`. What `await using net = Network.newNetwork()` calls at scope exit. */

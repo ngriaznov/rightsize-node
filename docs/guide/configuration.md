@@ -8,6 +8,8 @@
 | `MSB_PATH` | Use a pre-installed `msb` binary; skips the download/provisioning step entirely. |
 | `RIGHTSIZE_CACHE_DIR` | Relocate the runtime cache (default `~/.cache/rightsize`). |
 | `RIGHTSIZE_MSB_SKIP_DOWNLOAD` | `true` = fail with guidance instead of downloading — for air-gapped CI; pair with `MSB_PATH` or a pre-seeded cache. |
+| `RIGHTSIZE_REAPER` | `on` (default) / `sweep` / `off` — controls orphan reaping. See [Orphan reaping](/guide/reaping). |
+| `RIGHTSIZE_REUSE` | `true` or `1` — the second half of reuse's double opt-in (paired with `.withReuse()` on the builder). See [Container reuse](/guide/reuse). |
 | `DOCKER_HOST` | A `unix://` socket path (or bare path) for the Docker backend to dial instead of the default `/var/run/docker.sock`. |
 
 See [Backends](/guide/backends) for how these combine with automatic

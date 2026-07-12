@@ -31,16 +31,12 @@ export class MsbBackendProvider implements BackendProvider {
 
   create(): SandboxBackend {
     // create() is a synchronous ServiceLoader-style factory, but
-    // locating/installing msb is inherently async. The
-    // backend holds the provisioning promise and awaits it lazily on first
-    // use; sweepOrphans() piggybacks on that same lazy resolution rather
-    // than blocking construction.
-    const backend = new MsbCliBackend(ensureInstalled());
-    void backend.sweepOrphans().catch(() => {
-      // Best-effort: a failed sweep must not prevent this backend from
-      // being usable — the next run's sweep gets another chance, and a
-      // container that's actually still running is left alone either way.
-    });
-    return backend;
+    // locating/installing msb is inherently async. The backend holds the
+    // provisioning promise and awaits it lazily on first use. The
+    // liveness-blind per-backend sweep that used to run here has been
+    // replaced by the ledger-based sweep in `core/reaper`, triggered once
+    // per process from `Backends.active()`'s resolution gate — see
+    // `core/reaper/init.ts`.
+    return new MsbCliBackend(ensureInstalled());
   }
 }
