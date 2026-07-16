@@ -15,6 +15,7 @@ function baseSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     runId: "abc12345",
     memoryLimitMb: undefined,
     keepAlive: false,
+    checkpointRef: undefined,
     ...overrides,
   };
 }
@@ -130,6 +131,68 @@ describe("MsbCommands", () => {
       "image",
       "remove",
       "floci/floci-az:0.8.0",
+    ]);
+  });
+
+  it("run: checkpointRef boots via --snapshot instead of the image, keeping every other flag", () => {
+    const argv = MsbCommands.run(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        memoryLimitMb: 256,
+        ports: [{ hostPort: 1111, guestPort: 22 }],
+        env: [["A", "1"]],
+        command: ["sh", "-c", "true"],
+      }),
+    );
+    assert.deepEqual(argv, [
+      "run",
+      "--name",
+      "rz-abc12345-1",
+      "-m",
+      "256M",
+      "-p",
+      "1111:22",
+      "-e",
+      "A=1",
+      "--snapshot",
+      "rz-ckpt-abcdef012345",
+      "--",
+      "sh",
+      "-c",
+      "true",
+    ]);
+    assert.equal(argv.includes("redis:8.6-alpine"), false, "the image must never appear alongside --snapshot");
+  });
+
+  it("snapshotCreate", () => {
+    assert.deepEqual(MsbCommands.snapshotCreate("box-1", "rz-ckpt-abcdef012345"), [
+      "snapshot",
+      "create",
+      "--from",
+      "box-1",
+      "rz-ckpt-abcdef012345",
+    ]);
+  });
+
+  it("snapshotRemove", () => {
+    assert.deepEqual(MsbCommands.snapshotRemove("rz-ckpt-abcdef012345"), ["snapshot", "rm", "rz-ckpt-abcdef012345"]);
+  });
+
+  it("copyIn", () => {
+    assert.deepEqual(MsbCommands.copyIn("/host/f.txt", "box-1", "/guest/f.txt"), [
+      "copy",
+      "-q",
+      "/host/f.txt",
+      "box-1:/guest/f.txt",
+    ]);
+  });
+
+  it("copyOut", () => {
+    assert.deepEqual(MsbCommands.copyOut("box-1", "/guest/f.txt", "/host/f.txt"), [
+      "copy",
+      "-q",
+      "box-1:/guest/f.txt",
+      "/host/f.txt",
     ]);
   });
 });

@@ -3,7 +3,7 @@ import { Wait } from "../core/wait.js";
 
 const HTTP_PORT = 8080;
 const MANAGEMENT_PORT = 9000;
-const STARTUP_TIMEOUT_MS = 120_000;
+const STARTUP_TIMEOUT_MS = 180_000;
 
 /**
  * A single-node Keycloak container started with `start-dev` (an

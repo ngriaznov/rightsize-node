@@ -69,10 +69,20 @@ export interface BackendCapabilities {
   readonly hardwareIsolated: boolean;
   /**
    * `true` when the backend can checkpoint/restore a sandbox's state
-   * (docker: commit-to-image; msb: no upstream microVM snapshot support
-   * yet). `GenericContainer.checkpoint()` demands `true`.
+   * (docker: commit-to-image; msb: disk snapshot via `msb snapshot`).
+   * `GenericContainer.checkpoint()` demands `true`.
    */
   readonly checkpoint: boolean;
+  /**
+   * `true` when a `checkpoint()` call on this backend restarts the
+   * sandbox's workload as a side effect of capturing state (msb: the
+   * stop/snapshot/reboot cycle boots a fresh microVM) — `false` when the
+   * sandbox is undisturbed (docker: commit-to-image never touches the
+   * running container). `GenericContainer.checkpoint()` re-runs the
+   * container's own wait strategy before returning exactly when this is
+   * `true`, so a caller never gets back a false-ready container.
+   */
+  readonly checkpointRestartsWorkload: boolean;
 }
 
 /**
@@ -96,14 +106,41 @@ export interface SandboxBackend {
   /** Best-effort removal of the backend-native resource; callers swallow failures during teardown. */
   remove(handle: SandboxHandle): Promise<void>;
   /**
-   * Commits `handle`'s current filesystem to a new image tagged `imageRef` —
+   * Captures `handle`'s current state under `ref` —
    * `GenericContainer.checkpoint()`'s backend call, gated on
    * `capabilities.checkpoint` BEFORE this is ever reached, so an
    * unsupported backend never has to implement this for real (it may throw
-   * defensively). Docker: the engine's commit endpoint. Never called on a
-   * backend whose `capabilities.checkpoint` is `false`.
+   * defensively). Docker: commits the running container to image `ref`,
+   * undisturbed. Microsandbox: stop the sandbox, `msb snapshot create` a
+   * disk snapshot named `ref`, then start the sandbox back up — the
+   * workload restarts, which is why `capabilities.checkpointRestartsWorkload`
+   * exists. Never called on a backend whose `capabilities.checkpoint` is
+   * `false`.
    */
-  commitToImage(handle: SandboxHandle, imageRef: string): Promise<void>;
+  createCheckpoint(handle: SandboxHandle, ref: string): Promise<void>;
+  /**
+   * Best-effort removal of a checkpoint identified by `ref` (docker: `rmi`;
+   * microsandbox: `msb snapshot rm`) — "not found" is success, the same
+   * contract as `removeByName`. SPI-only: there is no public
+   * `GenericContainer` method for this, only documented CLI one-liners for
+   * end users; it exists so tests can keep shared CI state clean.
+   */
+  removeCheckpoint(ref: string): Promise<void>;
+  /**
+   * Probes whether a checkpoint artifact identified by `ref` still exists —
+   * docker: image inspect; microsandbox: `msb snapshot inspect <ref>` exit
+   * code. `Checkpoints.find`'s only caller: it never probes an entry
+   * recorded under a DIFFERENT backend than the one this is called on, so in
+   * practice this is only ever invoked on a backend whose
+   * `capabilities.checkpoint` is `true`. A backend that never supports
+   * checkpoints at all may implement this by throwing
+   * `UnsupportedByBackendError`, the same defensive-throw convention
+   * `createCheckpoint` documents for that case. A probe FAILURE (the
+   * underlying call itself errors) must propagate — only a confirmed
+   * "does not exist" may resolve `false`; best-effort `false` on an error is
+   * not allowed.
+   */
+  hasCheckpoint(ref: string): Promise<boolean>;
   /**
    * Best-effort stop+remove of a sandbox identified by NAME rather than a
    * `SandboxHandle` — the reaping ledger only ever stores names (it must be
@@ -143,6 +180,20 @@ export interface SandboxBackend {
   removeNetwork(networkId: string): Promise<void>;
   /** Default no-op: docker relies on native networks. Only an emulating backend overrides it. */
   installNetworkLinks(handle: SandboxHandle, links: ReadonlyArray<NetworkLink>): Promise<void>;
+  /**
+   * Copies a host file or directory into the guest at `containerPath` — the
+   * TRANSFER step only. `GenericContainer.copyFileToContainer()` owns the
+   * running-check, the absolute-path check, and the `mkdir -p` pre-step (via
+   * `exec`) before this is ever called; this method does only the copy
+   * itself. `cp -r`-style destination naming: copying a directory to an
+   * absent destination path produces that path as a copy of the source's
+   * CONTENTS, not the source nested one level down — both backends' own
+   * copy tools already behave this way. A failure must carry the
+   * underlying tool's stderr in a `BackendError`, never a silent success.
+   */
+  copyToContainer(handle: SandboxHandle, hostPath: string, containerPath: string): Promise<void>;
+  /** The reverse direction of `copyToContainer` — see its own doc for the shared contract (transfer only, `cp -r`-style naming, stderr on failure). */
+  copyFromContainer(handle: SandboxHandle, containerPath: string, hostPath: string): Promise<void>;
   /** Best-effort teardown of backend-owned resources (sockets, child processes). */
   close(): Promise<void>;
   /**

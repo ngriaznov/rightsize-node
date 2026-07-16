@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, assert, after, beforeEach } from "../../test/harness.js";
 import { MsbCliBackend } from "./backend.js";
-import { UnsupportedByBackendError } from "../core/errors.js";
+import { BackendError } from "../core/errors.js";
 import type { ContainerSpec } from "../core/model.js";
 
 // Resolved relative to THIS module's own compiled location (dist-test or
@@ -26,6 +26,7 @@ function baseSpec(name: string, overrides: Partial<ContainerSpec> = {}): Contain
     runId: "testrun1",
     memoryLimitMb: undefined,
     keepAlive: false,
+    checkpointRef: undefined,
     ...overrides,
   };
 }
@@ -395,28 +396,276 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.match(thrown.message, /already exists/, "the error must carry msb's own output");
     await backend.remove(handle);
   });
-});
 
-describe("MsbCliBackend.capabilities", () => {
-  it("each sandbox is its own microVM: hardwareIsolated true, checkpoint false", () => {
-    // A property check needs no provisioned msb binary at all — never awaits
-    // the promise it's constructed with.
-    const backend = new MsbCliBackend(Promise.resolve("/unused/msb"));
-    assert.deepEqual(backend.capabilities, { hardwareIsolated: true, checkpoint: false });
+  it("createCheckpoint drives exactly stop -> snapshot create -> rm -> a reboot run from the snapshot, in order, leaving the sandbox Running", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-ckpt-1", {
+      ports: [{ hostPort: 15999, guestPort: 80 }],
+      env: [["FOO", "bar"]],
+    });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    await backend.createCheckpoint(handle, "rz-ckpt-abcdef012345");
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      snapshots: Record<string, { from: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    assert.equal(state.snapshots["rz-ckpt-abcdef012345"]?.from, handle.id, "expected the snapshot recorded FROM this sandbox");
+    assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the sandbox to be running again after the cycle");
+
+    // The initial backend.start() above already logged its own "run" call;
+    // only the last four calls belong to the checkpoint cycle itself.
+    const cycle = state.callLog.slice(-4);
+    assert.deepEqual(
+      cycle.map((c) => c.cmd),
+      ["stop", "snapshotCreate", "rm", "run"],
+      "expected the checkpoint cycle to drive exactly stop -> snapshot create -> rm -> run, in order",
+    );
+    assert.deepEqual(
+      cycle[3]?.args,
+      ["run", "--name", handle.id, "-p", "15999:80", "-e", "FOO=bar", "--snapshot", "rz-ckpt-abcdef012345"],
+      "expected the reboot's run to carry --snapshot <ref> plus every other flag from the original spec",
+    );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
   });
-});
 
-describe("MsbCliBackend.commitToImage", () => {
-  it("throws UnsupportedByBackendError defensively — unreachable via the generic layer, which gates on capabilities.checkpoint first", async () => {
-    const backend = new MsbCliBackend(Promise.resolve("/unused/msb"));
+  it("createCheckpoint leaves the sandbox stopped when the snapshot step fails, without removing or rebooting it", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-ckpt-fail");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failSnapshotCreate = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
     let thrown: unknown;
     try {
-      await backend.commitToImage({ id: "fake-1", spec: baseSpec("fake-1") }, "rightsize/checkpoint:abcdef012345");
+      await backend.createCheckpoint(handle, "rz-ckpt-willfail");
     } catch (err) {
       thrown = err;
     }
-    assert.ok(thrown instanceof UnsupportedByBackendError, `expected UnsupportedByBackendError, got: ${String(thrown)}`);
-    assert.equal((thrown as UnsupportedByBackendError).backend, "microsandbox");
-    assert.match((thrown as UnsupportedByBackendError).message, /docker/);
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /rz-ckpt-willfail/);
+    assert.match(
+      (thrown as Error).message,
+      /msb start rz-testrun1-ckpt-fail/,
+      "expected the by-hand remedy to be named",
+    );
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string }>;
+    };
+    assert.equal(
+      state.sandboxes[handle.id]?.status,
+      "Stopped",
+      "expected the sandbox to be left stopped rather than restarted",
+    );
+    const snapshotAttemptIdx = state.callLog.findIndex((c) => c.cmd === "snapshotCreate");
+    assert.ok(snapshotAttemptIdx !== -1, "expected the snapshot create attempt to have been logged");
+    assert.deepEqual(
+      state.callLog.slice(snapshotAttemptIdx + 1),
+      [],
+      "expected no rm or run after a failed snapshot create — no best-effort restart",
+    );
+
+    await backend.remove(handle);
+  });
+
+  it("createCheckpoint throws a typed error naming the checkpoint ref when the post-snapshot reboot fails", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-ckpt-rebootfail");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRunsWithStateDbError = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: unknown;
+    try {
+      await backend.createCheckpoint(handle, "rz-ckpt-rebootwillfail");
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /rz-ckpt-rebootwillfail/, "expected the error to name the checkpoint ref");
+    assert.match(
+      (thrown as Error).message,
+      /fromCheckpoint/,
+      "expected the error to name fromCheckpoint() as the recovery path",
+    );
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, unknown>;
+      snapshots: Record<string, { from: string }>;
+    };
+    assert.equal(
+      state.snapshots["rz-ckpt-rebootwillfail"]?.from,
+      handle.id,
+      "expected the snapshot to have been created before the reboot failed",
+    );
+    assert.equal(
+      handle.id in state.sandboxes,
+      false,
+      "expected the sandbox to already have been removed by the time the reboot failed",
+    );
+
+    await backend.remove(handle);
+    await backend.removeCheckpoint("rz-ckpt-rebootwillfail");
+  });
+
+  it("removeCheckpoint is a best-effort msb snapshot rm, silent on a name that never existed", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-ckpt-rm");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+    await backend.createCheckpoint(handle, "rz-ckpt-toremove");
+
+    await backend.removeCheckpoint("rz-ckpt-toremove");
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { snapshots?: Record<string, unknown> };
+    assert.equal("rz-ckpt-toremove" in (state.snapshots ?? {}), false);
+
+    await backend.removeCheckpoint("rz-ckpt-never-existed");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("hasCheckpoint resolves true for a snapshot that exists and false for one that doesn't", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-ckpt-inspect");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+    await backend.createCheckpoint(handle, "rz-ckpt-exists");
+
+    assert.equal(await backend.hasCheckpoint("rz-ckpt-exists"), true);
+    assert.equal(await backend.hasCheckpoint("rz-ckpt-never-existed"), false);
+
+    await backend.removeCheckpoint("rz-ckpt-exists");
+    assert.equal(await backend.hasCheckpoint("rz-ckpt-exists"), false, "expected hasCheckpoint to reflect a removed snapshot as absent");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("hasCheckpoint throws instead of resolving false when msb fails for a reason other than 'snapshot not found'", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-ckpt-inspect-fail");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+    await backend.createCheckpoint(handle, "rz-ckpt-probeerr");
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failSnapshotInspectWithError = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: unknown;
+    try {
+      await backend.hasCheckpoint("rz-ckpt-probeerr");
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /rz-ckpt-probeerr/);
+    assert.match(
+      (thrown as Error).message,
+      /database error/,
+      "expected the raw msb stderr to be carried in the thrown error, not collapsed to a bare false",
+    );
+
+    // Confirms the failure was genuinely swallowed by neither this call nor
+    // a later one — the snapshot itself is untouched and still inspects true
+    // once the demand-flag is spent.
+    assert.equal(await backend.hasCheckpoint("rz-ckpt-probeerr"), true);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("copyToContainer invokes msb copy -q <hostPath> <name>:<containerPath>", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-copyin");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    await backend.copyToContainer(handle, "/host/data.txt", "/guest/data.txt");
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { copyCalls: string[][] };
+    assert.deepEqual(state.copyCalls, [["/host/data.txt", `${handle.id}:/guest/data.txt`]]);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("copyFromContainer invokes msb copy -q <name>:<containerPath> <hostPath>", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-copyout");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    await backend.copyFromContainer(handle, "/guest/data.txt", "/host/data.txt");
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { copyCalls: string[][] };
+    assert.deepEqual(state.copyCalls, [[`${handle.id}:/guest/data.txt`, "/host/data.txt"]]);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("a failed copy surfaces the tool's stderr in a BackendError", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-copyfail");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failCopyWithError = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: unknown;
+    try {
+      await backend.copyToContainer(handle, "/host/missing.txt", "/guest/data.txt");
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /no such file or directory/);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+});
+
+describe("MsbCliBackend.capabilities", () => {
+  it("each sandbox is its own microVM: hardwareIsolated true, checkpoint true (disk snapshot), checkpointRestartsWorkload true", () => {
+    // A property check needs no provisioned msb binary at all — never awaits
+    // the promise it's constructed with.
+    const backend = new MsbCliBackend(Promise.resolve("/unused/msb"));
+    assert.deepEqual(backend.capabilities, { hardwareIsolated: true, checkpoint: true, checkpointRestartsWorkload: true });
   });
 });

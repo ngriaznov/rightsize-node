@@ -15,7 +15,7 @@ function instantReady(): WaitStrategy {
   };
 }
 
-const FAKE_CAPABILITIES: BackendCapabilities = { hardwareIsolated: true, checkpoint: false };
+const FAKE_CAPABILITIES: BackendCapabilities = { hardwareIsolated: true, checkpoint: false, checkpointRestartsWorkload: false };
 
 interface FakeDiagnosticsBackendOptions {
   logsImpl?: (handle: SandboxHandle) => Promise<string>;
@@ -39,7 +39,11 @@ class FakeDiagnosticsBackend implements SandboxBackend {
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
   async remove(): Promise<void> {}
-  async commitToImage(): Promise<void> {}
+  async createCheckpoint(): Promise<void> {}
+  async removeCheckpoint(): Promise<void> {}
+  async hasCheckpoint(): Promise<boolean> {
+    return false;
+  }
   async removeByName(): Promise<void> {}
   async findRunning(): Promise<SandboxHandle | undefined> {
     return undefined;
@@ -62,6 +66,8 @@ class FakeDiagnosticsBackend implements SandboxBackend {
   async ensureNetwork(): Promise<void> {}
   async removeNetwork(): Promise<void> {}
   async installNetworkLinks(): Promise<void> {}
+  async copyToContainer(): Promise<void> {}
+  async copyFromContainer(): Promise<void> {}
   async close(): Promise<void> {}
   cleanupSync(): void {}
 }
@@ -79,6 +85,7 @@ function fakeSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     runId: "ab12cd34",
     memoryLimitMb: undefined,
     keepAlive: false,
+    checkpointRef: undefined,
     ...overrides,
   };
 }

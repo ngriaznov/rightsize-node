@@ -1,13 +1,28 @@
 import { randomBytes } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { FreePorts } from "./free-ports.js";
 import { RunId } from "./run-id.js";
 import { Network } from "./network.js";
 import type { NetworkMember } from "./network.js";
-import { PortBindConflictError, IsolationRequiredError, CheckpointUnsupportedError } from "./errors.js";
+import {
+  PortBindConflictError,
+  IsolationRequiredError,
+  CheckpointUnsupportedError,
+  CheckpointBackendMismatchError,
+  ReuseFromCheckpointError,
+  RelativeContainerPathError,
+  BackendError,
+} from "./errors.js";
+import { requireValidCheckpointName } from "./checkpoint/name.js";
+import { checkpointRef } from "./checkpoint/ref.js";
+import { toCheckpointRegistrySpec, writeCheckpointRegistryAtomic } from "./checkpoint/registry.js";
+import type { CheckpointRegistryEntry } from "./checkpoint/registry.js";
 import { Wait } from "./wait.js";
 import type { WaitStrategy, WaitTarget } from "./wait.js";
 import { registerSyncCleanup, unregisterSyncCleanup } from "./cleanup.js";
-import type { SandboxBackend, SandboxHandle, FollowHandle } from "./backend.js";
+import type { SandboxBackend, SandboxHandle, FollowHandle, NetworkLink } from "./backend.js";
 import type { ContainerSpec, FileMount, ExecResult, Checkpoint } from "./model.js";
 import type { MountableFile } from "./mountable-file.js";
 import { Backends } from "./backends.js";
@@ -17,6 +32,13 @@ import { ReuseWithNetworkError } from "./errors.js";
 import { reuseEnabled } from "./reuse/env.js";
 import { reuseHash, reuseName } from "./reuse/hash.js";
 import { readRegistry, writeRegistryAtomic, removeRegistry, type ReuseRegistryEntry } from "./reuse/registry.js";
+
+/** Fails fast — before any backend call — on a relative `containerPath`: both backends require an absolute `NAME:/path` shape. */
+function requireAbsoluteContainerPath(containerPath: string): void {
+  if (!path.posix.isAbsolute(containerPath)) {
+    throw new RelativeContainerPathError(containerPath);
+  }
+}
 
 const MAX_START_ATTEMPTS = 5;
 
@@ -105,11 +127,14 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
   private backendOverride: SandboxBackend | undefined;
   private reuseRequested = false;
   private requireIsolationRequested = false;
+  private checkpointRef: string | undefined;
+  private checkpointSourceBackend: string | undefined;
 
   private handle: SandboxHandle | undefined;
   private backend: SandboxBackend | undefined;
   private mappedPorts: Map<number, number> = new Map();
   private running = false;
+  private installedNetworkLinks: ReadonlyArray<NetworkLink> = [];
 
   /** Builds against `image` (e.g. `"redis:8.6-alpine"`); no I/O happens until `start()`. */
   constructor(image: string) {
@@ -123,18 +148,24 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
 
   /**
    * Builds a normal, ephemeral `GenericContainer` from a `Checkpoint`
-   * (`checkpoint()`'s return value): image is `cp.imageRef`, and
+   * (`checkpoint()`'s return value): image is `cp.ref`, and
    * env/command/exposed ports/memory limit default to `cp.spec` — chain
    * further builder calls (a different `waitingFor`, `withBackend`, …)
    * before `start()`, the same as any other container. Never carries over
-   * `cp.spec`'s network/aliases/mounts — the committed image already has
-   * the filesystem baked in, and (as with `withReuse()`'s own network
+   * `cp.spec`'s network/aliases/mounts — the captured state already has the
+   * filesystem baked in, and (as with `withReuse()`'s own network
    * restriction) network topology is never part of what a checkpoint
-   * captures. Once started, a restored container is ordinary in every
-   * respect: fresh host ports, normal reaping-ledger tracking, normal stop.
+   * captures. `start()` throws `CheckpointBackendMismatchError` before any
+   * backend call if the active backend isn't the one that created `cp`, and
+   * `ReuseFromCheckpointError` if this container is also marked
+   * `withReuse()` — reuse's identity hash never covers a checkpoint ref.
+   * Once started, a restored container is ordinary in every other respect:
+   * fresh host ports, normal reaping-ledger tracking, normal stop.
    */
   static fromCheckpoint(cp: Checkpoint): GenericContainer {
-    const container = new GenericContainer(cp.imageRef);
+    const container = new GenericContainer(cp.ref);
+    container.checkpointRef = cp.ref;
+    container.checkpointSourceBackend = cp.backend;
     for (const [key, value] of cp.spec.env) {
       container.withEnv(key, value);
     }
@@ -297,6 +328,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       // requested-but-env-disabled reuse container falls through to here
       // deliberately (Testcontainers semantics), so it must stay false.
       keepAlive: false,
+      checkpointRef: this.checkpointRef,
     };
     return this.customizeSpec(spec, (guest) => {
       const p = ports.get(guest);
@@ -326,6 +358,10 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       runId: RunId.value,
       memoryLimitMb: this.memoryLimitMb,
       keepAlive: true,
+      // Reuse + fromCheckpoint is rejected in start() before this is ever
+      // built (see ReuseFromCheckpointError) — always undefined in
+      // practice, present only to satisfy ContainerSpec's shape.
+      checkpointRef: this.checkpointRef,
     };
     return this.customizeSpec(spec, (guest) => {
       const p = ports.get(guest);
@@ -378,6 +414,12 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    */
   async start(): Promise<this> {
     const backend = this.resolveBackend();
+    // Before any backend work at all: a checkpoint ref is only meaningful
+    // to the backend that minted it (a docker image tag means nothing to
+    // msb, a msb snapshot name means nothing to docker).
+    if (this.checkpointSourceBackend !== undefined && this.checkpointSourceBackend !== backend.name) {
+      throw new CheckpointBackendMismatchError(this.checkpointSourceBackend, backend.name);
+    }
     // Only the env-resolved path (never an explicit withBackend() override)
     // drives the reaper: writes this process's run record, sweeps dead runs
     // on first use, and spawns the watchdog. Skipping it for overrides is
@@ -404,6 +446,9 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       if (reuseEnabled(process.env)) {
         if (this.network !== undefined) {
           throw new ReuseWithNetworkError();
+        }
+        if (this.checkpointRef !== undefined) {
+          throw new ReuseFromCheckpointError();
         }
         return this.startReuse(backend);
       }
@@ -491,6 +536,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     try {
       const links = this.network?.linksForNewMember() ?? [];
       await backend.installNetworkLinks(handle, links);
+      this.installedNetworkLinks = links;
       // Register AFTER links are computed/installed — a container must
       // never see itself in its own linksForNewMember() call.
       if (this.network !== undefined) {
@@ -837,26 +883,143 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
   }
 
   /**
-   * Commits this running container's filesystem to a new image and returns
-   * a `Checkpoint` — a FILESYSTEM capture, not a memory snapshot:
-   * `fromCheckpoint()` boots a fresh container from the committed image
-   * with processes restarting from scratch, not resuming. Requires the
-   * active backend's `capabilities.checkpoint` (docker: `true`, via image
-   * commit; microsandbox: `false`, no upstream microVM snapshot support
-   * yet) — checked BEFORE any backend call, so an unsupported backend never
-   * attempts one. Throws a state error (same shape as `exec`/`logs`) if
-   * this container isn't currently running. Checkpoint images are never
-   * auto-reaped (they're images, not containers) — see the checkpoints
-   * guide for the manual cleanup one-liner.
+   * Captures this running container's state and returns a `Checkpoint` — a
+   * FILESYSTEM capture, not a memory snapshot: `fromCheckpoint()` boots a
+   * container from the captured state with processes restarting from
+   * scratch, not resuming. Requires the active backend's
+   * `capabilities.checkpoint` (`true` on both real backends today: docker
+   * via image commit, microsandbox via disk snapshot) — checked BEFORE any
+   * backend call, so an unsupported backend never attempts one. Throws a
+   * state error (same shape as `exec`/`logs`) if this container isn't
+   * currently running.
+   *
+   * Passing `name` makes this checkpoint NAMED and durable: the ref becomes
+   * deterministic (`rz-ckpt-<name>` / `rightsize/checkpoint:<name>` instead
+   * of a random 12-hex suffix), and — only once the backend call below has
+   * actually succeeded — a registry entry is written under
+   * `<cacheDir>/checkpoints/<name>.json` that `Checkpoints.find`/`list`/
+   * `remove` can rediscover later, in this process or a different one. `name`
+   * must match `^[a-z0-9][a-z0-9-]{0,40}$`; an invalid name throws
+   * `InvalidCheckpointNameError` before any backend call. Checkpointing under
+   * a name that already has a registry entry REPLACES it: the ref is the
+   * same deterministic value either way, so this best-effort clears the old
+   * artifact under that ref before creating the new one, then overwrites the
+   * registry entry — the latest checkpoint under a name always wins.
+   * Omitting `name` keeps the original behavior byte-for-byte: a random ref,
+   * no registry entry, ephemeral.
+   *
+   * On a backend whose `capabilities.checkpointRestartsWorkload` is `true`
+   * (microsandbox: the stop/snapshot/reboot cycle boots a fresh microVM),
+   * this re-runs the container's own wait strategy before returning — a bare
+   * return right after the backend call would hand back a false-ready
+   * container. docker's commit-to-image never disturbs the running
+   * container, so no re-wait happens there.
+   *
+   * That same reboot also kills any network links this container had
+   * installed toward already-running siblings (msb emulates them with
+   * exec-tunnels, which the workload restart tears down along with
+   * everything else on the sandbox), so when links were installed in the
+   * first place, this re-runs `installNetworkLinks` with those same links
+   * BEFORE the wait-strategy re-run — the wait must gate a container that is
+   * fully re-linked, not just booted.
+   *
+   * Checkpoints are never auto-reaped (a committed image or a disk snapshot
+   * is not a container) — see the checkpoints guide for the manual cleanup
+   * one-liners and the `Checkpoints.remove` cleanup affordance.
    */
-  async checkpoint(): Promise<Checkpoint> {
+  async checkpoint(name?: string): Promise<Checkpoint> {
+    if (name !== undefined) {
+      requireValidCheckpointName(name);
+    }
     const { handle, backend } = this.requireHandle();
     if (!backend.capabilities.checkpoint) {
       throw new CheckpointUnsupportedError(backend.name);
     }
-    const imageRef = `rightsize/checkpoint:${randomBytes(6).toString("hex")}`;
-    await backend.commitToImage(handle, imageRef);
-    return { imageRef, spec: handle.spec };
+    const ref = checkpointRef(backend.name, name);
+    if (name !== undefined) {
+      // Replace semantics: the ref is deterministic from `name`, so a prior
+      // checkpoint under this same name — if any — sits under this exact
+      // ref. Best-effort clear it before creating the new one.
+      await swallow(() => backend.removeCheckpoint(ref));
+    }
+    await backend.createCheckpoint(handle, ref);
+    if (backend.capabilities.checkpointRestartsWorkload) {
+      if (this.installedNetworkLinks.length > 0) {
+        await backend.installNetworkLinks(handle, this.installedNetworkLinks);
+      }
+      await this.waitStrategy.waitUntilReady(this.asWaitTarget());
+    }
+    if (name !== undefined) {
+      // Only after the backend checkpoint above has actually succeeded — a
+      // failed createCheckpoint() already threw, so a registry entry is
+      // never written for a checkpoint that doesn't exist.
+      const entry: CheckpointRegistryEntry = {
+        name,
+        ref,
+        backend: backend.name,
+        createdIso: new Date().toISOString(),
+        spec: toCheckpointRegistrySpec(handle.spec),
+      };
+      await writeCheckpointRegistryAtomic(cacheDir(), name, entry);
+    }
+    return { ref, backend: backend.name, spec: handle.spec };
+  }
+
+  /**
+   * Copies a host file or directory into this running container at
+   * `containerPath`, creating the destination's parent directory first
+   * (`exec: mkdir -p <parent>`) — callers never pre-create directories on
+   * either side. `containerPath` must be absolute (both backends' own copy
+   * tools require `NAME:/abs/path`); `hostPath` may be a file or a
+   * directory, `cp -r`-style: copying a directory to an absent destination
+   * produces that destination as a copy of the source's CONTENTS, not the
+   * source nested one level down. Requires a running container — throws the
+   * same state error `exec()`/`logs()` do, before any backend call. Works on
+   * a reuse container too, but the copy mutates shared state that is NOT
+   * part of the reuse identity hash — see the reuse guide's caveat.
+   */
+  async copyFileToContainer(hostPath: string, containerPath: string): Promise<void> {
+    const { handle, backend } = this.requireHandle();
+    requireAbsoluteContainerPath(containerPath);
+    const parent = path.posix.dirname(containerPath);
+    const mkdir = await backend.exec(handle, ["mkdir", "-p", parent]);
+    if (mkdir.exitCode !== 0) {
+      throw new BackendError(
+        `could not create parent directory '${parent}' in '${handle.spec.name}' before copying in: ${mkdir.stderr.trim()}`,
+      );
+    }
+    await backend.copyToContainer(handle, hostPath, containerPath);
+  }
+
+  /**
+   * Convenience over `copyFileToContainer()`: writes `content` to a private
+   * (mode `0600`) temp file and copies THAT file in, removing the temp file
+   * afterward regardless of outcome. No streaming protocol — content is
+   * always fully materialized on host disk before the copy.
+   */
+  async copyContentToContainer(content: string | Uint8Array, containerPath: string): Promise<void> {
+    const tempPath = path.join(os.tmpdir(), `rightsize-copy-content-${randomBytes(6).toString("hex")}`);
+    await fs.writeFile(tempPath, content, { mode: 0o600 });
+    try {
+      await this.copyFileToContainer(tempPath, containerPath);
+    } finally {
+      await fs.rm(tempPath, { force: true });
+    }
+  }
+
+  /**
+   * Copies a file or directory OUT of this running container at
+   * `containerPath` to `hostPath`, creating the destination's host parent
+   * directory first via the standard library — the mirror image of
+   * `copyFileToContainer`'s guest-side `mkdir -p`. `containerPath` must be
+   * absolute; `cp -r`-style destination naming applies here too. Requires a
+   * running container, like `copyFileToContainer`.
+   */
+  async copyFileFromContainer(containerPath: string, hostPath: string): Promise<void> {
+    const { handle, backend } = this.requireHandle();
+    requireAbsoluteContainerPath(containerPath);
+    await fs.mkdir(path.dirname(hostPath), { recursive: true });
+    await backend.copyFromContainer(handle, containerPath, hostPath);
   }
 
   /** Runs a one-shot command inside the running container and waits for it to exit. Throws if the container is not running. */

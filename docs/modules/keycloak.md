@@ -6,7 +6,7 @@ dev-mode boot with no external database wiring needed for tests.
 **Default image:** `quay.io/keycloak/keycloak:26.0`
 **Exposed ports:** `8080` (HTTP/app), `9000` (management interface — health
 lives here, not on 8080)
-**Wait strategy:** `Wait.forHttp("/health/ready").forPort(9000)`, 120s
+**Wait strategy:** `Wait.forHttp("/health/ready").forPort(9000)`, 180s
 startup timeout
 **Memory:** `withMemoryLimit(1024)` by default
 

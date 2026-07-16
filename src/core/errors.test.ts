@@ -26,6 +26,7 @@ function makeSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     runId: "deadbeef",
     memoryLimitMb: undefined,
     keepAlive: false,
+    checkpointRef: undefined,
     ...overrides,
   };
 }

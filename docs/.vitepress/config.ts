@@ -21,6 +21,7 @@ export default defineConfig({
           { text: "Lifecycle: await using", link: "/guide/lifecycle" },
           { text: "Backends", link: "/guide/backends" },
           { text: "Networking", link: "/guide/networking" },
+          { text: "Copying files", link: "/guide/copy" },
           { text: "Wait strategies", link: "/guide/wait-strategies" },
           { text: "Orphan reaping", link: "/guide/reaping" },
           { text: "Container reuse", link: "/guide/reuse" },

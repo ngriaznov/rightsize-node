@@ -21,12 +21,14 @@ function fakeBackend(onRemoveNetwork?: (id: string) => void): SandboxBackend {
   return {
     name: "fake",
     supportsNativeNetworks: true,
-    capabilities: { hardwareIsolated: true, checkpoint: false },
+    capabilities: { hardwareIsolated: true, checkpoint: false, checkpointRestartsWorkload: false },
     create: notImplemented,
     start: notImplemented,
     stop: notImplemented,
     remove: notImplemented,
-    commitToImage: notImplemented,
+    createCheckpoint: notImplemented,
+    removeCheckpoint: notImplemented,
+    hasCheckpoint: notImplemented,
     removeByName: notImplemented,
     findRunning: notImplemented,
     reaperKillCommand: notImplemented,
@@ -38,6 +40,8 @@ function fakeBackend(onRemoveNetwork?: (id: string) => void): SandboxBackend {
       onRemoveNetwork?.(id);
     },
     installNetworkLinks: async () => {},
+    copyToContainer: notImplemented,
+    copyFromContainer: notImplemented,
     close: async () => {},
     cleanupSync: () => {},
   };

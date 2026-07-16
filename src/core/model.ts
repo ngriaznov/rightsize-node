@@ -68,18 +68,35 @@ export interface ContainerSpec {
    * never reach it.
    */
   readonly keepAlive: boolean;
+  /**
+   * Set by `GenericContainer.fromCheckpoint()` to the source `Checkpoint`'s
+   * `ref`; `undefined` for every ordinary container. Never part of the reuse
+   * identity hash — reuse and `fromCheckpoint` is not a supported
+   * combination (see `ReuseFromCheckpointError`). docker ignores it (the ref
+   * IS an image, so the normal create path already boots from it via
+   * `image`); microsandbox boots via `msb run --snapshot <ref>` instead of
+   * its normal image boot when this is set.
+   */
+  readonly checkpointRef: string | undefined;
 }
 
 /**
- * The result of `GenericContainer.checkpoint()`: a committed image plus the
- * source container's spec, everything `GenericContainer.fromCheckpoint()`
- * needs to boot an equivalent container. A checkpoint is a FILESYSTEM
- * capture, not a memory snapshot — a restored container's processes start
- * from scratch against the committed filesystem.
+ * The result of `GenericContainer.checkpoint()`: a ref to the committed
+ * state plus the source container's spec, everything
+ * `GenericContainer.fromCheckpoint()` needs to boot an equivalent container.
+ * A checkpoint is a FILESYSTEM capture, not a memory snapshot — a restored
+ * container's processes start from scratch against the captured filesystem.
  */
 export interface Checkpoint {
-  /** The committed image reference, `rightsize/checkpoint:<12-hex>` — random per checkpoint, never reused. */
-  readonly imageRef: string;
-  /** The source container's spec (env, command, exposed ports, memory limit — everything needed to boot an equivalent container from `imageRef`). */
+  /**
+   * The captured state's ref: a committed image tag
+   * (`rightsize/checkpoint:<12-hex>`) on docker, a snapshot name
+   * (`rz-ckpt-<12-hex>`) on microsandbox — random per checkpoint, never
+   * reused.
+   */
+  readonly ref: string;
+  /** The backend that created this checkpoint. Restoring it under a DIFFERENT active backend throws `CheckpointBackendMismatchError` before any backend call. */
+  readonly backend: string;
+  /** The source container's spec (env, command, exposed ports, memory limit — everything needed to boot an equivalent container from `ref`). */
   readonly spec: ContainerSpec;
 }

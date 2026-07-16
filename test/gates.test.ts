@@ -48,7 +48,7 @@ interface FollowFakeOptions {
 class FollowFakeBackend implements SandboxBackend {
   readonly name = "follow-fake";
   readonly supportsNativeNetworks = true;
-  readonly capabilities = { hardwareIsolated: true, checkpoint: false };
+  readonly capabilities = { hardwareIsolated: true, checkpoint: false, checkpointRestartsWorkload: false };
 
   constructor(private readonly opts: FollowFakeOptions = {}) {}
 
@@ -59,7 +59,11 @@ class FollowFakeBackend implements SandboxBackend {
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
   async remove(): Promise<void> {}
-  async commitToImage(): Promise<void> {}
+  async createCheckpoint(): Promise<void> {}
+  async removeCheckpoint(): Promise<void> {}
+  async hasCheckpoint(): Promise<boolean> {
+    return false;
+  }
   async removeByName(): Promise<void> {}
   async findRunning(): Promise<SandboxHandle | undefined> {
     return undefined;
@@ -90,6 +94,9 @@ class FollowFakeBackend implements SandboxBackend {
       throw new Error("boom: installNetworkLinks failed");
     }
   }
+
+  async copyToContainer(): Promise<void> {}
+  async copyFromContainer(): Promise<void> {}
 
   async close(): Promise<void> {}
   cleanupSync(): void {}
@@ -204,7 +211,7 @@ describe("isPortBindConflict truth table", () => {
     const backend: SandboxBackend = {
       name: "wrapped-conflict-fake",
       supportsNativeNetworks: true,
-      capabilities: { hardwareIsolated: true, checkpoint: false },
+      capabilities: { hardwareIsolated: true, checkpoint: false, checkpointRestartsWorkload: false },
       async create(spec: ContainerSpec) {
         return { id: `wrapped-${attempts}`, spec };
       },
@@ -216,7 +223,11 @@ describe("isPortBindConflict truth table", () => {
       },
       async stop() {},
       async remove() {},
-      async commitToImage() {},
+      async createCheckpoint() {},
+      async removeCheckpoint() {},
+      async hasCheckpoint() {
+        return false;
+      },
       async removeByName() {},
       async findRunning() {
         return undefined;
@@ -236,6 +247,8 @@ describe("isPortBindConflict truth table", () => {
       async ensureNetwork() {},
       async removeNetwork() {},
       async installNetworkLinks() {},
+      async copyToContainer() {},
+      async copyFromContainer() {},
       async close() {},
       cleanupSync() {},
     };

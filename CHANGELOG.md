@@ -5,8 +5,82 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
 
+- Runtime file copy: `GenericContainer.copyFileToContainer(hostPath, containerPath)`,
+  `copyContentToContainer(content, containerPath)`, and
+  `copyFileFromContainer(containerPath, hostPath)` move files and
+  directories into or out of an already-**running** container, distinct
+  from the start-time `withCopyFileToContainer` mount. Both directions
+  create the destination's parent directory automatically (`exec: mkdir -p`
+  in the guest; the standard library's recursive `mkdir` on the host); a
+  source directory copies `cp -r`-style (contents under an absent
+  destination, not nested one level down); a non-running container or a
+  relative `containerPath` fails fast with a typed error before any backend
+  call. `copyContentToContainer` writes to a private (mode `0600`) temp file
+  and cleans it up regardless of outcome. New SPI:
+  `SandboxBackend.copyToContainer`/`copyFromContainer` — docker shells out
+  to `docker cp` (the reaper watchdog already requires the CLI), msb uses
+  `msb copy -q`. Works against a reuse-active container, but the mutation is
+  not part of the reuse identity hash. See
+  [Copying files](https://ngriaznov.github.io/rightsize-node/guide/copy).
+- Checkpoint/restore now ships on microsandbox too, via disk snapshot:
+  `checkpoint()` on msb stops the sandbox, snapshots its disk, then boots it
+  back up from that snapshot under the same name/ports/env — `msb stop` →
+  `msb snapshot create` → `msb rm` → a fresh attached `msb run --snapshot`
+  boot, never `msb start` (upstream's detached-start path denies the
+  breakaway right it needs whenever the msb CLI runs inside a restrictive
+  Windows job object, e.g. as a child of a test runner) — and re-runs the
+  container's own wait strategy before returning (the workload restarts as
+  part of the cycle). A failed snapshot step leaves the sandbox stopped
+  rather than best-effort restarting it, and names the by-hand remedy; a
+  snapshot that succeeds but whose reboot then fails names the checkpoint
+  ref as still restorable via `fromCheckpoint()`. New
+  `capabilities.checkpointRestartsWorkload` flag (`true` for msb, `false`
+  for docker) the generic layer uses to decide whether that re-wait runs.
+  `Checkpoint`'s `imageRef` field is renamed to `ref` (a snapshot name on
+  msb, an image tag on docker) and gains a `backend` field naming the
+  backend that created it; restoring a checkpoint under a different active
+  backend now throws a new `CheckpointBackendMismatchError` before any
+  backend call. `fromCheckpoint()` combined with `.withReuse()` throws a new
+  `ReuseFromCheckpointError` — reuse's identity hash doesn't cover a
+  checkpoint ref. `ContainerSpec` gains `checkpointRef` (docker ignores it;
+  msb boots via `msb run --snapshot <ref>` instead of the normal image boot
+  when it's set). New SPI: `SandboxBackend.createCheckpoint` (renamed from
+  `commitToImage`) and `SandboxBackend.removeCheckpoint(ref)` (best-effort,
+  "not found" is success — SPI-only, no public `GenericContainer` method).
+  `CheckpointUnsupportedError`'s message no longer steers toward docker
+  specifically, since both real backends support checkpointing today.
+  Checkpoints can now also be NAMED and made durable:
+  `checkpoint(name)` mints a deterministic ref (`rightsize/checkpoint:<name>`
+  on docker, `rz-ckpt-<name>` on msb) instead of a random one, validates
+  `name` against `^[a-z0-9][a-z0-9-]{0,40}$` before any backend call
+  (`InvalidCheckpointNameError` otherwise), and — only once the backend
+  checkpoint itself has succeeded — writes a registry entry to
+  `<cacheDir>/checkpoints/<name>.json` (pinned field names, a reduced
+  cross-language subset of the source spec) that a LATER process can
+  rediscover. Re-checkpointing an existing name replaces it: the old
+  artifact under that same deterministic ref is best-effort cleared before
+  the new one is created, and the registry entry is overwritten. New
+  `Checkpoints` namespace: `find(name)` rediscovers a named checkpoint
+  (probing the artifact via the new `hasCheckpoint` SPI when the entry's
+  recorded backend matches the active one, and cleaning up a stale entry
+  whose artifact is gone; an entry recorded under a different backend is
+  returned unprobed), `list()` returns registry contents with no probing,
+  and `remove(name)` deletes both the artifact (best-effort, only against
+  the active backend) and the registry entry, idempotently. Unnamed
+  `checkpoint()` calls are unaffected — random ref, no registry entry, still
+  purely ephemeral. New SPI: `SandboxBackend.hasCheckpoint(ref)` (docker:
+  image inspect; msb: `msb snapshot inspect`) — a probe failure always
+  propagates, only a confirmed "does not exist" resolves `false`. See
+  [Checkpoint / restore](https://ngriaznov.github.io/rightsize-node/guide/checkpoints).
+
+### Fixed
+
+- `MySQLContainer` readiness now carries a 180-second startup budget (was
+  120s), matching `ClickHouseContainer`'s own budget: a loaded Windows CI
+  runner was observed overrunning the 120-second budget (123s) during
+  MySQL's first-boot double-mysqld-start sequence.
 ## [0.2.0] - 2026-07-12
 
 ### Added

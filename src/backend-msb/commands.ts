@@ -25,12 +25,44 @@ export const MsbCommands = {
     for (const mount of spec.mounts) {
       argv.push("--mount-file", `${mount.hostPath}:${mount.guestPath}`);
     }
-    argv.push(spec.image);
+    if (spec.checkpointRef !== undefined) {
+      // `--snapshot` is mutually exclusive with the IMAGE positional arg —
+      // the snapshot itself pins the image (see MsbCliBackend's own doc on
+      // fromCheckpoint/checkpointRef).
+      argv.push("--snapshot", spec.checkpointRef);
+    } else {
+      argv.push(spec.image);
+    }
     if (spec.command !== undefined) {
       // undefined => the image's own ENTRYPOINT/CMD runs unmodified.
       argv.push("--", ...spec.command);
     }
     return argv;
+  },
+
+  /** `msb snapshot create --from <sandbox> <name>` — requires `sandbox` STOPPED; writes a sparse disk snapshot under `~/.microsandbox/snapshots/<name>`. */
+  snapshotCreate(sandbox: string, name: string): string[] {
+    return ["snapshot", "create", "--from", sandbox, name];
+  },
+
+  /** `msb snapshot rm <name>` — best-effort per `removeCheckpoint`'s own contract; "not found" is fine. */
+  snapshotRemove(name: string): string[] {
+    return ["snapshot", "rm", name];
+  },
+
+  /** `msb snapshot inspect <name>` — exit 0 means the snapshot exists, non-zero means it doesn't; `hasCheckpoint`'s backend call. */
+  snapshotInspect(name: string): string[] {
+    return ["snapshot", "inspect", name];
+  },
+
+  /** `msb copy -q <hostPath> <name>:<containerPath>` — host-to-guest transfer, `cp -r`-style destination naming for a directory source. */
+  copyIn(hostPath: string, name: string, containerPath: string): string[] {
+    return ["copy", "-q", hostPath, `${name}:${containerPath}`];
+  },
+
+  /** `msb copy -q <name>:<containerPath> <hostPath>` — the reverse direction of `copyIn`. */
+  copyOut(name: string, containerPath: string, hostPath: string): string[] {
+    return ["copy", "-q", `${name}:${containerPath}`, hostPath];
   },
 
   exec(name: string, cmd: readonly string[]): string[] {

@@ -3,7 +3,8 @@
  *
  * Owns the public API surface every consumer builds on: `GenericContainer`
  * (the builder + async-dispose lifecycle guard), `Network`, the `Wait`
- * strategies, `FreePorts`, `RunId`, the `SandboxBackend`/`BackendProvider`
+ * strategies, `FreePorts`, `RunId`, `Checkpoints` (rediscovering named
+ * checkpoints across processes), the `SandboxBackend`/`BackendProvider`
  * contracts plus the `registerBackend` registry, and the typed error
  * classes. This module depends on no backend — import `rightsize/backend-msb`
  * and/or `rightsize/backend-docker` to register one, or `rightsize/modules`
@@ -20,6 +21,10 @@ export {
   ReuseWithNetworkError,
   IsolationRequiredError,
   CheckpointUnsupportedError,
+  CheckpointBackendMismatchError,
+  ReuseFromCheckpointError,
+  RelativeContainerPathError,
+  InvalidCheckpointNameError,
 } from "./core/errors.js";
 export type { PortBinding, FileMount, ExecResult, ContainerSpec, Checkpoint } from "./core/model.js";
 export type {
@@ -42,3 +47,4 @@ export { MountableFile } from "./core/mountable-file.js";
 export { GenericContainer } from "./core/generic-container.js";
 export { diagnostics, registerDiagnostics } from "./core/diagnostics.js";
 export type { FailureHook } from "./core/diagnostics.js";
+export { Checkpoints } from "./core/checkpoint/api.js";

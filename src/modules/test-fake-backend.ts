@@ -17,7 +17,7 @@ import type { ContainerSpec, ExecResult } from "../core/model.js";
 export class FakeModuleBackend implements SandboxBackend {
   readonly name: string = "fake-module-backend";
   readonly supportsNativeNetworks = true;
-  readonly capabilities = { hardwareIsolated: true, checkpoint: false };
+  readonly capabilities = { hardwareIsolated: true, checkpoint: false, checkpointRestartsWorkload: false };
   private idSeq = 0;
   lastSpec: ContainerSpec | undefined;
   /** Test seam: scripts exec() responses for modules whose containerIsStarted hook polls via exec (e.g. Mongo's rs.initiate). */
@@ -32,7 +32,11 @@ export class FakeModuleBackend implements SandboxBackend {
   async start(_handle: SandboxHandle): Promise<void> {}
   async stop(_handle: SandboxHandle): Promise<void> {}
   async remove(_handle: SandboxHandle): Promise<void> {}
-  async commitToImage(_handle: SandboxHandle, _imageRef: string): Promise<void> {}
+  async createCheckpoint(_handle: SandboxHandle, _ref: string): Promise<void> {}
+  async removeCheckpoint(_ref: string): Promise<void> {}
+  async hasCheckpoint(_ref: string): Promise<boolean> {
+    return false;
+  }
   async removeByName(_name: string): Promise<void> {}
   async findRunning(_spec: ContainerSpec): Promise<SandboxHandle | undefined> {
     return undefined;
@@ -60,6 +64,9 @@ export class FakeModuleBackend implements SandboxBackend {
   async removeNetwork(_networkId: string): Promise<void> {}
 
   async installNetworkLinks(_handle: SandboxHandle, _links: ReadonlyArray<NetworkLink>): Promise<void> {}
+
+  async copyToContainer(_handle: SandboxHandle, _hostPath: string, _containerPath: string): Promise<void> {}
+  async copyFromContainer(_handle: SandboxHandle, _containerPath: string, _hostPath: string): Promise<void> {}
 
   async close(): Promise<void> {}
 

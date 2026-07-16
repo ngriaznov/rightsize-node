@@ -44,7 +44,7 @@ interface FakeReuseBackendOptions {
 class FakeReuseBackend implements SandboxBackend {
   readonly name = "fake-reuse";
   readonly supportsNativeNetworks = true;
-  readonly capabilities = { hardwareIsolated: true, checkpoint: false };
+  readonly capabilities = { hardwareIsolated: true, checkpoint: false, checkpointRestartsWorkload: false };
   readonly calls: string[] = [];
   readonly createdHandles: SandboxHandle[] = [];
   private idSeq = 0;
@@ -85,7 +85,11 @@ class FakeReuseBackend implements SandboxBackend {
     this.calls.push("remove");
   }
 
-  async commitToImage(_handle: SandboxHandle, _imageRef: string): Promise<void> {}
+  async createCheckpoint(_handle: SandboxHandle, _ref: string): Promise<void> {}
+  async removeCheckpoint(): Promise<void> {}
+  async hasCheckpoint(): Promise<boolean> {
+    return false;
+  }
 
   async removeByName(name: string): Promise<void> {
     this.calls.push(`removeByName:${name}`);
@@ -118,6 +122,8 @@ class FakeReuseBackend implements SandboxBackend {
   async ensureNetwork(_networkId: string): Promise<void> {}
   async removeNetwork(_networkId: string): Promise<void> {}
   async installNetworkLinks(_handle: SandboxHandle, _links: ReadonlyArray<NetworkLink>): Promise<void> {}
+  async copyToContainer(_handle: SandboxHandle, _hostPath: string, _containerPath: string): Promise<void> {}
+  async copyFromContainer(_handle: SandboxHandle, _containerPath: string, _hostPath: string): Promise<void> {}
   async close(): Promise<void> {}
   cleanupSync(_id: string): void {}
 }

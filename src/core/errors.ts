@@ -107,10 +107,11 @@ export class IsolationRequiredError extends Error {
 
 /**
  * Thrown by `checkpoint()` when the active backend's
- * `capabilities.checkpoint` is `false` — microsandbox has no upstream
- * microVM snapshot support today. Thrown before any backend call: the
- * generic layer gates on the capability itself rather than letting the
- * backend's own `commitToImage` reject.
+ * `capabilities.checkpoint` is `false` — both real backends (docker, image
+ * commit; microsandbox, disk snapshot) support it today, so this only fires
+ * against a backend that genuinely lacks the capability (a test double).
+ * Thrown before any backend call: the generic layer gates on the capability
+ * itself rather than letting the backend's own `createCheckpoint` reject.
  */
 export class CheckpointUnsupportedError extends Error {
   constructor(
@@ -118,10 +119,87 @@ export class CheckpointUnsupportedError extends Error {
     readonly backend: string,
   ) {
     super(
-      `checkpoint() is not supported by the '${backend}' backend — checkpoint/restore is implemented via image ` +
-        "commit on the docker backend today; native microVM memory snapshots for microsandbox are on the " +
-        "roadmap. Set RIGHTSIZE_BACKEND=docker to use checkpoint/restore.",
+      `checkpoint() is not supported by the '${backend}' backend — checkpointing needs a backend whose ` +
+        "capabilities.checkpoint is true.",
     );
     this.name = "CheckpointUnsupportedError";
+  }
+}
+
+/**
+ * Thrown by `GenericContainer.fromCheckpoint(cp).start()` when the active
+ * backend's name doesn't match the backend that created `cp` — a checkpoint
+ * ref is only meaningful to the backend that minted it (a docker image tag
+ * means nothing to `msb`, and a msb snapshot name means nothing to docker).
+ * Thrown before any backend call.
+ */
+export class CheckpointBackendMismatchError extends Error {
+  constructor(
+    /** The backend that created the checkpoint. */
+    readonly createdOnBackend: string,
+    /** The backend `start()` actually resolved. */
+    readonly activeBackend: string,
+  ) {
+    super(
+      `this checkpoint was created on the '${createdOnBackend}' backend but the active backend is ` +
+        `'${activeBackend}' — set RIGHTSIZE_BACKEND=${createdOnBackend} to restore it there, or create a fresh ` +
+        `checkpoint under the '${activeBackend}' backend instead.`,
+    );
+    this.name = "CheckpointBackendMismatchError";
+  }
+}
+
+/**
+ * Thrown at `start()` when a container built via `GenericContainer.fromCheckpoint()`
+ * is also marked `withReuse()` — reuse's identity hash never covers
+ * `checkpointRef`, so an adopted sandbox from an earlier process could never
+ * be verified against the checkpoint this container was meant to restore.
+ * Thrown only once reuse is actually double opt-in active, the same
+ * placement as `ReuseWithNetworkError`.
+ */
+export class ReuseFromCheckpointError extends Error {
+  constructor() {
+    super(
+      "withReuse() cannot be combined with fromCheckpoint() — reuse's identity hash does not cover " +
+        "checkpointRef, so an adopted sandbox could never be verified against the checkpoint it was meant to " +
+        "restore. Drop either withReuse() or fromCheckpoint().",
+    );
+    this.name = "ReuseFromCheckpointError";
+  }
+}
+
+/**
+ * Thrown by `copyFileToContainer`/`copyContentToContainer`/
+ * `copyFileFromContainer` when `containerPath` is not absolute — both
+ * backends require an absolute `NAME:/path` shape, so a relative path can
+ * never reach either CLI. Thrown before any backend call.
+ */
+export class RelativeContainerPathError extends Error {
+  constructor(
+    /** The rejected path, exactly as passed in. */
+    readonly containerPath: string,
+  ) {
+    super(`containerPath must be an absolute path (got '${containerPath}') — both backends require an absolute guest path.`);
+    this.name = "RelativeContainerPathError";
+  }
+}
+
+/**
+ * Thrown by `checkpoint(name)` when `name` doesn't match
+ * `^[a-z0-9][a-z0-9-]{0,40}$` — the same pattern pinned across every
+ * rightsize language implementation. Thrown before any backend or
+ * filesystem call, so a bad name never mints a ref or touches the registry.
+ */
+export class InvalidCheckpointNameError extends Error {
+  constructor(
+    /** The rejected name, exactly as passed in. */
+    readonly checkpointName: string,
+  ) {
+    super(
+      `checkpoint name '${checkpointName}' is invalid — a checkpoint name must match ^[a-z0-9][a-z0-9-]{0,40}$ ` +
+        "(start with a lowercase letter or digit, contain only lowercase letters, digits, and hyphens after " +
+        "that, and be at most 41 characters long).",
+    );
+    this.name = "InvalidCheckpointNameError";
   }
 }

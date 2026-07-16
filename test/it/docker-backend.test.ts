@@ -1,4 +1,5 @@
 import * as net from "node:net";
+import { randomBytes } from "node:crypto";
 import { describe, itDockerIntegration, assert } from "../harness.js";
 import { DockerBackend } from "../../src/backend-docker/backend.js";
 import { DockerClient } from "../../src/backend-docker/client.js";
@@ -8,6 +9,13 @@ import { RunId } from "../../src/core/run-id.js";
 import { FreePorts } from "../../src/core/free-ports.js";
 import type { ContainerSpec } from "../../src/core/model.js";
 import type { SandboxHandle } from "../../src/core/backend.js";
+import { Checkpoints } from "../../src/core/checkpoint/api.js";
+import { Backends } from "../../src/core/backends.js";
+// Side-effect import: registers DockerBackendProvider so Backends.active()
+// (which Checkpoints.find/remove resolve against) can actually resolve to
+// docker, independent of whichever backend this file's own explicit
+// .withBackend(new DockerBackend(...)) instances use.
+import "../../src/backend-docker/index.js";
 
 /**
  * Live gates against the real Docker daemon on this machine (`RIGHTSIZE_IT=1`).
@@ -36,6 +44,7 @@ function baseSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     runId: RunId.value,
     memoryLimitMb: undefined,
     keepAlive: false,
+    checkpointRef: undefined,
     ...overrides,
   };
 }
@@ -302,11 +311,12 @@ describe("DockerBackend integration (real daemon)", () => {
 
       let cp;
       try {
-        const marker = await source.exec("sh", "-c", "echo checkpoint-marker > /marker.txt");
+        const marker = await source.exec("sh", "-c", "echo checkpoint-marker > /marker.txt && sync");
         assert.equal(marker.exitCode, 0);
 
         cp = await source.checkpoint();
-        assert.match(cp.imageRef, /^rightsize\/checkpoint:[0-9a-f]{12}$/);
+        assert.match(cp.ref, /^rightsize\/checkpoint:[0-9a-f]{12}$/);
+        assert.equal(cp.backend, "docker");
       } finally {
         await source.stop();
       }
@@ -321,9 +331,83 @@ describe("DockerBackend integration (real daemon)", () => {
         assert.equal(read.stdout.trim(), "checkpoint-marker");
       } finally {
         await restored.stop();
-        // Checkpoint images are never auto-reaped (they're images, not
-        // containers) — clean up the one this test committed.
-        await client.request("DELETE", `/images/${encodeURIComponent(cp.imageRef)}`).catch(() => {});
+        // Checkpoints are never auto-reaped (an image is not a container) —
+        // clean up the one this test committed, via the SPI-only
+        // removeCheckpoint rather than a hand-rolled daemon call.
+        await new DockerBackend(client).removeCheckpoint(cp.ref).catch(() => {});
+      }
+    },
+  );
+
+  itDockerIntegration(
+    "named checkpoint is rediscovered by a fresh Checkpoints.find(...) call, restores from it, and Checkpoints.remove(...) cleans it up",
+    async () => {
+      // Checkpoints.find/list/remove resolve Backends.active() internally —
+      // pin it to docker for the duration of this test regardless of
+      // whatever RIGHTSIZE_BACKEND this process inherited (the msb-linux CI
+      // lane, which also has a docker daemon, runs this file with
+      // RIGHTSIZE_BACKEND=microsandbox), and reset the memoization so that
+      // actually takes effect.
+      const savedBackendEnv = process.env["RIGHTSIZE_BACKEND"];
+      process.env["RIGHTSIZE_BACKEND"] = "docker";
+      Backends._resetActiveForTests();
+
+      // Nonced per run (RZ test-nonce discipline): an image tag left behind
+      // by a crashed earlier run of this exact test can never collide with
+      // this run's own name.
+      const name = `${randomBytes(6).toString("hex")}-golden`;
+      const client = DockerClient.fromEnv();
+
+      try {
+        const source = new GenericContainer("alpine:3.19").withBackend(new DockerBackend(client)).withCommand("sleep", "60");
+        await source.start();
+
+        try {
+          const marker = await source.exec("sh", "-c", "echo checkpoint-marker > /marker.txt && sync");
+          assert.equal(marker.exitCode, 0);
+
+          const cp = await source.checkpoint(name);
+          assert.equal(cp.ref, `rightsize/checkpoint:${name}`);
+        } finally {
+          await source.stop();
+        }
+
+        // The cross-run story: rediscover via Checkpoints.find(...) ALONE —
+        // never the `cp` object returned above — this is exactly what makes
+        // a named checkpoint usable from a process that never held it.
+        const found = await Checkpoints.find(name);
+        if (found === undefined) {
+          throw new Error("expected find() to rediscover the named checkpoint");
+        }
+        assert.equal(found.ref, `rightsize/checkpoint:${name}`);
+        assert.equal(found.backend, "docker");
+
+        const restored = GenericContainer.fromCheckpoint(found).withBackend(new DockerBackend(client)).withCommand("sleep", "60");
+        try {
+          await restored.start();
+          const read = await restored.exec("cat", "/marker.txt");
+          assert.equal(read.exitCode, 0);
+          assert.equal(read.stdout.trim(), "checkpoint-marker");
+        } finally {
+          await restored.stop();
+        }
+
+        const removed = await Checkpoints.remove(name);
+        assert.equal(removed, true, "expected Checkpoints.remove to report that the named checkpoint existed");
+        const goneAfterRemove = await Checkpoints.find(name);
+        assert.equal(goneAfterRemove, undefined, "expected the checkpoint to be gone after Checkpoints.remove");
+      } finally {
+        // The cleanup guard: whether the assertions above passed or a panic
+        // hit partway through, this still leaves no image or registry entry
+        // behind — a no-op if the happy-path remove() above already ran
+        // successfully.
+        await Checkpoints.remove(name).catch(() => {});
+        if (savedBackendEnv === undefined) {
+          delete process.env["RIGHTSIZE_BACKEND"];
+        } else {
+          process.env["RIGHTSIZE_BACKEND"] = savedBackendEnv;
+        }
+        Backends._resetActiveForTests();
       }
     },
   );

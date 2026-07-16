@@ -8,8 +8,12 @@ import { FrameDemuxer, LineAssembler } from "./frames.js";
 import { extractIds, extractNumber, extractString } from "./json.js";
 import { isPortBindConflictMessage } from "./port-conflict.js";
 import { labelFilterQuery, containerLabels } from "./labels.js";
+import { runDockerCli, DockerCli } from "./cli.js";
 
 const STOP_TIMEOUT_SECS = 10;
+// `docker cp` of a directory scales with its contents, not a fixed small
+// payload like the other unary daemon calls this backend makes.
+const COPY_TIMEOUT_MS = 120_000;
 
 function encodeQueryValue(s: string): string {
   return encodeURIComponent(s);
@@ -110,12 +114,14 @@ export class DockerBackend implements SandboxBackend {
   /** `"docker"` — matched against `RIGHTSIZE_BACKEND`. */
   readonly name = "docker";
   readonly supportsNativeNetworks = true;
-  /** Shares the host kernel; can checkpoint a sandbox by committing it to an image. */
+  /** Shares the host kernel; can checkpoint a sandbox by committing it to an image, without disturbing the running container. */
   readonly capabilities: BackendCapabilities = {
     /** Containers share the host kernel — no microVM boundary. */
     hardwareIsolated: false,
     /** Commit-to-image checkpointing is available today. */
     checkpoint: true,
+    /** Commit-to-image never touches the running container. */
+    checkpointRestartsWorkload: false,
   };
 
   private readonly networkIds = new Map<string, string>();
@@ -251,19 +257,42 @@ export class DockerBackend implements SandboxBackend {
   /**
    * Checkpoint's backend call: the engine's `POST /commit` endpoint, which
    * commits a container's current filesystem to a new image in one call —
-   * `imageRef` is always `rightsize/checkpoint:<12-hex>` (minted by
+   * `ref` is always `rightsize/checkpoint:<12-hex>` (minted by
    * `GenericContainer.checkpoint()`), split into repo/tag the same way
-   * `pullIfMissing`'s image argument is.
+   * `pullIfMissing`'s image argument is. The container itself is undisturbed.
    */
-  async commitToImage(handle: SandboxHandle, imageRef: string): Promise<void> {
-    const [repo, tag] = splitRepoTag(imageRef);
+  async createCheckpoint(handle: SandboxHandle, ref: string): Promise<void> {
+    const [repo, tag] = splitRepoTag(ref);
     const path = `/commit?container=${encodeQueryValue(handle.id)}&repo=${encodeQueryValue(repo)}&tag=${encodeQueryValue(tag)}`;
     const resp = await this.client.request("POST", path);
     if (resp.status >= 400) {
       throw new BackendError(
-        `docker could not commit container ${handle.id} to image '${imageRef}' (HTTP ${resp.status}): ${resp.body.toString()}`,
+        `docker could not commit container ${handle.id} to image '${ref}' (HTTP ${resp.status}): ${resp.body.toString()}`,
       );
     }
+  }
+
+  /** Best-effort `DELETE /images/{ref}` — "not found" is success, the same contract as `removeByName`. */
+  async removeCheckpoint(ref: string): Promise<void> {
+    await this.client.request("DELETE", `/images/${encodeQueryValue(ref)}`).catch(() => {});
+  }
+
+  /**
+   * `GET /images/{ref}/json` — the same inspect call `pullIfMissing` makes
+   * for an ordinary image reference. `200` means the image is there, `404`
+   * means it definitely isn't; any other status (daemon unreachable,
+   * malformed ref) is a probe failure and throws rather than reporting a
+   * silent `false` — see the SPI's own "no best-effort false" contract.
+   */
+  async hasCheckpoint(ref: string): Promise<boolean> {
+    const resp = await this.client.request("GET", `/images/${encodeQueryValue(ref)}/json`);
+    if (resp.status === 200) {
+      return true;
+    }
+    if (resp.status === 404) {
+      return false;
+    }
+    throw new BackendError(`docker could not inspect image '${ref}' (HTTP ${resp.status}): ${resp.body.toString()}`);
   }
 
   /**
@@ -441,6 +470,35 @@ export class DockerBackend implements SandboxBackend {
 
   /** No-op: docker relies entirely on native networks (`ensureNetwork`/`create`'s connect step) — there is nothing to emulate here, unlike msb's exec-tunnel links. */
   async installNetworkLinks(_handle: SandboxHandle, _links: ReadonlyArray<NetworkLink>): Promise<void> {}
+
+  /**
+   * `docker cp <hostPath> <id>:<containerPath>` — the transfer only;
+   * `GenericContainer.copyFileToContainer()` already confirmed the
+   * container is running, validated the absolute path, and ran the
+   * guest-side `mkdir -p` before this is ever called. Shells out rather
+   * than hand-rolling tar encoding against the daemon's raw `PUT
+   * /containers/{id}/archive` endpoint — see `cli.ts`'s own doc on why that
+   * isn't a new dependency here. A nonzero exit surfaces the tool's own
+   * stderr rather than a silent success.
+   */
+  async copyToContainer(handle: SandboxHandle, hostPath: string, containerPath: string): Promise<void> {
+    const result = await runDockerCli(DockerCli.copyIn(hostPath, handle.id, containerPath), COPY_TIMEOUT_MS);
+    if (result.exitCode !== 0) {
+      throw new BackendError(
+        `docker cp into ${handle.id}:${containerPath} failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
+    }
+  }
+
+  /** The reverse direction of `copyToContainer` — see its own doc. */
+  async copyFromContainer(handle: SandboxHandle, containerPath: string, hostPath: string): Promise<void> {
+    const result = await runDockerCli(DockerCli.copyOut(handle.id, containerPath, hostPath), COPY_TIMEOUT_MS);
+    if (result.exitCode !== 0) {
+      throw new BackendError(
+        `docker cp from ${handle.id}:${containerPath} failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
+    }
+  }
 
   async ensureNetwork(networkId: string): Promise<void> {
     await this.ensureNetworkGetId(networkId);

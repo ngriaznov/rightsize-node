@@ -8,7 +8,7 @@ import { GenericContainer } from "../../src/core/generic-container.js";
 import { Wait } from "../../src/core/wait.js";
 import { MountableFile } from "../../src/core/mountable-file.js";
 import type { SandboxBackend } from "../../src/core/backend.js";
-import { IsolationRequiredError, CheckpointUnsupportedError } from "../../src/core/errors.js";
+import { IsolationRequiredError } from "../../src/core/errors.js";
 import { diagnostics } from "../../src/core/diagnostics.js";
 import { MsbCliBackend } from "../../src/backend-msb/backend.js";
 import { ensureInstalled } from "../../src/backend-msb/provisioner.js";
@@ -220,6 +220,79 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
     },
   );
 
+  // Runtime copy against an ALREADY-RUNNING container — distinct from
+  // withCopyFileToContainer's start-time mount above. Same alpine + sleep
+  // workload on both backends; each case proves the destination's parent
+  // directory did not pre-exist, so a passing assertion also proves the
+  // generic layer's own mkdir -p pre-step actually ran.
+  itIntegration("copyFileToContainer copies a host file in; exec cat returns the exact content", async () => {
+    await using c = await new GenericContainer("alpine:3.19").withBackend(makeBackend()).withCommand("sleep", "60").start();
+
+    const hostDir = fs.mkdtempSync(path.join(os.tmpdir(), "rightsize-runtime-copy-in-"));
+    const hostFilePath = path.join(hostDir, "runtime.txt");
+    fs.writeFileSync(hostFilePath, "runtime-copy-content");
+
+    await c.copyFileToContainer(hostFilePath, "/data/nested/runtime.txt");
+
+    const read = await c.exec("cat", "/data/nested/runtime.txt");
+    assert.equal(read.exitCode, 0);
+    assert.equal(read.stdout.trim(), "runtime-copy-content");
+  });
+
+  itIntegration("copyContentToContainer copies in-memory content in; exec cat returns the exact content", async () => {
+    await using c = await new GenericContainer("alpine:3.19").withBackend(makeBackend()).withCommand("sleep", "60").start();
+
+    await c.copyContentToContainer("in-memory-content", "/data/from-memory/greeting.txt");
+
+    const read = await c.exec("cat", "/data/from-memory/greeting.txt");
+    assert.equal(read.exitCode, 0);
+    assert.equal(read.stdout.trim(), "in-memory-content");
+  });
+
+  itIntegration("copyFileToContainer copies a directory in; a nested file is readable at <dst>/<nested>", async () => {
+    await using c = await new GenericContainer("alpine:3.19").withBackend(makeBackend()).withCommand("sleep", "60").start();
+
+    const hostDir = fs.mkdtempSync(path.join(os.tmpdir(), "rightsize-runtime-copy-dir-"));
+    fs.mkdirSync(path.join(hostDir, "sub"));
+    fs.writeFileSync(path.join(hostDir, "sub", "nested.txt"), "nested-content");
+
+    await c.copyFileToContainer(hostDir, "/data/copied-dir");
+
+    const read = await c.exec("cat", "/data/copied-dir/sub/nested.txt");
+    assert.equal(read.exitCode, 0);
+    assert.equal(read.stdout.trim(), "nested-content");
+  });
+
+  itIntegration("copyFileFromContainer copies a guest file out; host content matches", async () => {
+    await using c = await new GenericContainer("alpine:3.19").withBackend(makeBackend()).withCommand("sleep", "60").start();
+
+    const write = await c.exec("sh", "-c", "mkdir -p /out && echo guest-written-content > /out/result.txt");
+    assert.equal(write.exitCode, 0);
+
+    const hostDir = fs.mkdtempSync(path.join(os.tmpdir(), "rightsize-runtime-copy-out-"));
+    const hostFilePath = path.join(hostDir, "not-yet-existing", "result.txt");
+
+    await c.copyFileFromContainer("/out/result.txt", hostFilePath);
+
+    const content = fs.readFileSync(hostFilePath, "utf8");
+    assert.equal(content.trim(), "guest-written-content");
+  });
+
+  itIntegration("copyFileFromContainer copies a guest directory out; a nested host file matches", async () => {
+    await using c = await new GenericContainer("alpine:3.19").withBackend(makeBackend()).withCommand("sleep", "60").start();
+
+    const write = await c.exec("sh", "-c", "mkdir -p /outdir/sub && echo nested-guest-content > /outdir/sub/nested.txt");
+    assert.equal(write.exitCode, 0);
+
+    const hostDir = fs.mkdtempSync(path.join(os.tmpdir(), "rightsize-runtime-copy-outdir-"));
+    const hostDestPath = path.join(hostDir, "copied-out-dir");
+
+    await c.copyFileFromContainer("/outdir", hostDestPath);
+
+    const content = fs.readFileSync(path.join(hostDestPath, "sub", "nested.txt"), "utf8");
+    assert.equal(content.trim(), "nested-guest-content");
+  });
+
   itIntegration("followOutput streams lines in order and close halts delivery", async () => {
     // This case previously skipped on Windows against microsandbox: the old
     // `msb logs -f` pipe-based follow never relayed a slow trickle of lines
@@ -344,6 +417,7 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
       runId: "contractit",
       memoryLimitMb: undefined,
       keepAlive: false,
+      checkpointRef: undefined,
     };
     const handle = await backend.create(spec);
     await backend.start(handle);
@@ -397,6 +471,7 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
         runId: fakeRunId,
         memoryLimitMb: undefined,
         keepAlive: false,
+        checkpointRef: undefined,
       };
       const handle = await scratchBackend.create(spec);
       await scratchBackend.start(handle);
@@ -582,6 +657,7 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
           runId: "contractit",
           memoryLimitMb: undefined,
           keepAlive: true,
+          checkpointRef: undefined,
         });
         assert.ok(stillRunning !== undefined, "expected the reuse sandbox to be running under its deterministic name");
       } finally {
@@ -651,6 +727,7 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
           runId: "contractit",
           memoryLimitMb: undefined,
           keepAlive: true,
+          checkpointRef: undefined,
         });
         assert.ok(stillRunning !== undefined, "expected the backend-native sandbox to still be running after stop()");
       } finally {
@@ -666,15 +743,13 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
   );
 
   itIntegration(
-    `capabilities: hardwareIsolated is ${BACKEND_NAME === "docker" ? "false" : "true"} for this backend, checkpoint is ${
-      BACKEND_NAME === "docker" ? "true" : "false"
-    }`,
+    `capabilities: hardwareIsolated is ${BACKEND_NAME === "docker" ? "false" : "true"} for this backend; both backends support checkpoint today`,
     async () => {
       const backend = makeBackend();
       if (BACKEND_NAME === "docker") {
-        assert.deepEqual(backend.capabilities, { hardwareIsolated: false, checkpoint: true });
+        assert.deepEqual(backend.capabilities, { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
       } else {
-        assert.deepEqual(backend.capabilities, { hardwareIsolated: true, checkpoint: false });
+        assert.deepEqual(backend.capabilities, { hardwareIsolated: true, checkpoint: true, checkpointRestartsWorkload: true });
       }
     },
   );
@@ -702,35 +777,31 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
   );
 
   // The full checkpoint→restore round trip (exec a marker file, checkpoint,
-  // stop the original, restore, assert the marker survived, clean up the
-  // committed image) is docker-only and lives in docker-backend.test.ts —
-  // what belongs HERE, identically across both backends, is the gating
-  // contract itself: docker allows checkpoint() on a running container,
-  // msb rejects it with a typed error before any backend call is ever made.
+  // restore, assert the marker survived, clean up via removeCheckpoint) is
+  // backend-specific and lives in docker-backend.test.ts / msb-backend.test.ts
+  // — what belongs HERE, identically across both backends, is the gating
+  // contract itself: checkpoint() succeeds on a running container on BOTH
+  // real backends today, minting the backend-appropriate ref shape and
+  // naming itself as the creator.
   itIntegration(
-    `checkpoint gating: ${BACKEND_NAME === "docker" ? "docker allows checkpoint() on a running container" : "msb rejects checkpoint() with a typed error before any backend call"}`,
+    `checkpoint gating: checkpoint() succeeds on a running container and mints a ${BACKEND_NAME === "docker" ? "rightsize/checkpoint:<12-hex> image ref" : "rz-ckpt-<12-hex> snapshot ref"}`,
     async () => {
       const container = new GenericContainer("alpine:3.19").withBackend(makeBackend()).withCommand("sleep", "60");
       await container.start();
       try {
+        const cp = await container.checkpoint();
+        assert.equal(cp.backend, BACKEND_NAME);
+        assert.equal(cp.spec.image, "alpine:3.19");
         if (BACKEND_NAME === "docker") {
-          const cp = await container.checkpoint();
-          assert.match(cp.imageRef, /^rightsize\/checkpoint:[0-9a-f]{12}$/);
-          assert.equal(cp.spec.image, "alpine:3.19");
-          const client = DockerClient.fromEnv();
-          await client.request("DELETE", `/images/${encodeURIComponent(cp.imageRef)}`).catch(() => {});
+          assert.match(cp.ref, /^rightsize\/checkpoint:[0-9a-f]{12}$/);
         } else {
-          let thrown: unknown;
-          try {
-            await container.checkpoint();
-          } catch (err) {
-            thrown = err;
-          }
-          assert.ok(thrown instanceof CheckpointUnsupportedError, `expected CheckpointUnsupportedError, got: ${String(thrown)}`);
-          // Rejected before any backend call: the container itself is
-          // unaffected and still running.
-          assert.equal(container.isRunning, true);
+          assert.match(cp.ref, /^rz-ckpt-[0-9a-f]{12}$/);
+          // msb's stop/snapshot/reboot cycle restarts the workload — the
+          // container must come back up and answer exec normally.
+          const probe = await container.exec("true");
+          assert.equal(probe.exitCode, 0, "expected the sandbox to be running again after the checkpoint cycle");
         }
+        await makeBackend().removeCheckpoint(cp.ref);
       } finally {
         await container.stop();
       }

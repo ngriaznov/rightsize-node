@@ -62,6 +62,15 @@ TypeScript rightsize implementations all hash the identical canonical form
 to the identical digest for the identical logical spec, verified by a
 pinned test vector in each implementation's own test suite.
 
+**Runtime copy is not part of identity.** [`copyFileToContainer` /
+`copyContentToContainer` / `copyFileFromContainer`](/guide/copy) work against
+a reuse-active container the same as any other, but a runtime copy mutates
+the sandbox's shared state without changing its identity hash — two
+processes adopting the same identity see whatever the most recent copy left
+behind, not something tied to either process's own spec. Only files listed
+via `withCopyFileToContainer` (the start-time mount) are hashed; a runtime
+copy is invisible to identity entirely.
+
 ## The network restriction
 
 ```ts

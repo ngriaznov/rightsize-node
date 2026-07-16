@@ -191,10 +191,18 @@ backend-specific rather than behavioral divergences:
   hardware-virtualized isolation — for workloads that shouldn't silently
   degrade to a shared-kernel fallback. See
   [Isolation](https://ngriaznov.github.io/rightsize-node/guide/isolation).
-- **Checkpoint / restore (Docker).** `checkpoint()` commits a running
-  container's filesystem to an image; `fromCheckpoint()` boots fresh
-  containers from it — skip repeated boot-and-seed work across a suite.
-  See [Checkpoint / restore](https://ngriaznov.github.io/rightsize-node/guide/checkpoints).
+- **Checkpoint / restore.** `checkpoint()` captures a running container's
+  filesystem (image commit on docker, disk snapshot on microsandbox);
+  `fromCheckpoint()` boots fresh containers from it — skip repeated
+  boot-and-seed work across a suite. Pass a name — `checkpoint("name")` — to
+  make it durable and rediscoverable across runs via `Checkpoints.find`/
+  `list`/`remove`, registered under the rightsize cache dir. See
+  [Checkpoint / restore](https://ngriaznov.github.io/rightsize-node/guide/checkpoints).
+- **Runtime file copy.** `copyFileToContainer` / `copyContentToContainer` /
+  `copyFileFromContainer` move files and directories into or out of an
+  already-running container, on both backends, with destination parent
+  directories created automatically. See
+  [Copying files](https://ngriaznov.github.io/rightsize-node/guide/copy).
 - **One interface, two backends.** `SandboxBackend` is a small interface;
   the shared contract suite is the referee, with the Docker backend doubling
   as the correctness oracle for the microVM backend — and the same

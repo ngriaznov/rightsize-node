@@ -11,7 +11,8 @@ user-submitted script, a dependency you haven't audited) does.
 |---|---|---|
 | Execution model | each sandbox is its own microVM, with its own kernel | containers share the host kernel |
 | `capabilities.hardwareIsolated` | `true` | `false` |
-| `capabilities.checkpoint` | `false` (no upstream microVM snapshot support yet) | `true` (filesystem-level, via commit-to-image) |
+| `capabilities.checkpoint` | `true` (filesystem-level, via disk snapshot) | `true` (filesystem-level, via commit-to-image) |
+| `capabilities.checkpointRestartsWorkload` | `true` (the stop/snapshot/reboot cycle boots a fresh microVM) | `false` (commit-to-image never touches the running container) |
 | A kernel-level exploit inside the workload | contained to that microVM | reaches every other container on the host, and the host itself |
 
 `capabilities` is a small object on every `SandboxBackend`, exposed for

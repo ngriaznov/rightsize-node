@@ -23,6 +23,7 @@ function baseSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     runId: "deadbeef",
     memoryLimitMb: undefined,
     keepAlive: false,
+    checkpointRef: undefined,
     ...overrides,
   };
 }
@@ -245,21 +246,21 @@ describe("DockerBackend transport regression — must dial a unix socket, never 
 });
 
 describe("DockerBackend.capabilities", () => {
-  it("shares the host kernel: hardwareIsolated false, checkpoint true (commit-to-image)", () => {
+  it("shares the host kernel: hardwareIsolated false, checkpoint true (commit-to-image), checkpointRestartsWorkload false", () => {
     const backend = new DockerBackend(new DockerClient());
-    assert.deepEqual(backend.capabilities, { hardwareIsolated: false, checkpoint: true });
+    assert.deepEqual(backend.capabilities, { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
   });
 });
 
-describe("DockerBackend.commitToImage", () => {
-  it("POSTs /commit with the container id and the imageRef split into repo+tag", async () => {
+describe("DockerBackend.createCheckpoint", () => {
+  it("POSTs /commit with the container id and the ref split into repo+tag", async () => {
     if (skipOnWindows()) {
       return;
     }
     const { close, requests, client } = await fakeDaemon([{ status: 201, body: JSON.stringify({ Id: "sha256:abc" }) }]);
     try {
       const backend = new DockerBackend(client);
-      await backend.commitToImage({ id: "container-id-1", spec: baseSpec() }, "rightsize/checkpoint:abcdef012345");
+      await backend.createCheckpoint({ id: "container-id-1", spec: baseSpec() }, "rightsize/checkpoint:abcdef012345");
 
       assert.equal(requests.length, 1);
       assert.equal(requests[0]?.method, "POST");
@@ -272,7 +273,7 @@ describe("DockerBackend.commitToImage", () => {
     }
   });
 
-  it("throws BackendError naming the container and imageRef on a daemon error response", async () => {
+  it("throws BackendError naming the container and ref on a daemon error response", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -281,12 +282,97 @@ describe("DockerBackend.commitToImage", () => {
       const backend = new DockerBackend(client);
       let thrown: unknown;
       try {
-        await backend.commitToImage({ id: "gone", spec: baseSpec() }, "rightsize/checkpoint:abcdef012345");
+        await backend.createCheckpoint({ id: "gone", spec: baseSpec() }, "rightsize/checkpoint:abcdef012345");
       } catch (err) {
         thrown = err;
       }
       assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
       assert.match((thrown as Error).message, /gone/);
+      assert.match((thrown as Error).message, /rightsize\/checkpoint:abcdef012345/);
+    } finally {
+      close();
+    }
+  });
+});
+
+describe("DockerBackend.removeCheckpoint", () => {
+  it("DELETEs /images/<ref>", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const { close, requests, client } = await fakeDaemon([{ status: 200, body: "[]" }]);
+    try {
+      const backend = new DockerBackend(client);
+      await backend.removeCheckpoint("rightsize/checkpoint:abcdef012345");
+
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0]?.method, "DELETE");
+      assert.match(requests[0]?.url ?? "", /^\/images\/rightsize%2Fcheckpoint%3Aabcdef012345$/);
+    } finally {
+      close();
+    }
+  });
+
+  it("a daemon error response is silently fine (best-effort, like removeByName)", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const { close, client } = await fakeDaemon([{ status: 404, body: "no such image" }]);
+    try {
+      const backend = new DockerBackend(client);
+      await backend.removeCheckpoint("rightsize/checkpoint:doesnotexist");
+    } finally {
+      close();
+    }
+  });
+});
+
+describe("DockerBackend.hasCheckpoint", () => {
+  it("resolves true on a 200 image inspect response", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const { close, requests, client } = await fakeDaemon([{ status: 200, body: JSON.stringify({ Id: "sha256:abc" }) }]);
+    try {
+      const backend = new DockerBackend(client);
+      const exists = await backend.hasCheckpoint("rightsize/checkpoint:abcdef012345");
+      assert.equal(exists, true);
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0]?.method, "GET");
+      assert.match(requests[0]?.url ?? "", /^\/images\/rightsize%2Fcheckpoint%3Aabcdef012345\/json$/);
+    } finally {
+      close();
+    }
+  });
+
+  it("resolves false on a 404 image inspect response", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const { close, client } = await fakeDaemon([{ status: 404, body: "no such image" }]);
+    try {
+      const backend = new DockerBackend(client);
+      const exists = await backend.hasCheckpoint("rightsize/checkpoint:doesnotexist");
+      assert.equal(exists, false);
+    } finally {
+      close();
+    }
+  });
+
+  it("throws BackendError — never a silent false — on any other status", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const { close, client } = await fakeDaemon([{ status: 500, body: "internal error" }]);
+    try {
+      const backend = new DockerBackend(client);
+      let thrown: unknown;
+      try {
+        await backend.hasCheckpoint("rightsize/checkpoint:abcdef012345");
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
       assert.match((thrown as Error).message, /rightsize\/checkpoint:abcdef012345/);
     } finally {
       close();

@@ -21,7 +21,7 @@ import type { ContainerSpec, ExecResult } from "../model.js";
 
 class FakeReaperBackend implements SandboxBackend {
   readonly supportsNativeNetworks = true;
-  readonly capabilities = { hardwareIsolated: true, checkpoint: false };
+  readonly capabilities = { hardwareIsolated: true, checkpoint: false, checkpointRestartsWorkload: false };
   reaperKillCommandCalls = 0;
   readonly removedNames: string[] = [];
   readonly removedNetworks: string[] = [];
@@ -34,7 +34,11 @@ class FakeReaperBackend implements SandboxBackend {
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
   async remove(): Promise<void> {}
-  async commitToImage(): Promise<void> {}
+  async createCheckpoint(): Promise<void> {}
+  async removeCheckpoint(): Promise<void> {}
+  async hasCheckpoint(): Promise<boolean> {
+    return false;
+  }
   async removeByName(name: string): Promise<void> {
     this.removedNames.push(name);
   }
@@ -61,6 +65,8 @@ class FakeReaperBackend implements SandboxBackend {
     this.removedNetworks.push(networkId);
   }
   async installNetworkLinks(_handle: SandboxHandle, _links: ReadonlyArray<NetworkLink>): Promise<void> {}
+  async copyToContainer(_handle: SandboxHandle, _hostPath: string, _containerPath: string): Promise<void> {}
+  async copyFromContainer(_handle: SandboxHandle, _containerPath: string, _hostPath: string): Promise<void> {}
   async close(): Promise<void> {}
   cleanupSync(): void {}
 }

@@ -14,6 +14,13 @@ import { Wait } from "../../src/core/wait.js";
 import { cacheDir } from "../../src/core/cache-dir.js";
 import { reuseHash, reuseName } from "../../src/core/reuse/hash.js";
 import { readRegistry, removeRegistry } from "../../src/core/reuse/registry.js";
+import { Checkpoints } from "../../src/core/checkpoint/api.js";
+import { Backends } from "../../src/core/backends.js";
+// Side-effect import: registers MsbBackendProvider so Backends.active()
+// (which Checkpoints.find/remove resolve against) can actually resolve to
+// microsandbox, independent of whichever backend this file's own explicit
+// .withBackend(new MsbCliBackend(...)) instances use.
+import "../../src/backend-msb/index.js";
 
 /**
  * Live gates against the real `msb 0.6.6` binary at `~/.cache/rightsize`
@@ -42,6 +49,7 @@ function baseSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     runId: RunId.value,
     memoryLimitMb: undefined,
     keepAlive: false,
+    checkpointRef: undefined,
     ...overrides,
   };
 }
@@ -276,6 +284,142 @@ describe("MsbCliBackend integration (real msb 0.6.6 binary)", () => {
         } else {
           process.env["RIGHTSIZE_REUSE"] = savedReuseEnv;
         }
+      }
+    },
+  );
+
+  itIntegration(
+    "checkpoint/restore round trip: the stop/snapshot/reboot cycle leaves the SAME sandbox usable, and a restored sandbox has the marker file under a new name",
+    async () => {
+      const source = new GenericContainer("alpine:3.19")
+        .withBackend(new MsbCliBackend(ensureInstalled()))
+        .withCommand("sh", "-c", "echo ready; sleep 60");
+      await source.start();
+
+      let cp;
+      try {
+        const marker = await source.exec("sh", "-c", "echo checkpoint-marker > /marker.txt && sync");
+        assert.equal(marker.exitCode, 0);
+
+        cp = await source.checkpoint();
+        assert.match(cp.ref, /^rz-ckpt-[0-9a-f]{12}$/);
+        assert.equal(cp.backend, "microsandbox");
+
+        // Same container, still usable: proves the msb stop/snapshot/reboot
+        // cycle's reboot-from-snapshot step AND the generic layer's
+        // post-checkpoint wait re-run (capabilities.checkpointRestartsWorkload)
+        // both actually happened, not just that createCheckpoint() resolved
+        // without error.
+        const probe = await source.exec("true");
+        assert.equal(probe.exitCode, 0, "expected the SAME sandbox to still work after the checkpoint cycle");
+        assert.equal(source.isRunning, true);
+      } finally {
+        await source.stop();
+      }
+
+      // fromCheckpoint() carries over cp.spec.command ("echo ready; sleep
+      // 60") unmodified — waiting on that same "ready" line anchors
+      // readiness on real guest output, not a bare port/timing guess.
+      const restored = GenericContainer.fromCheckpoint(cp)
+        .withBackend(new MsbCliBackend(ensureInstalled()))
+        .waitingFor(Wait.forLogMessage("ready").withStartupTimeout(60_000));
+      try {
+        await restored.start();
+        const read = await restored.exec("cat", "/marker.txt");
+        assert.equal(read.exitCode, 0);
+        assert.equal(read.stdout.trim(), "checkpoint-marker");
+
+        const msbPath = await ensureInstalled();
+        const ls = await invoke(msbPath, MsbCommands.ls(), 30_000);
+        const running = runningNames(ls.stdout);
+        assert.ok(
+          !running.has(cp.spec.name),
+          "expected the restored sandbox to run under a NEW name, not the source's original name",
+        );
+      } finally {
+        // A mid-test failure above must still tear down both sandboxes and
+        // the snapshot.
+        await restored.stop();
+        if (cp !== undefined) {
+          await new MsbCliBackend(ensureInstalled()).removeCheckpoint(cp.ref).catch(() => {});
+        }
+      }
+    },
+  );
+
+  itIntegration(
+    "named checkpoint is rediscovered by a fresh Checkpoints.find(...) call, restores from it, and Checkpoints.remove(...) cleans it up",
+    async () => {
+      // Checkpoints.find/list/remove resolve Backends.active() internally —
+      // pin it to microsandbox for the duration of this test regardless of
+      // whatever RIGHTSIZE_BACKEND this process inherited, and reset the
+      // memoization so that actually takes effect.
+      const savedBackendEnv = process.env["RIGHTSIZE_BACKEND"];
+      process.env["RIGHTSIZE_BACKEND"] = "microsandbox";
+      Backends._resetActiveForTests();
+
+      // Nonced per run (RZ test-nonce discipline): a snapshot left behind by
+      // a crashed earlier run of this exact test can never collide with
+      // this run's own name.
+      const name = `${randomBytes(6).toString("hex")}-golden`;
+
+      try {
+        const source = new GenericContainer("alpine:3.19")
+          .withBackend(new MsbCliBackend(ensureInstalled()))
+          .withCommand("sh", "-c", "echo ready; sleep 60")
+          .waitingFor(Wait.forLogMessage("ready").withStartupTimeout(60_000));
+        await source.start();
+
+        try {
+          // /srv, never /tmp: the msb guest mounts /tmp as tmpfs, which a
+          // disk-snapshot checkpoint never captures.
+          const marker = await source.exec("sh", "-c", "mkdir -p /srv && echo checkpoint-marker > /srv/marker.txt && sync");
+          assert.equal(marker.exitCode, 0);
+
+          const cp = await source.checkpoint(name);
+          assert.equal(cp.ref, `rz-ckpt-${name}`);
+        } finally {
+          await source.stop();
+        }
+
+        // The cross-run story: rediscover via Checkpoints.find(...) ALONE —
+        // never the `cp` object returned above — this is exactly what makes
+        // a named checkpoint usable from a process that never held it.
+        const found = await Checkpoints.find(name);
+        if (found === undefined) {
+          throw new Error("expected find() to rediscover the named checkpoint");
+        }
+        assert.equal(found.ref, `rz-ckpt-${name}`);
+        assert.equal(found.backend, "microsandbox");
+
+        const restored = GenericContainer.fromCheckpoint(found)
+          .withBackend(new MsbCliBackend(ensureInstalled()))
+          .waitingFor(Wait.forLogMessage("ready").withStartupTimeout(60_000));
+        try {
+          await restored.start();
+          const read = await restored.exec("cat", "/srv/marker.txt");
+          assert.equal(read.exitCode, 0);
+          assert.equal(read.stdout.trim(), "checkpoint-marker");
+        } finally {
+          await restored.stop();
+        }
+
+        const removed = await Checkpoints.remove(name);
+        assert.equal(removed, true, "expected Checkpoints.remove to report that the named checkpoint existed");
+        const goneAfterRemove = await Checkpoints.find(name);
+        assert.equal(goneAfterRemove, undefined, "expected the checkpoint to be gone after Checkpoints.remove");
+      } finally {
+        // The cleanup guard: whether the assertions above passed or a panic
+        // hit partway through, this still leaves no snapshot or registry
+        // entry behind — a no-op if the happy-path remove() above already
+        // ran successfully.
+        await Checkpoints.remove(name).catch(() => {});
+        if (savedBackendEnv === undefined) {
+          delete process.env["RIGHTSIZE_BACKEND"];
+        } else {
+          process.env["RIGHTSIZE_BACKEND"] = savedBackendEnv;
+        }
+        Backends._resetActiveForTests();
       }
     },
   );

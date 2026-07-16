@@ -59,10 +59,11 @@ export class MySQLContainer extends GenericContainer {
       // First boot initializes the datafiles and boots mysqld twice (the
       // temp server for init scripts, then the real one). On a fast host
       // that finishes well under 60s, but a loaded Windows CI runner's
-      // first boot overruns the 60s default — 120s absorbs the slow case
-      // without masking a real hang.
+      // first boot overran even the 120s budget once (123s) — 180s, the
+      // same budget ClickHouse's own two-pass startup carries, absorbs the
+      // slow case without masking a real hang.
       .waitingFor(
-        Wait.forLogMessage(".*mysqld: ready for connections.*port: 3306($|[^0-9]).*", 1).withStartupTimeout(120_000),
+        Wait.forLogMessage(".*mysqld: ready for connections.*port: 3306($|[^0-9]).*", 1).withStartupTimeout(180_000),
       );
     // No withMemoryLimit override: unlike SpringCloudConfig's Paketo JVM
     // image, MySQL 8.4's InnoDB default footprint fits msb's default ~450M

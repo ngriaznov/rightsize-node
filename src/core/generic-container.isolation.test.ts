@@ -41,7 +41,11 @@ class FakeIsolationBackend implements SandboxBackend {
   async remove(): Promise<void> {
     this.calls.push("remove");
   }
-  async commitToImage(): Promise<void> {}
+  async createCheckpoint(): Promise<void> {}
+  async removeCheckpoint(): Promise<void> {}
+  async hasCheckpoint(): Promise<boolean> {
+    return false;
+  }
   async removeByName(): Promise<void> {}
   async findRunning(): Promise<SandboxHandle | undefined> {
     return undefined;
@@ -63,13 +67,15 @@ class FakeIsolationBackend implements SandboxBackend {
   }
   async removeNetwork(): Promise<void> {}
   async installNetworkLinks(): Promise<void> {}
+  async copyToContainer(): Promise<void> {}
+  async copyFromContainer(): Promise<void> {}
   async close(): Promise<void> {}
   cleanupSync(): void {}
 }
 
 describe("GenericContainer.withRequireIsolation()", () => {
   it("rejects with IsolationRequiredError before any backend call when the active backend isn't hardware-isolated", async () => {
-    const backend = new FakeIsolationBackend("docker", { hardwareIsolated: false, checkpoint: true });
+    const backend = new FakeIsolationBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
     const container = new GenericContainer("alpine:3.19")
       .withBackend(backend)
       .withRequireIsolation()
@@ -89,7 +95,7 @@ describe("GenericContainer.withRequireIsolation()", () => {
   });
 
   it("names the active backend and the RIGHTSIZE_BACKEND remedy in the error message", async () => {
-    const backend = new FakeIsolationBackend("docker", { hardwareIsolated: false, checkpoint: true });
+    const backend = new FakeIsolationBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
     const container = new GenericContainer("alpine:3.19").withBackend(backend).withRequireIsolation();
 
     let thrown: unknown;
@@ -107,7 +113,7 @@ describe("GenericContainer.withRequireIsolation()", () => {
   });
 
   it("starts normally against a hardware-isolated backend", async () => {
-    const backend = new FakeIsolationBackend("microsandbox", { hardwareIsolated: true, checkpoint: false });
+    const backend = new FakeIsolationBackend("microsandbox", { hardwareIsolated: true, checkpoint: false, checkpointRestartsWorkload: false });
     const container = new GenericContainer("alpine:3.19")
       .withBackend(backend)
       .withRequireIsolation()
@@ -124,7 +130,7 @@ describe("GenericContainer.withRequireIsolation()", () => {
   });
 
   it("without withRequireIsolation(), a non-isolated backend is accepted as before", async () => {
-    const backend = new FakeIsolationBackend("docker", { hardwareIsolated: false, checkpoint: true });
+    const backend = new FakeIsolationBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
     const container = new GenericContainer("alpine:3.19").withBackend(backend).withExposedPorts(80).waitingFor(instantReady());
 
     await container.start();

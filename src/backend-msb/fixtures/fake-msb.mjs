@@ -2,8 +2,11 @@
 // A stand-in for the real `msb` binary, driven entirely by a JSON state file
 // (path from RIGHTSIZE_FAKE_MSB_STATE) so a test can inspect/steer what
 // "sandboxes" exist without spawning a real microVM. Supports just enough of
-// the CLI surface MsbCliBackend actually calls: run, stop, rm, ls --format
-// json, exec, logs [--tail N | -f].
+// the CLI surface MsbCliBackend actually calls: run, stop, rm,
+// ls --format json, exec, logs [--tail N | -f], snapshot create/rm, copy.
+// `callLog` records every stop/run/rm/snapshot-create invocation (cmd + full
+// argv) so a test can assert the checkpoint stop/snapshot/reboot cycle's
+// exact call order and the reboot `run`'s exact argv, not just its end state.
 import * as fs from "node:fs";
 
 const statePath = process.env.RIGHTSIZE_FAKE_MSB_STATE;
@@ -15,6 +18,9 @@ function readState() {
   } catch {
     return { sandboxes: {} };
   }
+}
+function logCall(state, cmd, args) {
+  state.callLog = [...(state.callLog ?? []), { cmd, args }];
 }
 function writeState(state) {
   // Several fixture processes (the long-lived `run`, and one-shot `ls`/
@@ -36,6 +42,7 @@ if (cmd === "run") {
   const nameIdx = args.indexOf("--name");
   const name = args[nameIdx + 1];
   const state = readState();
+  logCall(state, "run", args);
   // Reproduces the real msb binary's image-cache corruption failure on
   // demand: while the counter is positive, a `run` decrements it and exits
   // with the exact error shape a corrupted cache produces (captured verbatim
@@ -85,6 +92,7 @@ if (cmd === "run") {
 } else if (cmd === "stop") {
   const name = args[1];
   const state = readState();
+  logCall(state, "stop", args);
   // Reproduces the real msb binary's state-database failure on a stop/rm
   // invocation, the same way "run" above does — so removeByName's own
   // retry-once-on-db-error path (mirroring the boot path's classifier) can
@@ -106,6 +114,7 @@ if (cmd === "run") {
 } else if (cmd === "rm") {
   const name = args[1];
   const state = readState();
+  logCall(state, "rm", args);
   if ((state.failRemovesWithStateDbError ?? 0) > 0) {
     state.failRemovesWithStateDbError -= 1;
     writeState(state);
@@ -137,6 +146,73 @@ if (cmd === "run") {
     process.exit(0);
   }
   process.stdout.write(`exec-ok:${rest.join(" ")}\n`);
+  process.exit(0);
+} else if (cmd === "snapshot" && args[1] === "create") {
+  // snapshot create --from <sandbox> <name>
+  const fromIdx = args.indexOf("--from");
+  const from = args[fromIdx + 1];
+  const name = args[args.length - 1];
+  const state = readState();
+  logCall(state, "snapshotCreate", args);
+  if ((state.failSnapshotCreate ?? 0) > 0) {
+    state.failSnapshotCreate -= 1;
+    writeState(state);
+    process.stderr.write(`error: snapshot create failed: sandbox '${from}' is not stopped\n`);
+    process.exit(1);
+  }
+  state.snapshots = { ...(state.snapshots ?? {}), [name]: { from } };
+  writeState(state);
+  process.exit(0);
+} else if (cmd === "snapshot" && args[1] === "inspect") {
+  // snapshot inspect <name> — exit 0 if the snapshot exists, exit 1
+  // otherwise. hasCheckpoint's backend call.
+  const name = args[2];
+  const state = readState();
+  // Reproduces a genuine, non-"not found" probe failure on demand (an
+  // unrelated msb error shape, e.g. its state-database failure) so tests can
+  // drive hasCheckpoint's must-throw path without a real msb crash/db
+  // corruption underneath.
+  if ((state.failSnapshotInspectWithError ?? 0) > 0) {
+    state.failSnapshotInspectWithError -= 1;
+    writeState(state);
+    process.stderr.write(
+      "error: database error: Execution Error: error returned from database: " +
+        "(code: 1) index idx_manifest_layers_unique already exists\n",
+    );
+    process.exit(1);
+  }
+  if (state.snapshots && name in state.snapshots) {
+    process.stdout.write(JSON.stringify({ name }));
+    process.exit(0);
+  }
+  // Wording captured verbatim from the real msb 0.6.6 binary — the exact
+  // framing isSnapshotNotFoundError matches against.
+  process.stderr.write(`error: snapshot not found: ${name}\n`);
+  process.exit(1);
+} else if (cmd === "snapshot" && args[1] === "rm") {
+  // Best-effort: a missing snapshot name is still a clean exit, matching the
+  // real command's "not found" contract removeCheckpoint relies on.
+  const name = args[2];
+  const state = readState();
+  if (state.snapshots) {
+    delete state.snapshots[name];
+  }
+  writeState(state);
+  process.exit(0);
+} else if (cmd === "copy") {
+  // copy -q <src> <dst> — records the call so a test can assert the exact
+  // argv this backend produced; a demand flag reproduces a failing transfer
+  // (missing guest source, permission, ...) without a real tool underneath.
+  const rest = args.slice(1).filter((a) => a !== "-q");
+  const state = readState();
+  if ((state.failCopyWithError ?? 0) > 0) {
+    state.failCopyWithError -= 1;
+    writeState(state);
+    process.stderr.write("error: copy failed: no such file or directory\n");
+    process.exit(1);
+  }
+  state.copyCalls = [...(state.copyCalls ?? []), rest];
+  writeState(state);
   process.exit(0);
 } else if (cmd === "image" && args[1] === "remove") {
   // Records the removal so tests can assert the heal targeted exactly the

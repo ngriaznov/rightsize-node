@@ -29,7 +29,7 @@ interface FakeCall {
 class FakeBackend implements SandboxBackend {
   readonly name = "fake";
   readonly supportsNativeNetworks = true;
-  readonly capabilities = { hardwareIsolated: true, checkpoint: false };
+  readonly capabilities = { hardwareIsolated: true, checkpoint: false, checkpointRestartsWorkload: false };
   readonly calls: FakeCall[] = [];
   readonly createdHandles: SandboxHandle[] = [];
   readonly cleanupSyncCalls: string[] = [];
@@ -69,7 +69,11 @@ class FakeBackend implements SandboxBackend {
     this.calls.push({ op: "remove", handleId: handle.id });
   }
 
-  async commitToImage(_handle: SandboxHandle, _imageRef: string): Promise<void> {}
+  async createCheckpoint(_handle: SandboxHandle, _ref: string): Promise<void> {}
+  async removeCheckpoint(): Promise<void> {}
+  async hasCheckpoint(): Promise<boolean> {
+    return false;
+  }
 
   async removeByName(_name: string): Promise<void> {}
 
@@ -105,6 +109,9 @@ class FakeBackend implements SandboxBackend {
       throw new Error("boom: installNetworkLinks failed");
     }
   }
+
+  async copyToContainer(): Promise<void> {}
+  async copyFromContainer(): Promise<void> {}
 
   async close(): Promise<void> {}
 

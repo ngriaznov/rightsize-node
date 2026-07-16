@@ -5,11 +5,22 @@ Items graduate off this page when they ship; the CHANGELOG records what landed.
 
 ## Native microVM memory snapshots
 
-Filesystem-level checkpoint/restore shipped on the docker backend — see
-[Checkpoint / restore](/guide/checkpoints). What remains is true microVM
-memory snapshots on microsandbox: a restored sandbox that resumes
-mid-execution rather than rebooting, needing upstream microsandbox support
-this library doesn't control the timeline for.
+Filesystem-level checkpoint/restore now ships on BOTH backends — docker via
+image commit, microsandbox via disk snapshot (see
+[Checkpoint / restore](/guide/checkpoints)). What remains is true microVM
+**memory** snapshots on microsandbox: a restored sandbox that resumes
+mid-execution rather than rebooting — near-instant restore, no workload
+restart — still gated on upstream microsandbox support this library doesn't
+control the timeline for.
+
+## Portable checkpoint archives
+
+Named checkpoints ship (see [Checkpoint / restore](/guide/checkpoints)), but
+they're only rediscoverable on the same machine, since the registry and the
+underlying artifact both live locally. Export/import (`msb snapshot
+export`/`docker save` and their inverses) would let a checkpoint travel
+between machines and CI caches — build the fixture once, ship the archive,
+restore it anywhere.
 
 ## Module breadth
 
@@ -28,10 +39,12 @@ fixture story, Vitest/Jest global-setup helpers, Axum/sqlx examples.
 Define an ad-hoc image inline in the test (Dockerfile-from-code) instead of
 publishing one — for testing your own service, not just its dependencies.
 
-## Copy files out; host-directory mounts
+## Host-directory mounts
 
-Copy-out (`copyFileFromContainer`) for extracting generated artifacts and
-debug dumps; host-directory binds alongside the existing copy-in.
+Runtime file/directory copy in both directions has shipped — see
+[Copying files](/guide/copy). What remains is a start-time host-directory
+BIND alongside the existing single-file `withCopyFileToContainer`, for
+mounting a whole host directory tree into the guest before boot.
 
 ## Declarative multi-service groups
 

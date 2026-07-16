@@ -10,6 +10,7 @@ import { invoke, CLOSED_STDIN } from "./invoke.js";
 import { isPortBindConflictOutput } from "./port-conflict.js";
 import { isImageCacheCorruption } from "./image-cache.js";
 import { isMsbStateDbError } from "./state-db.js";
+import { isSnapshotNotFoundError } from "./snapshot-not-found.js";
 import { undeliveredLines } from "./follow-replay.js";
 import { requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript } from "./network-links.js";
 import { ExecTunnel } from "./exec-tunnel.js";
@@ -21,6 +22,14 @@ const EXEC_TIMEOUT_MS = 120_000;
 const LOGS_TIMEOUT_MS = 30_000;
 const ATTACHED_PROC_STOP_TIMEOUT_MS = 10_000;
 const TAIL_LINES = 50;
+// Snapshot create/rm and the reboot-from-snapshot step of the checkpoint
+// stop/snapshot/reboot cycle — generous, since a snapshot's size tracks the
+// sandbox's actual disk usage (a tiny alpine's was a few MB, but nothing
+// here bounds a caller's own workload).
+const CHECKPOINT_TIMEOUT_MS = 120_000;
+// `msb copy` of a directory scales with its contents, not a fixed small
+// payload like exec/logs — generous relative to those.
+const COPY_TIMEOUT_MS = 120_000;
 // How long the Windows polling follower's terminal fetch keeps retrying an
 // `msb logs` invocation that itself keeps failing, once the sandbox is
 // already confirmed no longer Running. Never a wait-for-content budget: a
@@ -196,12 +205,14 @@ export class MsbCliBackend implements SandboxBackend {
   /** `"microsandbox"` — matched against `RIGHTSIZE_BACKEND` and used in `dev.rightsize.runId`-style diagnostics. */
   readonly name = "microsandbox";
   readonly supportsNativeNetworks = false;
-  /** Each sandbox is its own microVM with its own kernel; no upstream microVM snapshot support yet. */
+  /** Each sandbox is its own microVM with its own kernel; checkpoint/restore is a disk snapshot, which restarts the workload. */
   readonly capabilities: BackendCapabilities = {
     /** Each sandbox is a microVM with its own kernel. */
     hardwareIsolated: true,
-    /** No upstream microVM snapshot/restore support yet. */
-    checkpoint: false,
+    /** Disk-snapshot checkpoint/restore via `msb snapshot`. */
+    checkpoint: true,
+    /** The stop/snapshot/reboot cycle reboots the microVM — the workload restarts. */
+    checkpointRestartsWorkload: true,
   };
 
   private readonly handles = new Map<string, HandleState>();
@@ -458,19 +469,100 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
-   * Defensive only: `GenericContainer.checkpoint()` gates on
-   * `capabilities.checkpoint` (`false` here) before ever calling this, so
-   * this throw is unreachable in normal use — it exists so a caller that
-   * somehow invokes the backend directly still gets a typed rejection
-   * instead of a silent no-op or a confusing CLI error.
+   * The stop/snapshot/reboot cycle: `msb stop <name>` (reusing this
+   * backend's own `stop()`, which also quiesces the attached child and any
+   * network-link tunnels), `msb snapshot create --from <name> <ref>`, then
+   * `msb rm <name>` followed by a fresh ATTACHED boot of the SAME name from
+   * that snapshot — never `msb start`. Upstream's detached-start path
+   * (`Sandbox::start_detached`) passes `CREATE_BREAKAWAY_FROM_JOB` on
+   * Windows, which `ERROR_ACCESS_DENIED`s outright whenever the msb CLI runs
+   * inside a job object that doesn't grant breakaway rights — a Gradle/
+   * cargo/node test runner on a hosted Windows runner, or any process that
+   * embeds this library inside its own restrictive job object — and that
+   * denial is deterministic, not transient, so no retry shape fixes it.
+   * Attached `msb run` (this backend's normal boot, including `--snapshot`
+   * boots) never hits it, which is why the reboot reuses `bootOnce` instead
+   * of resuming in place: the stopped sandbox's disk state is already IN the
+   * snapshot, so `rm`-ing it first and booting a fresh attached sandbox
+   * under the same name/ports/env/memory (via a spec identical to
+   * `handle.spec` except `checkpointRef` set to the new `ref`) reproduces
+   * the exact same observable contract. `bootOnce` swaps `state.attached` to
+   * the freshly spawned child itself; nothing about `this.handles`/
+   * `startedNames` or the reaping ledger changes, since the name never
+   * changed. Its workload restarts from scratch (the VM reboots), which is
+   * why `capabilities.checkpointRestartsWorkload` is `true` here and the
+   * generic layer re-runs the wait strategy after this returns.
+   *
+   * If the snapshot step fails, the sandbox is left stopped — no
+   * best-effort restart, since that restart would itself be the broken `msb
+   * start` call — and the error names the failed step plus the by-hand
+   * remedy. If the snapshot step SUCCEEDS but the reboot from it fails, the
+   * sandbox has already been removed by the time that's known, so the error
+   * instead names the checkpoint ref and points at `fromCheckpoint()` as the
+   * recovery path.
    */
-  async commitToImage(_handle: SandboxHandle, _imageRef: string): Promise<void> {
-    throw new UnsupportedByBackendError(
-      "checkpoint/restore",
-      this.name,
-      "set RIGHTSIZE_BACKEND=docker — checkpoint/restore is implemented via image commit there; native microVM " +
-        "snapshots for microsandbox are on the roadmap",
-    );
+  async createCheckpoint(handle: SandboxHandle, ref: string): Promise<void> {
+    const msbPath = await this.msbPath();
+    await this.stop(handle);
+
+    const snap = await invoke(msbPath, MsbCommands.snapshotCreate(handle.id, ref), CHECKPOINT_TIMEOUT_MS);
+    if (snap.exitCode !== 0) {
+      throw new BackendError(
+        `msb snapshot create --from ${handle.id} ${ref} failed (exit ${snap.exitCode}): ${snap.stderr.trim()} — ` +
+          `the sandbox is left stopped; run 'msb start ${handle.id}' by hand to bring it back up.`,
+      );
+    }
+
+    await invoke(msbPath, MsbCommands.rm(handle.id), STOP_TIMEOUT_MS).catch(() => {});
+
+    const state = this.handles.get(handle.id);
+    if (state === undefined) {
+      throw new BackendError(`no handle state for sandbox '${handle.id}' — create() was never called for it`);
+    }
+    const rebootHandle: SandboxHandle = { id: handle.id, spec: { ...handle.spec, checkpointRef: ref } };
+    try {
+      await this.bootOnce(msbPath, rebootHandle, state);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new BackendError(
+        `sandbox '${handle.id}' was removed after a successful checkpoint snapshot, but booting a fresh ` +
+          `sandbox back up from that snapshot failed: ${detail} — the sandbox's disk state is preserved in ` +
+          `checkpoint '${ref}', restorable via GenericContainer.fromCheckpoint().`,
+      );
+    }
+  }
+
+  /** Best-effort `msb snapshot rm <ref>` — "not found" is success, the same contract as `removeByName`. */
+  async removeCheckpoint(ref: string): Promise<void> {
+    const msbPath = await this.msbPath();
+    await invoke(msbPath, MsbCommands.snapshotRemove(ref), CHECKPOINT_TIMEOUT_MS).catch(() => {});
+  }
+
+  /**
+   * `msb snapshot inspect <ref>` — exit 0 means the snapshot exists. A
+   * non-zero exit whose stderr carries msb's own "snapshot not found"
+   * framing (see `isSnapshotNotFoundError`, confirmed verbatim against the
+   * real msb 0.6.6 binary) resolves `false` — a genuine miss. Any OTHER
+   * non-zero exit (a corrupted state db, a permission error, a malformed
+   * argument, an msb crash) throws `BackendError` carrying the raw stderr
+   * instead of collapsing to `false`: `invoke()` itself only rejects on a
+   * spawn or timeout failure (never on exit code — see `logs()`'s own doc on
+   * that), so without this check a genuine probe failure would silently
+   * resolve `false` and let `Checkpoints.find`'s stale-cleanup best-effort
+   * delete a perfectly valid registry entry over what may be a transient msb
+   * failure — exactly the "no best-effort false on probe errors" the SPI's
+   * own contract forbids.
+   */
+  async hasCheckpoint(ref: string): Promise<boolean> {
+    const msbPath = await this.msbPath();
+    const result = await invoke(msbPath, MsbCommands.snapshotInspect(ref), CHECKPOINT_TIMEOUT_MS);
+    if (result.exitCode === 0) {
+      return true;
+    }
+    if (isSnapshotNotFoundError(result.stderr)) {
+      return false;
+    }
+    throw new BackendError(`msb snapshot inspect ${ref} failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
   }
 
   private async runningSandboxNames(msbPath: string): Promise<Set<string>> {
@@ -768,6 +860,34 @@ export class MsbCliBackend implements SandboxBackend {
       if (state !== undefined) {
         state.resources.push(tunnel);
       }
+    }
+  }
+
+  /**
+   * `msb copy -q <hostPath> <name>:<containerPath>` — the transfer only;
+   * `GenericContainer.copyFileToContainer()` already confirmed the sandbox
+   * is running, validated the absolute path, and ran the guest-side
+   * `mkdir -p` before this is ever called. A nonzero exit surfaces the
+   * tool's own stderr rather than a silent success.
+   */
+  async copyToContainer(handle: SandboxHandle, hostPath: string, containerPath: string): Promise<void> {
+    const msbPath = await this.msbPath();
+    const result = await invoke(msbPath, MsbCommands.copyIn(hostPath, handle.id, containerPath), COPY_TIMEOUT_MS);
+    if (result.exitCode !== 0) {
+      throw new BackendError(
+        `msb copy into ${handle.id}:${containerPath} failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
+    }
+  }
+
+  /** The reverse direction of `copyToContainer` — see its own doc. */
+  async copyFromContainer(handle: SandboxHandle, containerPath: string, hostPath: string): Promise<void> {
+    const msbPath = await this.msbPath();
+    const result = await invoke(msbPath, MsbCommands.copyOut(handle.id, containerPath, hostPath), COPY_TIMEOUT_MS);
+    if (result.exitCode !== 0) {
+      throw new BackendError(
+        `msb copy from ${handle.id}:${containerPath} failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
     }
   }
 

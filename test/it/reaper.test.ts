@@ -270,6 +270,7 @@ describe("orphan reaping: sweep end-to-end (msb backend)", () => {
         runId: fakeRunId,
         memoryLimitMb: undefined,
         keepAlive: false,
+        checkpointRef: undefined,
       };
       const handle = await scratchBackend.create(spec);
       await scratchBackend.start(handle);
