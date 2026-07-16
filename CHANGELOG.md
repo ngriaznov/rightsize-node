@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-07-16
+
 ### Added
 
 - Runtime file copy: `GenericContainer.copyFileToContainer(hostPath, containerPath)`,

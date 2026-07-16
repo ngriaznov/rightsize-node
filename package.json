@@ -1,6 +1,6 @@
 {
   "name": "rightsize",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Testcontainers-style integration testing on microsandbox microVMs, with a Docker fallback and an await-using lifecycle. No Docker required.",
   "keywords": [
     "testcontainers",
