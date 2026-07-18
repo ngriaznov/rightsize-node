@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] - 2026-07-18
+
 ### Added
 
 - Checkpoint export/import: `Checkpoints.exportTo(checkpoint, path)` bundles
