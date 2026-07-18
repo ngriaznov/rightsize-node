@@ -25,6 +25,8 @@ export {
   ReuseFromCheckpointError,
   RelativeContainerPathError,
   InvalidCheckpointNameError,
+  CheckpointArtifactMissingError,
+  MalformedCheckpointArchiveError,
 } from "./core/errors.js";
 export type { PortBinding, FileMount, ExecResult, ContainerSpec, Checkpoint } from "./core/model.js";
 export type {

@@ -1,14 +1,19 @@
 import { cacheDir } from "../cache-dir.js";
 import { Backends } from "../backends.js";
 import type { Checkpoint } from "../model.js";
+import { CheckpointArtifactMissingError, CheckpointBackendMismatchError } from "../errors.js";
 import { requireValidCheckpointName } from "./name.js";
 import {
   readCheckpointRegistry,
   removeCheckpointRegistryFile,
+  writeCheckpointRegistryAtomic,
   listCheckpointNames,
   fromCheckpointRegistryEntry,
+  toCheckpointRegistrySpec,
   type CheckpointRegistryEntry,
 } from "./registry.js";
+import { writeCheckpointArchive, readCheckpointArchive, CHECKPOINT_ARCHIVE_VERSION } from "./archive.js";
+import type { CheckpointArchiveMetadata } from "./archive.js";
 
 /** Every field of a `Checkpoint` comes straight from the registry entry except `spec`, which is reconstructed via `fromCheckpointRegistryEntry` — see that function's own doc for what is and isn't meaningful in the result. */
 function toCheckpoint(entry: CheckpointRegistryEntry): Checkpoint {
@@ -136,6 +141,131 @@ export async function remove(name: string): Promise<boolean> {
 }
 
 /**
+ * Reverse lookup: the registry entry (if any) whose `ref`/`backend` match a
+ * `Checkpoint`'s own — `exportTo`'s only way to learn whether the checkpoint
+ * it's given was ever named, and under what name, since a `Checkpoint`
+ * object itself never carries one (see `toCheckpoint` above). Scans every
+ * registered name the same way `list()` does; a corrupt entry is silently
+ * skipped, matching `list()`'s own tolerance.
+ */
+async function findRegistryEntryByRef(dir: string, ref: string, backend: string): Promise<CheckpointRegistryEntry | undefined> {
+  const names = await listCheckpointNames(dir);
+  for (const name of names) {
+    const read = await readCheckpointRegistry(dir, name);
+    if (read.kind === "found" && read.entry.ref === ref && read.entry.backend === backend) {
+      return read.entry;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Bundles `cp` into a self-describing archive at `destPath`: `checkpoint.json`
+ * (the pinned metadata — format version, this checkpoint's name if it was
+ * ever registered under one, ref, backend, creation time, and spec) plus an
+ * `artifact` member holding the backend's own payload, byte-for-byte what
+ * `SandboxBackend.exportCheckpoint` produces. See the
+ * [checkpoints guide](/guide/checkpoints#moving-checkpoints-between-machines)
+ * for the full CI-cache pattern this exists for.
+ *
+ * Requires the ACTIVE backend to equal `cp.backend` — the same
+ * `CheckpointBackendMismatchError` `fromCheckpoint(cp).start()` throws —
+ * before any backend or filesystem work. Then probes the artifact still
+ * exists via `hasCheckpoint`: exporting a stale checkpoint throws
+ * `CheckpointArtifactMissingError` rather than producing a broken archive.
+ * Only once both checks pass does this stage the export in a fresh unique
+ * temp directory (removed in a `finally` regardless of outcome) and tar it
+ * into `destPath` (parent directories created; a pre-existing file there is
+ * overwritten). Works on an ephemeral (unnamed) checkpoint too — the
+ * resulting archive just carries `name: null`.
+ */
+export async function exportTo(cp: Checkpoint, destPath: string): Promise<void> {
+  const active = Backends.active();
+  if (cp.backend !== active.name) {
+    throw new CheckpointBackendMismatchError(cp.backend, active.name);
+  }
+  const exists = await active.hasCheckpoint(cp.ref);
+  if (!exists) {
+    throw new CheckpointArtifactMissingError(cp.ref, cp.backend);
+  }
+
+  const dir = cacheDir();
+  const registryEntry = await findRegistryEntryByRef(dir, cp.ref, cp.backend);
+  const metadata: CheckpointArchiveMetadata = {
+    rightsizeArchive: CHECKPOINT_ARCHIVE_VERSION,
+    name: registryEntry?.name ?? null,
+    ref: cp.ref,
+    backend: cp.backend,
+    createdIso: registryEntry?.createdIso ?? new Date().toISOString(),
+    spec: toCheckpointRegistrySpec(cp.spec),
+  };
+
+  await writeCheckpointArchive(destPath, metadata, (artifactPath) => active.exportCheckpoint(cp.ref, artifactPath));
+}
+
+/**
+ * The inverse of `exportTo`: extracts `srcPath`, validates its
+ * `checkpoint.json` (format version, `name` against
+ * `CHECKPOINT_NAME_PATTERN` when non-null, backend against the ACTIVE
+ * backend — a `MalformedCheckpointArchiveError` or `CheckpointBackendMismatchError`
+ * either way, before any backend call or registry write), then hands the
+ * extracted `artifact` to `SandboxBackend.importCheckpoint`, which
+ * materializes it and returns the EFFECTIVE ref (docker: the same `ref` the
+ * archive recorded; microsandbox: the digest `snapshot import` actually
+ * assigned it — never necessarily the archive's own `ref`).
+ *
+ * A NAMED archive (`name` non-null) gets replace semantics matching
+ * `checkpoint(name)`: if a registry entry already exists for that name under
+ * a DIFFERENT ref and its recorded backend matches the active one, its old
+ * artifact is best-effort removed first (never a foreign-backend
+ * `removeCheckpoint` call — the same gate `remove()` applies); the registry
+ * entry is then written (or overwritten) with the effective ref. A NAMELESS
+ * archive writes no registry entry at all — the returned `Checkpoint` is
+ * purely ephemeral, the same as an unnamed `checkpoint()` call's result.
+ * Either way, the returned `Checkpoint` restores via the existing
+ * `fromCheckpoint()` path with zero changes — refs are opaque throughout
+ * this library.
+ */
+export async function importFrom(srcPath: string): Promise<Checkpoint> {
+  const active = Backends.active();
+  return readCheckpointArchive(srcPath, async (metadata, artifactPath) => {
+    if (metadata.name !== null) {
+      requireValidCheckpointName(metadata.name);
+    }
+    if (metadata.backend !== active.name) {
+      throw new CheckpointBackendMismatchError(metadata.backend, active.name);
+    }
+
+    const effectiveRef = await active.importCheckpoint(artifactPath, metadata.ref);
+    const spec = fromCheckpointRegistryEntry({
+      name: metadata.name ?? "",
+      ref: effectiveRef,
+      backend: active.name,
+      createdIso: metadata.createdIso,
+      spec: metadata.spec,
+    });
+
+    if (metadata.name !== null) {
+      const dir = cacheDir();
+      const existing = await readCheckpointRegistry(dir, metadata.name);
+      if (existing.kind === "found" && existing.entry.ref !== effectiveRef && existing.entry.backend === active.name) {
+        await active.removeCheckpoint(existing.entry.ref).catch(() => {});
+      }
+      const entry: CheckpointRegistryEntry = {
+        name: metadata.name,
+        ref: effectiveRef,
+        backend: active.name,
+        createdIso: metadata.createdIso,
+        spec: metadata.spec,
+      };
+      await writeCheckpointRegistryAtomic(dir, metadata.name, entry);
+    }
+
+    return { ref: effectiveRef, backend: active.name, spec };
+  });
+}
+
+/**
  * The library's entry point for rediscovering NAMED checkpoints across
  * processes — see the [checkpoints guide](/guide/checkpoints#reusing-checkpoints-across-runs)
  * for the `find(...) ?? seed()` first-run/later-run pattern this exists to
@@ -149,4 +279,8 @@ export const Checkpoints = {
   list,
   /** Deletes a named checkpoint — see `remove` above. */
   remove,
+  /** Bundles a checkpoint into a portable archive — see `exportTo` above. */
+  exportTo,
+  /** Materializes a portable archive on this machine — see `importFrom` above. */
+  importFrom,
 };

@@ -29,6 +29,8 @@ function fakeBackend(onRemoveNetwork?: (id: string) => void): SandboxBackend {
     createCheckpoint: notImplemented,
     removeCheckpoint: notImplemented,
     hasCheckpoint: notImplemented,
+    exportCheckpoint: notImplemented,
+    importCheckpoint: notImplemented,
     removeByName: notImplemented,
     findRunning: notImplemented,
     reaperKillCommand: notImplemented,

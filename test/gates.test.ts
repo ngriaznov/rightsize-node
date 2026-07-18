@@ -64,6 +64,10 @@ class FollowFakeBackend implements SandboxBackend {
   async hasCheckpoint(): Promise<boolean> {
     return false;
   }
+  async exportCheckpoint(): Promise<void> {}
+  async importCheckpoint(): Promise<string> {
+    return "";
+  }
   async removeByName(): Promise<void> {}
   async findRunning(): Promise<SandboxHandle | undefined> {
     return undefined;
@@ -227,6 +231,10 @@ describe("isPortBindConflict truth table", () => {
       async removeCheckpoint() {},
       async hasCheckpoint() {
         return false;
+      },
+      async exportCheckpoint() {},
+      async importCheckpoint() {
+        return "";
       },
       async removeByName() {},
       async findRunning() {

@@ -37,6 +37,10 @@ export class FakeModuleBackend implements SandboxBackend {
   async hasCheckpoint(_ref: string): Promise<boolean> {
     return false;
   }
+  async exportCheckpoint(_ref: string, _destFile: string): Promise<void> {}
+  async importCheckpoint(_srcFile: string, _ref: string): Promise<string> {
+    return "";
+  }
   async removeByName(_name: string): Promise<void> {}
   async findRunning(_spec: ContainerSpec): Promise<SandboxHandle | undefined> {
     return undefined;

@@ -55,6 +55,21 @@ export const MsbCommands = {
     return ["snapshot", "inspect", name];
   },
 
+  /** `msb snapshot export <ref> <dest>` — writes a `.tar.zst` artifact archive; deliberately never `--with-image` (its import fails an integrity check in 0.6.6, see the checkpoints guide). `exportCheckpoint`'s backend call. */
+  snapshotExport(ref: string, dest: string): string[] {
+    return ["snapshot", "export", ref, dest];
+  },
+
+  /** `msb snapshot import <archive>` — unpacks into a digest-derived directory under `~/.microsandbox/snapshots/`, never the original name; `importCheckpoint`'s backend call. */
+  snapshotImport(archive: string): string[] {
+    return ["snapshot", "import", archive];
+  },
+
+  /** `msb snapshot list --format json` — full `digest`/`name`/`artifact_path`/`image_ref` entries, used to CONFIRM an imported snapshot's digest-dir basename is present (the basename itself, not the `digest` field, is the effective ref — the full digest does not resolve as a snapshot ref). */
+  snapshotList(): string[] {
+    return ["snapshot", "list", "--format", "json"];
+  },
+
   /** `msb copy -q <hostPath> <name>:<containerPath>` — host-to-guest transfer, `cp -r`-style destination naming for a directory source. */
   copyIn(hostPath: string, name: string, containerPath: string): string[] {
     return ["copy", "-q", hostPath, `${name}:${containerPath}`];

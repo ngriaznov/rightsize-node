@@ -56,7 +56,8 @@ export function checkpointRegistryPath(cacheDir: string, name: string): string {
   return path.join(checkpointsDir(cacheDir), `${name}.json`);
 }
 
-function isCheckpointRegistrySpec(value: unknown): value is CheckpointRegistrySpec {
+/** Structural validator for `CheckpointRegistrySpec` — also the shape a checkpoint archive's `checkpoint.json` `spec` field must match, see `checkpoint/archive.ts`. */
+export function isCheckpointRegistrySpec(value: unknown): value is CheckpointRegistrySpec {
   if (typeof value !== "object" || value === null) {
     return false;
   }

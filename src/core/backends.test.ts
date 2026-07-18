@@ -66,6 +66,8 @@ function fakeBackend(name: string): SandboxBackend {
     createCheckpoint: (): Promise<void> => notImplemented(),
     removeCheckpoint: (): Promise<void> => notImplemented(),
     hasCheckpoint: (): Promise<boolean> => notImplemented(),
+    exportCheckpoint: (): Promise<void> => notImplemented(),
+    importCheckpoint: (): Promise<string> => notImplemented(),
     removeByName: (): Promise<void> => notImplemented(),
     findRunning: (): Promise<SandboxHandle | undefined> => notImplemented(),
     reaperKillCommand: (): Promise<import("./backend.js").ReaperKillCommand> => notImplemented(),

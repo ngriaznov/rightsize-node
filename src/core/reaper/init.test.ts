@@ -39,6 +39,10 @@ class FakeReaperBackend implements SandboxBackend {
   async hasCheckpoint(): Promise<boolean> {
     return false;
   }
+  async exportCheckpoint(): Promise<void> {}
+  async importCheckpoint(): Promise<string> {
+    return "";
+  }
   async removeByName(name: string): Promise<void> {
     this.removedNames.push(name);
   }

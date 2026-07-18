@@ -92,6 +92,13 @@ class FakeCheckpointBackend implements SandboxBackend {
     this.calls.push(`hasCheckpoint:${ref}`);
     return this.artifacts.has(ref);
   }
+  async exportCheckpoint(ref: string): Promise<void> {
+    this.calls.push(`exportCheckpoint:${ref}`);
+  }
+  async importCheckpoint(_srcFile: string, ref: string): Promise<string> {
+    this.calls.push(`importCheckpoint:${ref}`);
+    return ref;
+  }
   async removeByName(): Promise<void> {}
   async findRunning(): Promise<SandboxHandle | undefined> {
     return undefined;

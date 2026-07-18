@@ -203,3 +203,45 @@ export class InvalidCheckpointNameError extends Error {
     this.name = "InvalidCheckpointNameError";
   }
 }
+
+/**
+ * Thrown by `Checkpoints.exportTo` when the checkpoint's own backend artifact
+ * no longer exists (`hasCheckpoint` reports `false`) — exporting a stale
+ * checkpoint would otherwise produce an archive whose `artifact` member the
+ * backend simply failed to write. Thrown before any filesystem work (no temp
+ * dir, no tar), after the backend-match check has already passed.
+ */
+export class CheckpointArtifactMissingError extends Error {
+  constructor(
+    /** The checkpoint's ref, exactly as recorded on the `Checkpoint` being exported. */
+    readonly ref: string,
+    /** The backend this ref was supposed to exist on. */
+    readonly backend: string,
+  ) {
+    super(
+      `cannot export checkpoint '${ref}' — its backend artifact no longer exists on the '${backend}' backend ` +
+        "(removed by hand, or by something outside this library); this checkpoint is stale.",
+    );
+    this.name = "CheckpointArtifactMissingError";
+  }
+}
+
+/**
+ * Thrown by `Checkpoints.importFrom` when `srcPath` isn't a well-formed
+ * rightsize checkpoint archive: the file doesn't exist, it isn't a valid tar,
+ * it has no `checkpoint.json` member, that member isn't valid JSON, isn't
+ * shaped like the pinned archive format, or its `rightsizeArchive` field
+ * isn't the version this library understands. Thrown before any backend call
+ * and before any registry write.
+ */
+export class MalformedCheckpointArchiveError extends Error {
+  constructor(
+    /** The archive path passed to `importFrom`, exactly as given. */
+    readonly archivePath: string,
+    /** A noun-phrase-ish description of what's wrong with it. */
+    readonly reason: string,
+  ) {
+    super(`checkpoint archive '${archivePath}' is malformed — ${reason}`);
+    this.name = "MalformedCheckpointArchiveError";
+  }
+}

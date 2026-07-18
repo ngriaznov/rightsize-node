@@ -5,8 +5,8 @@
 **Testcontainers-style integration testing on microVMs. No Docker required.**
 
 rightsize runs your integration-test containers as hardware-isolated
-[microsandbox](https://github.com/superradcompany/microsandbox) microVMs —
-one microVM per container — behind a strict-mode ESM TypeScript API whose
+[microsandbox](https://github.com/superradcompany/microsandbox) microVMs -
+one microVM per container - behind a strict-mode ESM TypeScript API whose
 flagship lifecycle is TC39 explicit resource management. The runtime
 self-provisions on first use (no install step), and a hand-rolled Docker
 backend covers the platforms microVMs can't reach.
@@ -26,7 +26,7 @@ await main();
 ```
 
 `await using` is the whole story: `redis` is disposed automatically at the
-end of its scope — stopped, removed, its port freed — ordered and awaited,
+end of its scope - stopped, removed, its port freed - ordered and awaited,
 the same way a `try`/`finally` would, with none of the boilerplate.
 
 ## Why microVMs
@@ -40,11 +40,11 @@ the same way a `try`/`finally` would, with none of the boilerplate.
 | Docker client | a general-purpose SDK over a shared HTTP stack | **hand-rolled, unix-socket-only — can't be misrouted onto TCP** |
 
 The lifecycle and Docker-client rows above aren't incidental implementation
-choices — see [Lifecycle](https://ngriaznov.github.io/rightsize-node/guide/lifecycle)
+choices - see [Lifecycle](https://ngriaznov.github.io/rightsize-node/guide/lifecycle)
 and [Backends](https://ngriaznov.github.io/rightsize-node/guide/backends)
 for why each one is the way it is. (If you've used Testcontainers, the
-builder shape — `withEnv`, `withExposedPorts`, `waitingFor`, `getMappedPort`
-— will feel familiar; the lifecycle is where this library departs from it
+builder shape - `withEnv`, `withExposedPorts`, `waitingFor`, `getMappedPort`
+- will feel familiar; the lifecycle is where this library departs from it
 most.)
 
 ## Quickstart
@@ -53,7 +53,7 @@ most.)
 npm install --save-dev rightsize
 ```
 
-Importing a backend subpath registers it as a side effect — import whichever
+Importing a backend subpath registers it as a side effect - import whichever
 one(s) you want considered, and `rightsize` picks the best supported one
 automatically (or `RIGHTSIZE_BACKEND` forces a specific one):
 
@@ -107,15 +107,15 @@ a `GenericContainer` subclass, so the fluent builders (`withEnv`,
 | `FlinkContainer` | `restUrl`; `withTaskManager()` for a full session cluster — **Docker only**¹ |
 
 Some modules raise a memory floor for their image (`withMemoryLimit`):
-heavyweight JVM images — Spring Cloud Config, Keycloak, Neo4j, Flink
-(1024 MB) — and Pinot's multi-JVM QuickStart cluster (4096 MB) — need more
+heavyweight JVM images - Spring Cloud Config, Keycloak, Neo4j, Flink
+(1024 MB) - and Pinot's multi-JVM QuickStart cluster (4096 MB) - need more
 than the microVM default. That's baked into the module; you don't set it.
 Every module's page under [`docs/modules/`](https://ngriaznov.github.io/rightsize-node/modules/)
 documents its exact image tag, wait strategy, and the measured reasoning
 behind these choices.
 
 ¹ `withTaskManager()` throws `UnsupportedByBackendError` on microsandbox (the
-Flink image carries no `nc`/busybox for network-link emulation — see
+Flink image carries no `nc`/busybox for network-link emulation - see
 [Networking](https://ngriaznov.github.io/rightsize-node/guide/networking));
 a bare JobManager still runs on microsandbox. Run TaskManager topologies
 under `RIGHTSIZE_BACKEND=docker`.
@@ -140,11 +140,11 @@ Platform is enabled by default. If WHP isn't enabled on your machine, run
 `RIGHTSIZE_BACKEND=docker`.
 
 Both backends satisfy one behavioral contract, verified by a shared test
-suite — the code you write runs unchanged on either. A few edges are
+suite - the code you write runs unchanged on either. A few edges are
 backend-specific rather than behavioral divergences:
 
 - **Network-alias tunnels on microsandbox have real limits** versus Docker's
-  native bridge networking — see
+  native bridge networking - see
   [Networking](https://ngriaznov.github.io/rightsize-node/guide/networking).
 - **Read-only file mounts aren't enforced in-guest on microsandbox 0.6.6.**
   `withCopyFileToContainer`'s read-only flag is honored by Docker; on
@@ -161,18 +161,18 @@ backend-specific rather than behavioral divergences:
 - **Self-provisioning runtime.** A pinned `msb` release (binary + libkrunfw)
   is downloaded once, SHA-256-verified against the release manifest, and
   installed atomically under `~/.cache/rightsize/` (`%LOCALAPPDATA%\rightsize`
-  on Windows) — the binary lands last, so a crashed install is detected and
+  on Windows) - the binary lands last, so a crashed install is detected and
   repaired, never half-trusted. A cross-process file lock keeps parallel
   processes from racing.
 - **Attached-mode supervision.** Each container is a held child process
   supervising its microVM; the image's ENTRYPOINT runs exactly as it would
   under Docker.
 - **Pre-allocated ports.** Host ports are chosen before boot, so brokers
-  like Redpanda/Kafka get their advertised listeners baked in — no restart
+  like Redpanda/Kafka get their advertised listeners baked in - no restart
   dance. A backend binds the ports it's given; it never allocates its own.
 - **Two-tier cleanup, no async `Drop`.** The happy path is `await using` or
-  an explicit, awaited `stop()`. The fallback — a process that exits before
-  either runs — falls back to a synchronous, blocking teardown registered
+  an explicit, awaited `stop()`. The fallback - a process that exits before
+  either runs - falls back to a synchronous, blocking teardown registered
   per container (Node's `"exit"` handler can't `await`), with a ledger-based
   orphan reaper (sweep + optional watchdog) as the backstop for a hard
   `SIGKILL` that bypasses even that. See
@@ -180,7 +180,7 @@ backend-specific rather than behavioral divergences:
 - **Container reuse.** `.withReuse()` plus the double opt-in
   `RIGHTSIZE_REUSE` adopts an already-running sandbox from a prior process
   instead of booting a fresh one, keyed by a content hash of the
-  reuse-relevant spec — a local-dev-loop speedup, not a CI default. See
+  reuse-relevant spec - a local-dev-loop speedup, not a CI default. See
   [Container reuse](https://ngriaznov.github.io/rightsize-node/guide/reuse).
 - **Failure diagnostics.** `diagnostics()` renders every currently-running
   container's image, mapped ports, and a bounded log tail into one
@@ -188,15 +188,17 @@ backend-specific rather than behavioral divergences:
   See [Failure diagnostics](https://ngriaznov.github.io/rightsize-node/guide/diagnostics).
 - **Isolation on demand.** `.withRequireIsolation()` fails a `start()`
   fast, before any boot work, if the active backend can't provide
-  hardware-virtualized isolation — for workloads that shouldn't silently
+  hardware-virtualized isolation - for workloads that shouldn't silently
   degrade to a shared-kernel fallback. See
   [Isolation](https://ngriaznov.github.io/rightsize-node/guide/isolation).
 - **Checkpoint / restore.** `checkpoint()` captures a running container's
   filesystem (image commit on docker, disk snapshot on microsandbox);
-  `fromCheckpoint()` boots fresh containers from it — skip repeated
-  boot-and-seed work across a suite. Pass a name — `checkpoint("name")` — to
+  `fromCheckpoint()` boots fresh containers from it - skip repeated
+  boot-and-seed work across a suite. Pass a name - `checkpoint("name")` - to
   make it durable and rediscoverable across runs via `Checkpoints.find`/
-  `list`/`remove`, registered under the rightsize cache dir. See
+  `list`/`remove`, registered under the rightsize cache dir. `Checkpoints.exportTo`/
+  `importFrom` bundle a checkpoint into a portable archive for moving it
+  between machines and CI caches. See
   [Checkpoint / restore](https://ngriaznov.github.io/rightsize-node/guide/checkpoints).
 - **Runtime file copy.** `copyFileToContainer` / `copyContentToContainer` /
   `copyFileFromContainer` move files and directories into or out of an
@@ -205,7 +207,7 @@ backend-specific rather than behavioral divergences:
   [Copying files](https://ngriaznov.github.io/rightsize-node/guide/copy).
 - **One interface, two backends.** `SandboxBackend` is a small interface;
   the shared contract suite is the referee, with the Docker backend doubling
-  as the correctness oracle for the microVM backend — and the same
+  as the correctness oracle for the microVM backend - and the same
   interface behavior is a **cross-language contract**, verified against the
   Kotlin and Rust implementations too. See
   [Cross-language parity](https://ngriaznov.github.io/rightsize-node/guide/parity).
@@ -239,7 +241,7 @@ downlevelled explicit-resource-management helpers, so the shipped
 Three self-contained, runnable examples live under
 [`examples/`](https://github.com/ngriaznov/rightsize-node/tree/main/examples).
 Each builds the library once, then runs directly against the compiled
-`dist/` — no separate example-specific setup beyond `npm install`.
+`dist/` - no separate example-specific setup beyond `npm install`.
 
 | Example | What it shows | Run |
 |---|---|---|
@@ -248,7 +250,7 @@ Each builds the library once, then runs directly against the compiled
 | [`redis.test.ts`](https://github.com/ngriaznov/rightsize-node/blob/main/examples/redis.test.ts) | A `node:test` suite using a module container, gated behind `RIGHTSIZE_IT=1` the same way this repo's own integration tests are | `npm run example:test` |
 
 Run all three back to back with `npm run examples:run`. Every example picks
-a backend automatically; force one explicitly the same way you would for
+a backend automatically; force one explicitly the same way you'd for
 any `rightsize` program:
 
 ```bash
@@ -258,7 +260,7 @@ RIGHTSIZE_BACKEND=microsandbox npm run example:redis
 
 `redis.test.ts` skips its container-backed assertions unless `RIGHTSIZE_IT=1`
 is set, so `npm run example:test` is safe to run on a machine with no
-container runtime — pass the flag to actually exercise it:
+container runtime - pass the flag to actually exercise it:
 `RIGHTSIZE_IT=1 npm run example:test`.
 
 ## Documentation

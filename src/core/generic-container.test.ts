@@ -74,6 +74,10 @@ class FakeBackend implements SandboxBackend {
   async hasCheckpoint(): Promise<boolean> {
     return false;
   }
+  async exportCheckpoint(): Promise<void> {}
+  async importCheckpoint(): Promise<string> {
+    return "";
+  }
 
   async removeByName(_name: string): Promise<void> {}
 

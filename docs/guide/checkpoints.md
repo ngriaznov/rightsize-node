@@ -264,6 +264,84 @@ const removed = await Checkpoints.remove("seeded-db"); // true if anything exist
   directly with that backend's own CLI one-liner (see
   [Cleanup](#cleanup-checkpoints-are-not-auto-reaped) below).
 
+## Moving checkpoints between machines
+
+A named checkpoint's registry entry and its backend artifact both live on the
+machine that created them — `Checkpoints.find` on a different machine (a
+different CI runner, a teammate's laptop) finds nothing. `Checkpoints.exportTo`/
+`Checkpoints.importFrom` bundle a checkpoint into a single portable archive
+file that travels anywhere: cache it in CI, commit it to a fixtures repo,
+copy it between machines by hand.
+
+```ts
+import { GenericContainer, Checkpoints, Wait } from "rightsize";
+
+// One-time (or once-per-cache-invalidation) setup step:
+async function seedAndExport(archivePath: string): Promise<void> {
+  await using source = await new GenericContainer("postgres:16-alpine")
+    .withEnv("POSTGRES_PASSWORD", "test")
+    .withExposedPorts(5432)
+    .waitingFor(Wait.forListeningPort())
+    .start();
+
+  // ...run migrations, seed fixture rows...
+
+  const seeded = await source.checkpoint("seeded-db");
+  await Checkpoints.exportTo(seeded, archivePath);
+}
+
+// Every later run, possibly on a different machine:
+async function importAndRestore(archivePath: string): Promise<GenericContainer> {
+  const restored = await Checkpoints.importFrom(archivePath);
+  return GenericContainer.fromCheckpoint(restored).waitingFor(Wait.forListeningPort()).start();
+}
+```
+
+This is the CI-cache pattern: export the archive after seeding, cache it
+alongside your build's other caches, and skip the seed step entirely on
+every run that hits the cache — `importFrom` on a cache hit is far cheaper
+than re-running migrations.
+
+`exportTo(cp, path)` requires the ACTIVE backend to equal `cp.backend`
+(the same rule `fromCheckpoint(cp).start()` enforces) and that the
+checkpoint's artifact still exists — exporting a stale checkpoint throws
+`CheckpointArtifactMissingError` rather than producing a broken archive.
+`importFrom(path)` requires the archive's own recorded backend to equal the
+ACTIVE backend on the machine importing it — a docker archive can only be
+imported where docker is active, and likewise for microsandbox — throwing
+`CheckpointBackendMismatchError` otherwise; a malformed or corrupted archive
+(missing file, not a tar, no `checkpoint.json`, an unsupported format
+version) throws `MalformedCheckpointArchiveError`. A NAMED archive replaces
+an existing same-name registry entry the same way `checkpoint(name)` does;
+an archive built from an unnamed checkpoint imports as an ephemeral
+`Checkpoint`, same as `checkpoint()` without a name.
+
+**The archive never bundles the OCI image.** On microsandbox, `--with-image`
+fails an integrity check on import in the current release, so the archive
+carries only the snapshot's filesystem — the destination machine pulls the
+base image itself on the restored container's first boot, same as any
+ordinary `start()` against that image. Make sure the image is reachable
+(a local pull, or registry access) wherever you import.
+
+**microsandbox refs change shape after import.** `importFrom`'s effective
+ref on microsandbox is a digest-derived directory name (`sha256-<16 hex
+chars>`, e.g. `sha256-b9c0448ee9d54e33`), never the `rz-ckpt-<name>` shape
+the archive itself carried — `msb snapshot import` writes under that
+directory name and doesn't let you choose it. This is deliberately NOT the
+full `sha256:<64 hex chars>` digest `msb snapshot list` also reports: that
+full digest does not resolve as a snapshot ref at all (msb treats it as a
+literal path), while the directory name does, for inspect/rm/restore alike.
+This is harmless day to day (refs are opaque throughout this library; the
+returned `Checkpoint` restores normally, and `Checkpoints.find` on the
+importing machine shows the digest-dir-shaped ref from then on) but visible
+if you print or log a checkpoint's `ref`. Docker's ref round-trips
+unchanged — `docker load` preserves the original tag.
+
+**Archive size**: on microsandbox the artifact is the zstd-compressed
+snapshot — bounded by the sandbox's actual disk usage, typically small; on
+docker it's a full `docker save` of the image layers, so a heavier base
+image produces a correspondingly larger archive.
+
 ## Cleanup: checkpoints are not auto-reaped
 
 The [orphan reaper](/guide/reaping) tracks *containers*, not images or

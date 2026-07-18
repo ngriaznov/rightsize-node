@@ -14,6 +14,9 @@ const STOP_TIMEOUT_SECS = 10;
 // `docker cp` of a directory scales with its contents, not a fixed small
 // payload like the other unary daemon calls this backend makes.
 const COPY_TIMEOUT_MS = 120_000;
+// `docker save`/`load` move a full image layer set, not a single file —
+// more generous than a plain `docker cp`.
+const ARCHIVE_TIMEOUT_MS = 300_000;
 
 function encodeQueryValue(s: string): string {
   return encodeURIComponent(s);
@@ -293,6 +296,35 @@ export class DockerBackend implements SandboxBackend {
       return false;
     }
     throw new BackendError(`docker could not inspect image '${ref}' (HTTP ${resp.status}): ${resp.body.toString()}`);
+  }
+
+  /**
+   * `docker save -o <destFile> <ref>` — `Checkpoints.exportTo`'s backend
+   * call, shelling out for the same reason `copyToContainer` does (the
+   * daemon's raw image-export endpoint isn't worth hand-rolling against for
+   * one operation). A nonzero exit surfaces the tool's own stderr.
+   */
+  async exportCheckpoint(ref: string, destFile: string): Promise<void> {
+    const result = await runDockerCli(DockerCli.save(destFile, ref), ARCHIVE_TIMEOUT_MS);
+    if (result.exitCode !== 0) {
+      throw new BackendError(
+        `docker save -o ${destFile} ${ref} failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
+    }
+  }
+
+  /**
+   * `docker load -i <srcFile>` — the effective ref is always `ref` itself:
+   * `docker save`/`load` preserve the original tag round-trip (loading over
+   * an existing tag re-points it), unlike msb's digest-derived import
+   * naming. A nonzero exit surfaces the tool's own stderr.
+   */
+  async importCheckpoint(srcFile: string, ref: string): Promise<string> {
+    const result = await runDockerCli(DockerCli.load(srcFile), ARCHIVE_TIMEOUT_MS);
+    if (result.exitCode !== 0) {
+      throw new BackendError(`docker load -i ${srcFile} failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
+    }
+    return ref;
   }
 
   /**

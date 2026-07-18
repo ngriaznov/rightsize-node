@@ -5,7 +5,34 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Checkpoint export/import: `Checkpoints.exportTo(checkpoint, path)` bundles
+  a checkpoint into a portable archive (a plain tar of `checkpoint.json` —
+  pinned metadata plus the format version — and an `artifact` member holding
+  the backend's own payload: `msb snapshot export` on microsandbox, `docker
+  save` on docker); `Checkpoints.importFrom(path)` materializes it on a
+  machine running the same backend and returns a restorable `Checkpoint`,
+  the CI-cache pattern (export after seeding, cache the archive, import on
+  later runs) from the [checkpoints guide](https://ngriaznov.github.io/rightsize-node/guide/checkpoints#moving-checkpoints-between-machines).
+  Archives never bundle the OCI image (`--with-image` fails an integrity
+  check on msb import) — the destination pulls it on first boot. `exportTo`
+  requires the active backend to match the checkpoint's own and the
+  artifact to still exist (`CheckpointArtifactMissingError` otherwise, both
+  before any filesystem work); `importFrom` requires the archive's recorded
+  backend to match the active one (`CheckpointBackendMismatchError`) and the
+  archive to be well-formed (`MalformedCheckpointArchiveError` otherwise),
+  both before any backend call or registry write. A named archive's import
+  replaces an existing same-name registry entry the same way `checkpoint(name)`
+  does; an unnamed archive imports as an ephemeral checkpoint. On
+  microsandbox the effective ref after import is a content digest
+  (`sha256-<hex>`), resolved via `msb snapshot list --format json` — never
+  the archive's own `rz-ckpt-<name>` ref, since `msb snapshot import` writes
+  under a digest-derived directory name it doesn't let the caller choose;
+  re-importing byte-identical content is treated as success, not failure.
+  Docker's effective ref round-trips unchanged. New SPI:
+  `SandboxBackend.exportCheckpoint(ref, destFile)` and
+  `SandboxBackend.importCheckpoint(srcFile, ref) -> effectiveRef`.
 
 ## [0.3.0] - 2026-07-16
 

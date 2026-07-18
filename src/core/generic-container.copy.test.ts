@@ -48,6 +48,10 @@ class FakeCopyBackend implements SandboxBackend {
   async hasCheckpoint(): Promise<boolean> {
     return false;
   }
+  async exportCheckpoint(): Promise<void> {}
+  async importCheckpoint(): Promise<string> {
+    return "";
+  }
   async removeByName(): Promise<void> {}
   async findRunning(): Promise<SandboxHandle | undefined> {
     return undefined;

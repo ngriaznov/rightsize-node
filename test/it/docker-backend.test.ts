@@ -1,5 +1,8 @@
 import * as net from "node:net";
 import { randomBytes } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, itDockerIntegration, assert } from "../harness.js";
 import { DockerBackend } from "../../src/backend-docker/backend.js";
 import { DockerClient } from "../../src/backend-docker/client.js";
@@ -401,6 +404,76 @@ describe("DockerBackend integration (real daemon)", () => {
         // hit partway through, this still leaves no image or registry entry
         // behind — a no-op if the happy-path remove() above already ran
         // successfully.
+        await Checkpoints.remove(name).catch(() => {});
+        if (savedBackendEnv === undefined) {
+          delete process.env["RIGHTSIZE_BACKEND"];
+        } else {
+          process.env["RIGHTSIZE_BACKEND"] = savedBackendEnv;
+        }
+        Backends._resetActiveForTests();
+      }
+    },
+  );
+
+  itDockerIntegration(
+    "checkpoint archive round trip: exportTo/importFrom carry a named checkpoint across a remove(), and the ref round-trips unchanged",
+    async () => {
+      const savedBackendEnv = process.env["RIGHTSIZE_BACKEND"];
+      process.env["RIGHTSIZE_BACKEND"] = "docker";
+      Backends._resetActiveForTests();
+
+      const name = `${randomBytes(6).toString("hex")}-archive`;
+      const client = DockerClient.fromEnv();
+      const archiveDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-docker-archive-it-"));
+      const archivePath = path.join(archiveDir, "checkpoint.tar");
+
+      try {
+        const source = new GenericContainer("alpine:3.19").withBackend(new DockerBackend(client)).withCommand("sleep", "60");
+        await source.start();
+
+        try {
+          const marker = await source.exec("sh", "-c", "echo checkpoint-marker > /marker.txt && sync");
+          assert.equal(marker.exitCode, 0);
+
+          const cp = await source.checkpoint(name);
+          assert.equal(cp.ref, `rightsize/checkpoint:${name}`);
+
+          await Checkpoints.exportTo(cp, archivePath);
+          const archiveStat = await fs.stat(archivePath);
+          assert.ok(archiveStat.size > 0, "expected exportTo to have written a non-empty archive file");
+        } finally {
+          await source.stop();
+        }
+
+        // Remove BOTH the artifact and the registry entry — proves the
+        // archive alone (never the original image) is what importFrom
+        // restores from.
+        const removed = await Checkpoints.remove(name);
+        assert.equal(removed, true, "expected the original checkpoint to have existed before removal");
+        assert.equal(await Checkpoints.find(name), undefined, "expected the original checkpoint to be gone before import");
+
+        const imported = await Checkpoints.importFrom(archivePath);
+        assert.equal(imported.backend, "docker");
+        assert.equal(imported.ref, `rightsize/checkpoint:${name}`, "expected docker's effective ref to round-trip unchanged");
+
+        // Named archive: replace semantics re-register it under the same name.
+        const rediscovered = await Checkpoints.find(name);
+        assert.ok(rediscovered !== undefined, "expected the named archive's import to have re-registered it");
+        assert.equal(rediscovered?.ref, imported.ref);
+
+        const restored = GenericContainer.fromCheckpoint(imported).withBackend(new DockerBackend(client)).withCommand("sleep", "60");
+        try {
+          await restored.start();
+          const read = await restored.exec("cat", "/marker.txt");
+          assert.equal(read.exitCode, 0);
+          assert.equal(read.stdout.trim(), "checkpoint-marker");
+        } finally {
+          await restored.stop();
+        }
+      } finally {
+        // The cleanup guard: the archive file, the imported image ref, and
+        // the registry entry, regardless of which assertion above failed.
+        await fs.rm(archiveDir, { recursive: true, force: true });
         await Checkpoints.remove(name).catch(() => {});
         if (savedBackendEnv === undefined) {
           delete process.env["RIGHTSIZE_BACKEND"];

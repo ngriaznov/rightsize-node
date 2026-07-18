@@ -601,6 +601,110 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
+  it("exportCheckpoint drives msb snapshot export <ref> <dest>, writing the payload file", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-ckpt-export");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+    await backend.createCheckpoint(handle, "rz-ckpt-toexport");
+
+    const dest = path.join(os.tmpdir(), `rightsize-msb-export-test-${Date.now()}.artifact`);
+    try {
+      await backend.exportCheckpoint("rz-ckpt-toexport", dest);
+      const content = await fs.readFile(dest, "utf8");
+      assert.equal(content, "fake-msb-artifact-for:rz-ckpt-toexport");
+
+      const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+      const exportCall = state.callLog.find((c) => c.cmd === "snapshotExport");
+      assert.deepEqual(exportCall?.args, ["snapshot", "export", "rz-ckpt-toexport", dest]);
+    } finally {
+      await fs.rm(dest, { force: true });
+    }
+
+    await backend.removeCheckpoint("rz-ckpt-toexport");
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("exportCheckpoint surfaces msb's own stderr for a ref that does not exist", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const dest = path.join(os.tmpdir(), `rightsize-msb-export-missing-test-${Date.now()}.artifact`);
+    let thrown: unknown;
+    try {
+      await backend.exportCheckpoint("rz-ckpt-never-existed", dest);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /rz-ckpt-never-existed/);
+  });
+
+  it("importCheckpoint resolves the effective digest via snapshot list, treating a re-import of the same bytes as success", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-ckpt-import");
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+    await backend.createCheckpoint(handle, "rz-ckpt-toimport");
+
+    const artifactPath = path.join(os.tmpdir(), `rightsize-msb-import-test-${Date.now()}.artifact`);
+    await backend.exportCheckpoint("rz-ckpt-toimport", artifactPath);
+
+    try {
+      const effectiveRef = await backend.importCheckpoint(artifactPath, "rz-ckpt-toimport");
+      assert.match(effectiveRef, /^sha256-[0-9a-f]{16}$/);
+
+      // The exact regression this backend once had: importCheckpoint
+      // returning `msb snapshot list`'s full `sha256:<64hex>` digest field
+      // instead of the digest-dir name. That full digest does not resolve
+      // as a snapshot ref at all (live-verified against msb 0.6.6), so
+      // Checkpoints.find's hasCheckpoint probe on it would report the
+      // freshly imported artifact absent and evict the registry entry.
+      // Asserting hasCheckpoint(effectiveRef) here pins that the returned
+      // ref is one the backend can actually probe.
+      assert.equal(await backend.hasCheckpoint(effectiveRef), true);
+
+      // Re-importing the SAME bytes hits msb's own already-exists path
+      // (content-addressed dedup) and must resolve to the SAME digest, not
+      // throw — that's success, not failure, for identical content.
+      const secondRef = await backend.importCheckpoint(artifactPath, "rz-ckpt-toimport");
+      assert.equal(secondRef, effectiveRef);
+    } finally {
+      await fs.rm(artifactPath, { force: true });
+    }
+
+    await backend.removeCheckpoint("rz-ckpt-toimport");
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("importCheckpoint surfaces msb's own stderr for a non-already-exists failure", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const artifactPath = path.join(os.tmpdir(), `rightsize-msb-import-fail-test-${Date.now()}.artifact`);
+    await fs.writeFile(artifactPath, "some-bytes");
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failSnapshotImportWithError = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: unknown;
+    try {
+      await backend.importCheckpoint(artifactPath, "unused-ref");
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /database error/);
+
+    await fs.rm(artifactPath, { force: true });
+  });
+
   it("copyToContainer invokes msb copy -q <hostPath> <name>:<containerPath>", async () => {
     if (skipOnWindows()) {
       return;

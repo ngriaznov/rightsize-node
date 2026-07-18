@@ -1,4 +1,7 @@
 import { randomBytes } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, itMsbIntegration as itIntegration, assert } from "../harness.js";
 import { MsbCliBackend } from "../../src/backend-msb/backend.js";
 import { ensureInstalled } from "../../src/backend-msb/provisioner.js";
@@ -414,6 +417,88 @@ describe("MsbCliBackend integration (real msb 0.6.6 binary)", () => {
         // entry behind — a no-op if the happy-path remove() above already
         // ran successfully.
         await Checkpoints.remove(name).catch(() => {});
+        if (savedBackendEnv === undefined) {
+          delete process.env["RIGHTSIZE_BACKEND"];
+        } else {
+          process.env["RIGHTSIZE_BACKEND"] = savedBackendEnv;
+        }
+        Backends._resetActiveForTests();
+      }
+    },
+  );
+
+  itIntegration(
+    "checkpoint archive round trip: exportTo/importFrom carry a named checkpoint across a remove(), and the imported ref is a digest, distinct from the original",
+    async () => {
+      const savedBackendEnv = process.env["RIGHTSIZE_BACKEND"];
+      process.env["RIGHTSIZE_BACKEND"] = "microsandbox";
+      Backends._resetActiveForTests();
+
+      const name = `${randomBytes(6).toString("hex")}-archive`;
+      const archiveDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-archive-it-"));
+      const archivePath = path.join(archiveDir, "checkpoint.tar");
+      let originalRef: string | undefined;
+
+      try {
+        const source = new GenericContainer("alpine:3.19")
+          .withBackend(new MsbCliBackend(ensureInstalled()))
+          .withCommand("sh", "-c", "echo ready; sleep 60")
+          .waitingFor(Wait.forLogMessage("ready").withStartupTimeout(60_000));
+        await source.start();
+
+        try {
+          // /srv, never /tmp: the msb guest mounts /tmp as tmpfs, which a
+          // disk-snapshot checkpoint never captures.
+          const marker = await source.exec("sh", "-c", "mkdir -p /srv && echo checkpoint-marker > /srv/marker.txt && sync");
+          assert.equal(marker.exitCode, 0);
+
+          const cp = await source.checkpoint(name);
+          originalRef = cp.ref;
+          assert.equal(cp.ref, `rz-ckpt-${name}`);
+
+          await Checkpoints.exportTo(cp, archivePath);
+          const archiveStat = await fs.stat(archivePath);
+          assert.ok(archiveStat.size > 0, "expected exportTo to have written a non-empty archive file");
+        } finally {
+          await source.stop();
+        }
+
+        // Remove BOTH the artifact and the registry entry — proves the
+        // archive alone (never the original snapshot) is what importFrom
+        // restores from.
+        const removed = await Checkpoints.remove(name);
+        assert.equal(removed, true, "expected the original checkpoint to have existed before removal");
+        assert.equal(await Checkpoints.find(name), undefined, "expected the original checkpoint to be gone before import");
+
+        const imported = await Checkpoints.importFrom(archivePath);
+        assert.equal(imported.backend, "microsandbox");
+        assert.ok(imported.ref !== originalRef, "expected the imported ref to be a digest, distinct from the original rz-ckpt-<name> ref");
+        assert.match(imported.ref, /^sha256-[0-9a-f]+$/, "expected msb's digest-shaped effective ref");
+
+        // Named archive: replace semantics re-register it under the same name.
+        const rediscovered = await Checkpoints.find(name);
+        assert.ok(rediscovered !== undefined, "expected the named archive's import to have re-registered it");
+        assert.equal(rediscovered?.ref, imported.ref);
+
+        const restored = GenericContainer.fromCheckpoint(imported)
+          .withBackend(new MsbCliBackend(ensureInstalled()))
+          .waitingFor(Wait.forLogMessage("ready").withStartupTimeout(60_000));
+        try {
+          await restored.start();
+          const read = await restored.exec("cat", "/srv/marker.txt");
+          assert.equal(read.exitCode, 0);
+          assert.equal(read.stdout.trim(), "checkpoint-marker");
+        } finally {
+          await restored.stop();
+        }
+      } finally {
+        // The cleanup guard: the archive file, the imported digest ref, and
+        // the registry entry, regardless of which assertion above failed.
+        await fs.rm(archiveDir, { recursive: true, force: true });
+        await Checkpoints.remove(name).catch(() => {});
+        if (originalRef !== undefined) {
+          await new MsbCliBackend(ensureInstalled()).removeCheckpoint(originalRef).catch(() => {});
+        }
         if (savedBackendEnv === undefined) {
           delete process.env["RIGHTSIZE_BACKEND"];
         } else {

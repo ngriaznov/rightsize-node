@@ -178,6 +178,27 @@ describe("MsbCommands", () => {
     assert.deepEqual(MsbCommands.snapshotRemove("rz-ckpt-abcdef012345"), ["snapshot", "rm", "rz-ckpt-abcdef012345"]);
   });
 
+  it("snapshotInspect", () => {
+    assert.deepEqual(MsbCommands.snapshotInspect("rz-ckpt-abcdef012345"), ["snapshot", "inspect", "rz-ckpt-abcdef012345"]);
+  });
+
+  it("snapshotExport", () => {
+    assert.deepEqual(MsbCommands.snapshotExport("rz-ckpt-abcdef012345", "/out/archive.tar.zst"), [
+      "snapshot",
+      "export",
+      "rz-ckpt-abcdef012345",
+      "/out/archive.tar.zst",
+    ]);
+  });
+
+  it("snapshotImport", () => {
+    assert.deepEqual(MsbCommands.snapshotImport("/in/archive.tar.zst"), ["snapshot", "import", "/in/archive.tar.zst"]);
+  });
+
+  it("snapshotList: --format json, never --json", () => {
+    assert.deepEqual(MsbCommands.snapshotList(), ["snapshot", "list", "--format", "json"]);
+  });
+
   it("copyIn", () => {
     assert.deepEqual(MsbCommands.copyIn("/host/f.txt", "box-1", "/guest/f.txt"), [
       "copy",

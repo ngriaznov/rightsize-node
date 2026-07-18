@@ -3,12 +3,24 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, assert } from "../../../test/harness.js";
 import { Checkpoints } from "./api.js";
-import { writeCheckpointRegistryAtomic, readCheckpointRegistry, checkpointRegistryPath } from "./registry.js";
+import {
+  writeCheckpointRegistryAtomic,
+  readCheckpointRegistry,
+  checkpointRegistryPath,
+  listCheckpointNames,
+  fromCheckpointRegistryEntry,
+} from "./registry.js";
 import type { CheckpointRegistryEntry } from "./registry.js";
+import { TarCli, runTar } from "./tar-cli.js";
 import { registerBackend, Backends, _providersSnapshotForTests, _resetRegistryForTests } from "../backends.js";
 import type { BackendProvider, SandboxBackend, SandboxHandle, BackendCapabilities, NetworkLink, ReaperKillCommand, FollowHandle } from "../backend.js";
-import type { ContainerSpec, ExecResult } from "../model.js";
-import { InvalidCheckpointNameError } from "../errors.js";
+import type { ContainerSpec, ExecResult, Checkpoint } from "../model.js";
+import {
+  InvalidCheckpointNameError,
+  MalformedCheckpointArchiveError,
+  CheckpointArtifactMissingError,
+  CheckpointBackendMismatchError,
+} from "../errors.js";
 
 /** A minimal `SandboxBackend` whose checkpoint artifacts are an in-memory `Set<string>` a test can seed/inspect directly, so `find`/`remove`'s probe and best-effort-removal behavior can be asserted without a real backend. */
 class FakeArtifactBackend implements SandboxBackend {
@@ -40,6 +52,33 @@ class FakeArtifactBackend implements SandboxBackend {
       throw this.hasCheckpointError;
     }
     return this.artifacts.has(ref);
+  }
+  readonly exportCheckpointCalls: Array<{ ref: string; destFile: string }> = [];
+  readonly importCheckpointCalls: Array<{ srcFile: string; ref: string }> = [];
+  /** Every artifact's content as read back by `importCheckpoint`, in call order — the export/import round trip's byte-identity check. */
+  readonly importedArtifactContents: string[] = [];
+  /** Test seam: the effective ref `importCheckpoint` returns — defaults to the ref it was given, override to simulate msb's digest-remapping. */
+  importEffectiveRef: ((ref: string) => string) | undefined;
+  /** Test seam: when set, the next `exportCheckpoint` call rejects with this instead of writing a payload — proves temp-dir cleanup on a failed export. */
+  failNextExportCheckpoint: Error | undefined;
+
+  async exportCheckpoint(ref: string, destFile: string): Promise<void> {
+    this.exportCheckpointCalls.push({ ref, destFile });
+    if (this.failNextExportCheckpoint !== undefined) {
+      const err = this.failNextExportCheckpoint;
+      this.failNextExportCheckpoint = undefined;
+      throw err;
+    }
+    // A recognizable payload: the export round-trip test asserts these bytes
+    // survive the archive tar/untar cycle byte-for-byte.
+    await fs.writeFile(destFile, `fake-artifact:${ref}`);
+  }
+  async importCheckpoint(srcFile: string, ref: string): Promise<string> {
+    this.importCheckpointCalls.push({ srcFile, ref });
+    this.importedArtifactContents.push(await fs.readFile(srcFile, "utf8"));
+    const effectiveRef = this.importEffectiveRef?.(ref) ?? ref;
+    this.artifacts.add(effectiveRef);
+    return effectiveRef;
   }
   async removeByName(): Promise<void> {}
   async findRunning(): Promise<SandboxHandle | undefined> {
@@ -379,6 +418,377 @@ describe("Checkpoints.remove", () => {
         .then(() => true)
         .catch(() => false);
       assert.equal(checkpointsDirExists, false, "expected remove() to reject before ever touching the checkpoints directory");
+    });
+  });
+});
+
+/**
+ * Points `os.tmpdir()` at a private, empty directory for the duration of
+ * `fn` (Node reads `TMPDIR`/`TEMP`/`TMP` live on every call — never cached
+ * at startup), then restores the prior env and removes it. `exportTo`'s
+ * staging directory lives under the REAL `os.tmpdir()` with a
+ * `rightsize-checkpoint-export-*` prefix shared by every OTHER test file
+ * exercising the same production code concurrently (each `node --test`/
+ * `bun test` file is its own process) — diffing the real system tmpdir
+ * would race their staging directories against this test's own before/after
+ * snapshot.
+ */
+async function withIsolatedTmpDir<T>(fn: (isolatedDir: string) => Promise<T>): Promise<T> {
+  const isolatedDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-checkpoint-api-tmpdir-isolation-"));
+  const saved = { TMPDIR: process.env["TMPDIR"], TEMP: process.env["TEMP"], TMP: process.env["TMP"] };
+  process.env["TMPDIR"] = isolatedDir;
+  process.env["TEMP"] = isolatedDir;
+  process.env["TMP"] = isolatedDir;
+  try {
+    return await fn(isolatedDir);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    await fs.rm(isolatedDir, { recursive: true, force: true });
+  }
+}
+
+/** Builds a raw two-member tar at `archivePath` from whatever `checkpoint.json`/`artifact` content a malformed-archive test wants — `undefined` omits that member entirely (the "archive missing checkpoint.json" case). */
+async function buildRawArchive(archivePath: string, checkpointJsonText: string | undefined, artifactContent: string | undefined): Promise<void> {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-archive-fixture-"));
+  try {
+    const members: string[] = [];
+    if (checkpointJsonText !== undefined) {
+      await fs.writeFile(path.join(workDir, "checkpoint.json"), checkpointJsonText);
+      members.push("checkpoint.json");
+    }
+    if (artifactContent !== undefined) {
+      await fs.writeFile(path.join(workDir, "artifact"), artifactContent);
+      members.push("artifact");
+    }
+    const result = await runTar(TarCli.create(path.basename(archivePath), workDir, members), 30_000, path.dirname(archivePath));
+    if (result.exitCode !== 0) {
+      throw new Error(`test fixture: tar failed to build '${archivePath}': ${result.stderr}`);
+    }
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true });
+  }
+}
+
+/** A well-formed `checkpoint.json` payload, named `seeded-db` under backend `fake-active` unless overridden — the base case every malformed-archive test mutates one field of. */
+function archiveJson(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    rightsizeArchive: 1,
+    name: "seeded-db",
+    ref: "rightsize/checkpoint:seeded-db",
+    backend: "fake-active",
+    createdIso: "2026-01-01T00:00:00.000Z",
+    spec: { env: { A: "1" }, command: ["sleep", "60"], exposedPorts: [80], memoryLimitMb: 256 },
+    ...overrides,
+  });
+}
+
+describe("Checkpoints.exportTo / importFrom — archive round trip", () => {
+  it("round-trips the artifact's bytes and the metadata, propagating the effective ref into the returned Checkpoint and the registry entry", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        const entry = baseEntry();
+        backend.artifacts.add(entry.ref);
+        await writeCheckpointRegistryAtomic(dir, entry.name, entry);
+
+        const cp: Checkpoint = { ref: entry.ref, backend: entry.backend, spec: fromCheckpointRegistryEntry(entry) };
+        const archivePath = path.join(dir, "archive.tar");
+        await Checkpoints.exportTo(cp, archivePath);
+
+        assert.deepEqual(backend.exportCheckpointCalls.map((c) => c.ref), [entry.ref]);
+
+        // Simulate msb-style digest remapping on import — the effective ref
+        // must propagate all the way through, never the archive's own ref.
+        backend.importEffectiveRef = () => "fake-effective-ref";
+        const imported = await Checkpoints.importFrom(archivePath);
+
+        assert.equal(imported.ref, "fake-effective-ref");
+        assert.equal(imported.backend, entry.backend);
+        assert.deepEqual(imported.spec.env, [["A", "1"]]);
+        assert.deepEqual(imported.spec.command, ["sleep", "60"]);
+        assert.equal(imported.spec.ports[0]?.guestPort, 80);
+        assert.equal(imported.spec.memoryLimitMb, 256);
+
+        assert.deepEqual(backend.importedArtifactContents, [`fake-artifact:${entry.ref}`], "expected the exported payload bytes to survive the archive round trip unchanged");
+
+        const registryAfter = await readCheckpointRegistry(dir, entry.name);
+        assert.equal(registryAfter.kind, "found");
+        if (registryAfter.kind === "found") {
+          assert.equal(registryAfter.entry.ref, "fake-effective-ref");
+          assert.equal(registryAfter.entry.createdIso, entry.createdIso, "expected the original creation time to be preserved through the archive");
+        }
+      });
+    });
+  });
+
+  it("a nameless (ephemeral) checkpoint exports with name: null and imports with no registry write", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        // Never written to the registry — an ephemeral checkpoint().
+        const ref = "rightsize/checkpoint:ephemeral";
+        backend.artifacts.add(ref);
+        const cp: Checkpoint = { ref, backend: "fake-active", spec: fromCheckpointRegistryEntry(baseEntry({ ref, name: "unused" })) };
+
+        const archivePath = path.join(dir, "ephemeral.tar");
+        await Checkpoints.exportTo(cp, archivePath);
+
+        const imported = await Checkpoints.importFrom(archivePath);
+        assert.equal(imported.ref, ref);
+
+        const names = await listCheckpointNames(dir);
+        assert.deepEqual(names, [], "expected a nameless archive to write no registry entry at all");
+      });
+    });
+  });
+
+  it("export throws CheckpointBackendMismatchError before any backend call when cp.backend differs from the active backend", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        const cp: Checkpoint = { ref: "some-ref", backend: "fake-other", spec: fromCheckpointRegistryEntry(baseEntry()) };
+        let thrown: unknown;
+        try {
+          await Checkpoints.exportTo(cp, path.join(dir, "mismatch.tar"));
+        } catch (err) {
+          thrown = err;
+        }
+        assert.ok(thrown instanceof CheckpointBackendMismatchError, `expected CheckpointBackendMismatchError, got: ${String(thrown)}`);
+        assert.deepEqual(backend.hasCheckpointCalls, [], "expected no hasCheckpoint probe before the mismatch was detected");
+        assert.deepEqual(backend.exportCheckpointCalls, []);
+      });
+    });
+  });
+
+  it("export throws CheckpointArtifactMissingError for a stale checkpoint, writing no archive file", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        // Deliberately never added to backend.artifacts — simulates the
+        // artifact having been removed outside this library.
+        const cp: Checkpoint = { ref: "gone-ref", backend: "fake-active", spec: fromCheckpointRegistryEntry(baseEntry()) };
+        const archivePath = path.join(dir, "stale.tar");
+
+        let thrown: unknown;
+        try {
+          await Checkpoints.exportTo(cp, archivePath);
+        } catch (err) {
+          thrown = err;
+        }
+        assert.ok(thrown instanceof CheckpointArtifactMissingError, `expected CheckpointArtifactMissingError, got: ${String(thrown)}`);
+        assert.deepEqual(backend.exportCheckpointCalls, []);
+        const archiveExists = await fs
+          .stat(archivePath)
+          .then(() => true)
+          .catch(() => false);
+        assert.equal(archiveExists, false, "expected no archive file to have been written for a stale checkpoint");
+      });
+    });
+  });
+
+  it("cleans its temp staging directory on both a successful export and a failed one", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        const entry = baseEntry();
+        backend.artifacts.add(entry.ref);
+        await writeCheckpointRegistryAtomic(dir, entry.name, entry);
+        const cp: Checkpoint = { ref: entry.ref, backend: entry.backend, spec: fromCheckpointRegistryEntry(entry) };
+
+        await withIsolatedTmpDir(async (isolatedDir) => {
+          const stagingEntries = (): Promise<string[]> =>
+            fs.readdir(isolatedDir).then((entries) => entries.filter((e) => e.startsWith("rightsize-checkpoint-export-")));
+
+          await Checkpoints.exportTo(cp, path.join(dir, "ok.tar"));
+          assert.deepEqual(await stagingEntries(), [], "expected no leftover temp dir after a successful export");
+
+          backend.failNextExportCheckpoint = new Error("export boom");
+          let thrown: unknown;
+          try {
+            await Checkpoints.exportTo(cp, path.join(dir, "fail.tar"));
+          } catch (err) {
+            thrown = err;
+          }
+          assert.ok(thrown instanceof Error);
+          assert.deepEqual(await stagingEntries(), [], "expected no leftover temp dir after a failed export");
+        });
+      });
+    });
+  });
+});
+
+describe("Checkpoints.importFrom — malformed archives", () => {
+  it("a missing file throws MalformedCheckpointArchiveError, no backend call", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        let thrown: unknown;
+        try {
+          await Checkpoints.importFrom(path.join(dir, "does-not-exist.tar"));
+        } catch (err) {
+          thrown = err;
+        }
+        assert.ok(thrown instanceof MalformedCheckpointArchiveError, `expected MalformedCheckpointArchiveError, got: ${String(thrown)}`);
+        assert.deepEqual(backend.importCheckpointCalls, []);
+      });
+    });
+  });
+
+  it("an archive missing checkpoint.json throws MalformedCheckpointArchiveError, no backend call", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        const archivePath = path.join(dir, "no-checkpoint-json.tar");
+        await buildRawArchive(archivePath, undefined, "payload");
+
+        let thrown: unknown;
+        try {
+          await Checkpoints.importFrom(archivePath);
+        } catch (err) {
+          thrown = err;
+        }
+        assert.ok(thrown instanceof MalformedCheckpointArchiveError, `expected MalformedCheckpointArchiveError, got: ${String(thrown)}`);
+        assert.deepEqual(backend.importCheckpointCalls, []);
+      });
+    });
+  });
+
+  it("a checkpoint.json that isn't valid JSON throws MalformedCheckpointArchiveError, no backend call", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        const archivePath = path.join(dir, "bad-json.tar");
+        await buildRawArchive(archivePath, "{not valid json", "payload");
+
+        let thrown: unknown;
+        try {
+          await Checkpoints.importFrom(archivePath);
+        } catch (err) {
+          thrown = err;
+        }
+        assert.ok(thrown instanceof MalformedCheckpointArchiveError, `expected MalformedCheckpointArchiveError, got: ${String(thrown)}`);
+        assert.deepEqual(backend.importCheckpointCalls, []);
+      });
+    });
+  });
+
+  it("a wrong rightsizeArchive value throws MalformedCheckpointArchiveError naming the value, no backend call or registry write", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        const archivePath = path.join(dir, "bad-version.tar");
+        await buildRawArchive(archivePath, archiveJson({ rightsizeArchive: 2 }), "payload");
+
+        let thrown: unknown;
+        try {
+          await Checkpoints.importFrom(archivePath);
+        } catch (err) {
+          thrown = err;
+        }
+        assert.ok(thrown instanceof MalformedCheckpointArchiveError, `expected MalformedCheckpointArchiveError, got: ${String(thrown)}`);
+        assert.match((thrown as Error).message, /2/);
+        assert.deepEqual(backend.importCheckpointCalls, []);
+        const registry = await readCheckpointRegistry(dir, "seeded-db");
+        assert.equal(registry.kind, "missing");
+      });
+    });
+  });
+
+  it("an invalid name throws InvalidCheckpointNameError before any backend call or registry write", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        const archivePath = path.join(dir, "bad-name.tar");
+        await buildRawArchive(archivePath, archiveJson({ name: "Bad_Name" }), "payload");
+
+        let thrown: unknown;
+        try {
+          await Checkpoints.importFrom(archivePath);
+        } catch (err) {
+          thrown = err;
+        }
+        assert.ok(thrown instanceof InvalidCheckpointNameError, `expected InvalidCheckpointNameError, got: ${String(thrown)}`);
+        assert.deepEqual(backend.importCheckpointCalls, []);
+      });
+    });
+  });
+
+  it("a backend mismatch throws CheckpointBackendMismatchError before any backend call or registry write", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        const archivePath = path.join(dir, "bad-backend.tar");
+        await buildRawArchive(archivePath, archiveJson({ backend: "fake-other" }), "payload");
+
+        let thrown: unknown;
+        try {
+          await Checkpoints.importFrom(archivePath);
+        } catch (err) {
+          thrown = err;
+        }
+        assert.ok(thrown instanceof CheckpointBackendMismatchError, `expected CheckpointBackendMismatchError, got: ${String(thrown)}`);
+        assert.deepEqual(backend.importCheckpointCalls, []);
+        const registry = await readCheckpointRegistry(dir, "seeded-db");
+        assert.equal(registry.kind, "missing", "expected no registry write on a rejected import");
+      });
+    });
+  });
+});
+
+describe("Checkpoints.importFrom — named-archive replace semantics", () => {
+  it("removes the old same-backend artifact and rewrites the registry entry with the new effective ref", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        const oldEntry = baseEntry({ ref: "rightsize/checkpoint:old-ref" });
+        backend.artifacts.add(oldEntry.ref);
+        await writeCheckpointRegistryAtomic(dir, oldEntry.name, oldEntry);
+
+        const archivePath = path.join(dir, "replace.tar");
+        await buildRawArchive(archivePath, archiveJson({ ref: "rightsize/checkpoint:new-ref" }), "payload");
+        backend.importEffectiveRef = () => "rightsize/checkpoint:new-ref";
+
+        const imported = await Checkpoints.importFrom(archivePath);
+        assert.equal(imported.ref, "rightsize/checkpoint:new-ref");
+        assert.deepEqual(backend.removeCheckpointCalls, ["rightsize/checkpoint:old-ref"]);
+
+        const registry = await readCheckpointRegistry(dir, "seeded-db");
+        assert.equal(registry.kind, "found");
+        if (registry.kind === "found") {
+          assert.equal(registry.entry.ref, "rightsize/checkpoint:new-ref");
+        }
+      });
+    });
+  });
+
+  it("leaves a cross-backend old entry's artifact untouched, only rewriting the registry entry", async () => {
+    await withTempCacheDir(async (dir) => {
+      const backend = new FakeArtifactBackend("fake-active");
+      await withActiveBackend(backend, async () => {
+        const oldEntry = baseEntry({ backend: "fake-other", ref: "rightsize/checkpoint:cross-backend-ref" });
+        await writeCheckpointRegistryAtomic(dir, oldEntry.name, oldEntry);
+
+        const archivePath = path.join(dir, "replace-cross.tar");
+        await buildRawArchive(archivePath, archiveJson({ ref: "rightsize/checkpoint:new-ref" }), "payload");
+        backend.importEffectiveRef = () => "rightsize/checkpoint:new-ref";
+
+        const imported = await Checkpoints.importFrom(archivePath);
+        assert.equal(imported.ref, "rightsize/checkpoint:new-ref");
+        assert.deepEqual(backend.removeCheckpointCalls, [], "expected no removeCheckpoint call against a foreign backend's old entry");
+
+        const registry = await readCheckpointRegistry(dir, "seeded-db");
+        assert.equal(registry.kind, "found");
+        if (registry.kind === "found") {
+          assert.equal(registry.entry.ref, "rightsize/checkpoint:new-ref");
+          assert.equal(registry.entry.backend, "fake-active", "expected the rewritten entry to now belong to the active backend");
+        }
+      });
     });
   });
 });

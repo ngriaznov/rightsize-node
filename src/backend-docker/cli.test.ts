@@ -17,4 +17,17 @@ describe("DockerCli argv construction", () => {
       "/host/f.txt",
     ]);
   });
+
+  it("save: docker save -o <destFile> <tag>", () => {
+    assert.deepEqual(DockerCli.save("/out/archive.tar", "rightsize/checkpoint:abcdef012345"), [
+      "save",
+      "-o",
+      "/out/archive.tar",
+      "rightsize/checkpoint:abcdef012345",
+    ]);
+  });
+
+  it("load: docker load -i <srcFile>", () => {
+    assert.deepEqual(DockerCli.load("/in/archive.tar"), ["load", "-i", "/in/archive.tar"]);
+  });
 });

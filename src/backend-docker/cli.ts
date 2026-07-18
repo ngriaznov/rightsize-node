@@ -18,6 +18,14 @@ export const DockerCli = {
   copyOut(id: string, containerPath: string, hostPath: string): string[] {
     return ["cp", `${id}:${containerPath}`, hostPath];
   },
+  /** `docker save -o <destFile> <tag>` — `exportCheckpoint`'s backend call; the tag is preserved inside the archive, unlike msb's digest-derived import naming. */
+  save(destFile: string, tag: string): string[] {
+    return ["save", "-o", destFile, tag];
+  },
+  /** `docker load -i <srcFile>` — `importCheckpoint`'s backend call; loading re-points the tag if it already exists. */
+  load(srcFile: string): string[] {
+    return ["load", "-i", srcFile];
+  },
 };
 
 /**

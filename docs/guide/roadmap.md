@@ -13,14 +13,17 @@ mid-execution rather than rebooting — near-instant restore, no workload
 restart — still gated on upstream microsandbox support this library doesn't
 control the timeline for.
 
-## Portable checkpoint archives
+## Self-contained archives
 
-Named checkpoints ship (see [Checkpoint / restore](/guide/checkpoints)), but
-they're only rediscoverable on the same machine, since the registry and the
-underlying artifact both live locally. Export/import (`msb snapshot
-export`/`docker save` and their inverses) would let a checkpoint travel
-between machines and CI caches — build the fixture once, ship the archive,
-restore it anywhere.
+Checkpoint export/import ships (see
+[Moving checkpoints between machines](/guide/checkpoints#moving-checkpoints-between-machines)),
+but the archive never bundles the OCI image — microsandbox's own
+`--with-image` export fails an integrity check on import in the current
+release, so a restored container still needs to pull its base image on
+first boot. Bundling the image (once upstream supports it) would make an
+archive fully offline-restorable, no registry/network access required on
+the importing machine — upstream-dependent, no timeline this library
+controls.
 
 ## Module breadth
 
