@@ -62,7 +62,7 @@ import "rightsize/backend-msb";
 import "rightsize/backend-docker";
 ```
 
-Drive any image directly with `GenericContainer`, or use one of eighteen
+Drive any image directly with `GenericContainer`, or use one of twenty-one
 preconfigured modules:
 
 ```ts
@@ -88,6 +88,7 @@ a `GenericContainer` subclass, so the fluent builders (`withEnv`,
 | Module | Helpers |
 |---|---|
 | `RedisContainer` | `uri` |
+| `ValkeyContainer` | `uri` (`redis://` scheme — Valkey speaks the Redis wire protocol) |
 | `MemcachedContainer` | `address` |
 | `ArangoContainer` | `endpoint`; `withRootPassword(...)` to enable auth (default: no-auth) |
 | `MongoDBContainer` | `connectionString`, `replicaSetUrl` (alias) — single-node replica set, auto-initiated |
@@ -105,11 +106,14 @@ a `GenericContainer` subclass, so the fluent builders (`withEnv`,
 | `Neo4jContainer` | `httpUrl`, `boltUrl`, `username`, `password`; `withPassword(...)` — HTTP Cypher endpoint (username fixed at `neo4j`) |
 | `FlociContainer` | `FlociContainer.aws()`/`.azure()`/`.gcp()` factories, `endpointUrl` — [floci.io](https://floci.io) cloud emulators (unsigned REST, no SDK needed) |
 | `FlinkContainer` | `restUrl`; `withTaskManager()` for a full session cluster — **Docker only**¹ |
+| `MinIOContainer` | `endpointUrl`, `rootUser`, `rootPassword`; `withRootUser`/`withRootPassword(...)` — S3-compatible object store |
+| `CassandraContainer` | `contactPoint`, `cqlPort`, `localDatacenter` |
 
 Some modules raise a memory floor for their image (`withMemoryLimit`):
 heavyweight JVM images - Spring Cloud Config, Keycloak, Neo4j, Flink
-(1024 MB) - and Pinot's multi-JVM QuickStart cluster (4096 MB) - need more
-than the microVM default. That's baked into the module; you don't set it.
+(1024 MB), Cassandra (2560 MB) - and Pinot's multi-JVM QuickStart cluster
+(4096 MB) - need more than the microVM default. That's baked into the
+module; you don't set it.
 Every module's page under [`docs/modules/`](https://ngriaznov.github.io/rightsize-node/modules/)
 documents its exact image tag, wait strategy, and the measured reasoning
 behind these choices.

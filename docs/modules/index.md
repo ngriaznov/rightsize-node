@@ -1,6 +1,6 @@
 # Modules
 
-`rightsize/modules` ships eighteen preconfigured containers — a sensible
+`rightsize/modules` ships twenty-one preconfigured containers — a sensible
 default image, an exposed-ports set, a wait strategy checked against a real
 boot (not just assumed from the docs), and connection helpers that hand you a
 ready-to-use URI rather than making you assemble one from `getMappedPort`
@@ -15,6 +15,7 @@ import { RedisContainer } from "rightsize/modules";
 | Module | Default image | Helpers |
 |---|---|---|
 | [`RedisContainer`](/modules/redis) | `redis:8.6-alpine` | `uri` |
+| [`ValkeyContainer`](/modules/valkey) | `valkey/valkey:9.1-alpine` | `uri` (`redis://` scheme) |
 | [`MemcachedContainer`](/modules/memcached) | `memcached:1.6-alpine` | `address` |
 | [`ArangoContainer`](/modules/arango) | `arangodb:3.11` | `endpoint`, `withRootPassword(...)` |
 | [`MongoDBContainer`](/modules/mongodb) | `mongo:8.0` | `connectionString`, `replicaSetUrl` (single-node replica set, auto-initiated) |
@@ -32,6 +33,8 @@ import { RedisContainer } from "rightsize/modules";
 | [`Neo4jContainer`](/modules/neo4j) | `neo4j:5-community` | `httpUrl`, `boltUrl`, `username`, `password`, `withPassword(...)` |
 | [`FlociContainer`](/modules/floci) | `floci/floci` / `floci/floci-az` / `floci/floci-gcp` | `FlociContainer.aws()`/`.azure()`/`.gcp()`, `endpointUrl` |
 | [`FlinkContainer`](/modules/flink) | `flink:1.20.5` | `restUrl`, `withTaskManager()` — **Docker only¹** |
+| [`MinIOContainer`](/modules/minio) | `minio/minio:RELEASE.2025-09-07T16-13-09Z` | `endpointUrl`, `rootUser`, `rootPassword`, `withRootUser`/`withRootPassword(...)` |
+| [`CassandraContainer`](/modules/cassandra) | `cassandra:5.0.8` | `contactPoint`, `cqlPort`, `localDatacenter` |
 
 Every module page includes: the default image and how to override it, the
 field defaults, every helper, a runnable example, and any backend-specific
@@ -45,9 +48,9 @@ microsandbox, but the two-container topology needs
 
 Some modules raise their container's memory ceiling above microsandbox's
 default microVM RAM (`withMemoryLimit`, baked in — nothing you set yourself):
-Spring Cloud Config, Keycloak, Neo4j, and Flink (1024 MB each), and Pinot's
-four-JVM QuickStart cluster (4096 MB, non-negotiable — see its module page
-for the memory-ladder evidence).
+Spring Cloud Config, Keycloak, Neo4j, and Flink (1024 MB each), Cassandra
+(2560 MB), and Pinot's four-JVM QuickStart cluster (4096 MB, non-negotiable
+— see its module page for the memory-ladder evidence).
 
 ## Don't see what you need?
 

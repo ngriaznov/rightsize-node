@@ -1,5 +1,5 @@
 /**
- * `rightsize/modules` — eighteen preconfigured containers.
+ * `rightsize/modules` — twenty-one preconfigured containers.
  *
  * Each module is a `GenericContainer` subclass with sensible defaults (image
  * tag, exposed ports, wait strategy, and any memory floor its image needs)
@@ -11,6 +11,7 @@
  * @packageDocumentation
  */
 export { RedisContainer } from "./redis.js";
+export { ValkeyContainer } from "./valkey.js";
 export { MemcachedContainer, MemcachedRespondsStrategy } from "./memcached.js";
 export { ArangoContainer } from "./arango.js";
 export { MongoDBContainer } from "./mongodb.js";
@@ -28,3 +29,5 @@ export { KeycloakContainer } from "./keycloak.js";
 export { ClickHouseContainer } from "./clickhouse.js";
 export { Neo4jContainer } from "./neo4j.js";
 export { FlociContainer } from "./floci.js";
+export { MinIOContainer } from "./minio.js";
+export { CassandraContainer } from "./cassandra.js";

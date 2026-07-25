@@ -34,7 +34,7 @@ version and [Lifecycle](/guide/lifecycle) for how disposal actually works.
   — the [README's Examples section](https://github.com/ngriaznov/rightsize-node#examples)
   has the full list and exact commands.
 - **Need a specific container?** Jump to [Modules](/modules/) for the full
-  catalog of eighteen preconfigured containers.
+  catalog of twenty-one preconfigured containers.
 - **Choosing a backend, or hitting a backend-specific limit?** See
   [Backends](/guide/backends) and [Networking](/guide/networking).
 - **Need to move files into or out of a running container, or skip

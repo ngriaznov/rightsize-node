@@ -8,7 +8,7 @@
  * contracts plus the `registerBackend` registry, and the typed error
  * classes. This module depends on no backend — import `rightsize/backend-msb`
  * and/or `rightsize/backend-docker` to register one, or `rightsize/modules`
- * for the eighteen preconfigured containers built on top of this surface.
+ * for the twenty-one preconfigured containers built on top of this surface.
  *
  * @packageDocumentation
  */

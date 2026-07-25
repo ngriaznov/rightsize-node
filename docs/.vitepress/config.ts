@@ -39,6 +39,7 @@ export default defineConfig({
         items: [
           { text: "Overview", link: "/modules/" },
           { text: "Redis", link: "/modules/redis" },
+          { text: "Valkey", link: "/modules/valkey" },
           { text: "Memcached", link: "/modules/memcached" },
           { text: "ArangoDB", link: "/modules/arango" },
           { text: "MongoDB", link: "/modules/mongodb" },
@@ -56,6 +57,8 @@ export default defineConfig({
           { text: "Neo4j", link: "/modules/neo4j" },
           { text: "Floci", link: "/modules/floci" },
           { text: "Flink", link: "/modules/flink" },
+          { text: "MinIO", link: "/modules/minio" },
+          { text: "Cassandra", link: "/modules/cassandra" },
         ],
       },
     ],
