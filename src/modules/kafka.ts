@@ -1,13 +1,22 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 import type { ContainerSpec } from "../core/model.js";
 
 const GUEST_PORT = 9092;
+const EXPECTED_REPOSITORY = "apache/kafka";
+const DEFAULT_IMAGE = "apache/kafka:latest";
 
-/** A single-node Kafka broker (KRaft mode, no ZooKeeper). */
+/**
+ * A single-node Kafka broker (KRaft mode, no ZooKeeper).
+ *
+ * No-arg construction floats to `apache/kafka:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `apache/kafka:4.0.0`, including the JVM heap override below).
+ */
 export class KafkaContainer extends GenericContainer {
-  constructor(image = "apache/kafka:4.0.0") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(GUEST_PORT)
       .withEnv("KAFKA_NODE_ID", "1")
       .withEnv("KAFKA_PROCESS_ROLES", "broker,controller")
@@ -26,7 +35,7 @@ export class KafkaContainer extends GenericContainer {
       .waitingFor(Wait.forLogMessage(".*Kafka Server started.*"));
   }
 
-  static override async start(image = "apache/kafka:4.0.0"): Promise<KafkaContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<KafkaContainer> {
     return (await new KafkaContainer(image).start()) as KafkaContainer;
   }
 

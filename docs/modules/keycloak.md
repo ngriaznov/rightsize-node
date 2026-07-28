@@ -3,7 +3,7 @@
 A single-node Keycloak container started with `start-dev` — an in-memory,
 dev-mode boot with no external database wiring needed for tests.
 
-**Default image:** `quay.io/keycloak/keycloak:26.0`
+**Default image:** `quay.io/keycloak/keycloak:latest`
 **Exposed ports:** `8080` (HTTP/app), `9000` (management interface — health
 lives here, not on 8080)
 **Wait strategy:** `Wait.forHttp("/health/ready").forPort(9000)`, 180s
@@ -32,8 +32,21 @@ console.log(discovery.issuer);
 
 ## Backend notes
 
-Two pins here are version-sensitive and were verified against this module's
-pinned tag specifically:
+- **No-arg construction floats to `quay.io/keycloak/keycloak:latest`.**
+  Verified against `quay.io/keycloak/keycloak:26.0`, patch `26.0.8`
+  specifically.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `keycloak/keycloak` — `quay.io` is a registry host and is
+  stripped before the comparison, the same Docker-reference convention this
+  library applies everywhere else. A different repository throws
+  `IncompatibleImageError` before any backend call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("keycloak/keycloak")`
+  for a verified compatible fork or mirror.
+
+Two pins here are version-sensitive and were verified against 26.0.8
+specifically — they stay hardcoded regardless of which patch `latest`
+resolves to next, since Keycloak's own env-var and health-port conventions
+aren't something this module can detect at boot:
 
 - **26.x renamed the bootstrap-admin environment variables** to
   `KC_BOOTSTRAP_ADMIN_USERNAME`/`KC_BOOTSTRAP_ADMIN_PASSWORD` — older

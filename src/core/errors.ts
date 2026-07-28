@@ -227,6 +227,32 @@ export class CheckpointArtifactMissingError extends Error {
 }
 
 /**
+ * Thrown by `DockerImageName.requireCompatible` — called by a module
+ * constructor before its own `super()` — when an explicitly supplied
+ * image's repository (registry host, tag, and digest all stripped) doesn't
+ * match the repository that module declares it understands, and no
+ * `asCompatibleSubstituteFor` override says otherwise. Thrown before any
+ * backend call and before the module's own builder calls ever run — never a
+ * bare wait-strategy timeout against a workload that was never going to
+ * answer on the expected protocol.
+ */
+export class IncompatibleImageError extends Error {
+  constructor(
+    /** The supplied image's own parsed repository (after registry/tag/digest stripping). */
+    readonly suppliedRepository: string,
+    /** The repository this module declares it understands. */
+    readonly expectedRepository: string,
+  ) {
+    super(
+      `image repository '${suppliedRepository}' does not match '${expectedRepository}', which this module ` +
+        `expects — if '${suppliedRepository}' is a compatible drop-in, override with ` +
+        `DockerImageName.parse(image).asCompatibleSubstituteFor("${expectedRepository}")`,
+    );
+    this.name = "IncompatibleImageError";
+  }
+}
+
+/**
  * Thrown by `Checkpoints.importFrom` when `srcPath` isn't a well-formed
  * rightsize checkpoint archive: the file doesn't exist, it isn't a valid tar,
  * it has no `checkpoint.json` member, that member isn't valid JSON, isn't

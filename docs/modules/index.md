@@ -1,6 +1,6 @@
 # Modules
 
-`rightsize/modules` ships twenty-one preconfigured containers — a sensible
+`rightsize/modules` ships twenty-three preconfigured containers — a sensible
 default image, an exposed-ports set, a wait strategy checked against a real
 boot (not just assumed from the docs), and connection helpers that hand you a
 ready-to-use URI rather than making you assemble one from `getMappedPort`
@@ -14,27 +14,29 @@ import { RedisContainer } from "rightsize/modules";
 
 | Module | Default image | Helpers |
 |---|---|---|
-| [`RedisContainer`](/modules/redis) | `redis:8.6-alpine` | `uri` |
-| [`ValkeyContainer`](/modules/valkey) | `valkey/valkey:9.1-alpine` | `uri` (`redis://` scheme) |
-| [`MemcachedContainer`](/modules/memcached) | `memcached:1.6-alpine` | `address` |
-| [`ArangoContainer`](/modules/arango) | `arangodb:3.11` | `endpoint`, `withRootPassword(...)` |
-| [`MongoDBContainer`](/modules/mongodb) | `mongo:8.0` | `connectionString`, `replicaSetUrl` (single-node replica set, auto-initiated) |
-| [`PostgresContainer`](/modules/postgres) | `postgres:18-alpine` | `connectionString`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
-| [`MySQLContainer`](/modules/mysql) | `mysql:8.4` | `connectionString`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
-| [`MariaDBContainer`](/modules/mariadb) | `mariadb:11.4` | `connectionString`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
-| [`RedpandaContainer`](/modules/redpanda) | `redpandadata/redpanda:v24.2.4` | `bootstrapServers`, `schemaRegistryUrl` |
-| [`KafkaContainer`](/modules/kafka) | `apache/kafka:4.0.0` | `bootstrapServers` (KRaft single node) |
-| [`RabbitMQContainer`](/modules/rabbitmq) | `rabbitmq:4-management-alpine` | `amqpUrl`, `managementUrl`, `username`, `password`, `withUsername`/`withPassword(...)` |
-| [`PinotContainer`](/modules/pinot) | `apachepinot/pinot:1.5.1` | `controllerUrl`, `brokerUrl` (QuickStart `-type EMPTY` single-container cluster) |
+| [`RedisContainer`](/modules/redis) | `redis:latest` | `uri` |
+| [`ValkeyContainer`](/modules/valkey) | `valkey/valkey:latest` | `uri` (`redis://` scheme) |
+| [`MemcachedContainer`](/modules/memcached) | `memcached:latest` | `address` |
+| [`ArangoContainer`](/modules/arango) | `arangodb:latest` | `endpoint`, `withRootPassword(...)` |
+| [`MongoDBContainer`](/modules/mongodb) | `mongo:latest` | `connectionString`, `replicaSetUrl` (single-node replica set, auto-initiated) |
+| [`PostgresContainer`](/modules/postgres) | `postgres:latest` | `connectionString`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
+| [`MySQLContainer`](/modules/mysql) | `mysql:latest` | `connectionString`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
+| [`MariaDBContainer`](/modules/mariadb) | `mariadb:latest` | `connectionString`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
+| [`RedpandaContainer`](/modules/redpanda) | `redpandadata/redpanda:latest` | `bootstrapServers`, `schemaRegistryUrl` |
+| [`KafkaContainer`](/modules/kafka) | `apache/kafka:latest` | `bootstrapServers` (KRaft single node) |
+| [`RabbitMQContainer`](/modules/rabbitmq) | `rabbitmq:management` | `amqpUrl`, `managementUrl`, `username`, `password`, `withUsername`/`withPassword(...)` |
+| [`PinotContainer`](/modules/pinot) | `apachepinot/pinot:latest` | `controllerUrl`, `brokerUrl` (QuickStart `-type EMPTY` single-container cluster) |
 | [`SpringCloudConfigContainer`](/modules/spring-cloud-config) | `hyness/spring-cloud-config-server:latest` | `uri` |
-| [`WireMockContainer`](/modules/wiremock) | `wiremock/wiremock:3.13.2` | `baseUrl`, `adminUrl` |
-| [`KeycloakContainer`](/modules/keycloak) | `quay.io/keycloak/keycloak:26.0` | `authServerUrl`, `adminUsername`, `adminPassword`, `withAdminUsername`/`withAdminPassword(...)` |
-| [`ClickHouseContainer`](/modules/clickhouse) | `clickhouse/clickhouse-server:25.8` | `httpUrl`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
-| [`Neo4jContainer`](/modules/neo4j) | `neo4j:5-community` | `httpUrl`, `boltUrl`, `username`, `password`, `withPassword(...)` |
-| [`FlociContainer`](/modules/floci) | `floci/floci` / `floci/floci-az` / `floci/floci-gcp` | `FlociContainer.aws()`/`.azure()`/`.gcp()`, `endpointUrl` |
-| [`FlinkContainer`](/modules/flink) | `flink:1.20.5` | `restUrl`, `withTaskManager()` — **Docker only¹** |
-| [`MinIOContainer`](/modules/minio) | `minio/minio:RELEASE.2025-09-07T16-13-09Z` | `endpointUrl`, `rootUser`, `rootPassword`, `withRootUser`/`withRootPassword(...)` |
-| [`CassandraContainer`](/modules/cassandra) | `cassandra:5.0.8` | `contactPoint`, `cqlPort`, `localDatacenter` |
+| [`WireMockContainer`](/modules/wiremock) | `wiremock/wiremock:latest` | `baseUrl`, `adminUrl` |
+| [`KeycloakContainer`](/modules/keycloak) | `quay.io/keycloak/keycloak:latest` | `authServerUrl`, `adminUsername`, `adminPassword`, `withAdminUsername`/`withAdminPassword(...)` |
+| [`ClickHouseContainer`](/modules/clickhouse) | `clickhouse/clickhouse-server:latest` | `httpUrl`, `username`, `password`, `databaseName`, `withUsername`/`withPassword`/`withDatabase(...)` |
+| [`Neo4jContainer`](/modules/neo4j) | `neo4j:latest` | `httpUrl`, `boltUrl`, `username`, `password`, `withPassword(...)` |
+| [`FlociContainer`](/modules/floci) | `floci/floci:latest` / `floci/floci-az:latest` / `floci/floci-gcp:latest` | `FlociContainer.aws()`/`.azure()`/`.gcp()`, `endpointUrl` |
+| [`FlinkContainer`](/modules/flink) | `flink:latest` | `restUrl`, `withTaskManager()` — **Docker only¹** |
+| [`MinIOContainer`](/modules/minio) | `minio/minio:latest` | `endpointUrl`, `rootUser`, `rootPassword`, `withRootUser`/`withRootPassword(...)` |
+| [`CassandraContainer`](/modules/cassandra) | `cassandra:latest` | `contactPoint`, `cqlPort`, `localDatacenter` |
+| [`ElasticsearchContainer`](/modules/elasticsearch) | none — an explicit image is required² | `restUrl` |
+| [`QdrantContainer`](/modules/qdrant) | `qdrant/qdrant:latest` | `restUrl` |
 
 Every module page includes: the default image and how to override it, the
 field defaults, every helper, a runnable example, and any backend-specific
@@ -46,11 +48,56 @@ notes worth knowing before you run it.
 microsandbox, but the two-container topology needs
 `RIGHTSIZE_BACKEND=docker`. Full detail on the [Flink page](/modules/flink).
 
+² Elastic publishes no floating tag — `elasticsearch:latest`, `:9`, and `:8`
+are all 404 on Docker Hub, only full version tags exist (verified against
+`elasticsearch:9.4.4`). Both the constructor and `start()` require an
+explicit image. Full detail on the
+[Elasticsearch page](/modules/elasticsearch).
+
 Some modules raise their container's memory ceiling above microsandbox's
 default microVM RAM (`withMemoryLimit`, baked in — nothing you set yourself):
-Spring Cloud Config, Keycloak, Neo4j, and Flink (1024 MB each), Cassandra
-(2560 MB), and Pinot's four-JVM QuickStart cluster (4096 MB, non-negotiable
-— see its module page for the memory-ladder evidence).
+Spring Cloud Config, Keycloak, Neo4j, and Flink (1024 MB each), Cassandra and
+Elasticsearch (2560 MB each), and Pinot's four-JVM QuickStart cluster
+(4096 MB, non-negotiable — see its module page for the memory-ladder
+evidence).
+
+**No module pins a version.** Every no-arg constructor floats to the image's
+own `:latest` (RabbitMQ's `management` tag is the one exception — plain
+`rabbitmq:latest` ships without the management plugin this module depends
+on), so the running version tracks upstream rather than this library's
+release cycle. Each module page keeps the facts (readiness signal, memory
+floor, timings) measured against the pinned version this module used to
+float from, and says which version produced them — floating to `latest`
+means the actual running version will drift from that verified one.
+Redis, Valkey, Postgres, and Memcached previously defaulted to Alpine
+variants; their `latest` floats onto the Debian-based image instead —
+functionally equivalent, larger to pull. Elasticsearch is the only module
+with no floating tag to fall back to at all — see below.
+
+## Image compatibility
+
+Every module here accepts a `DockerImageName` in place of a plain image
+string, and checks the repository it's given (registry host, tag, and
+digest stripped) against the repository it declares — Postgres expects
+`postgres`, Qdrant expects `qdrant/qdrant`, Keycloak expects
+`keycloak/keycloak` (its `quay.io` registry host is stripped the same way),
+and Floci's three factories each check their own provider's repository. A
+mismatched repository throws `IncompatibleImageError` before any backend
+call, naming what was supplied and what was expected:
+
+```ts
+import { QdrantContainer } from "rightsize/modules";
+import { DockerImageName } from "rightsize";
+
+// A verified compatible fork or mirror under a different repository name:
+await using qdrant = await QdrantContainer.start(
+  DockerImageName.parse("mycorp/qdrant-hardened:1.0").asCompatibleSubstituteFor("qdrant/qdrant"),
+);
+```
+
+An explicitly supplied image is always used verbatim — this check only ever
+validates it, it never rewrites a tag or substitutes an image. The same
+escape hatch Testcontainers itself uses (`asCompatibleSubstituteFor`).
 
 ## Don't see what you need?
 

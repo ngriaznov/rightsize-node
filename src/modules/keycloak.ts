@@ -1,13 +1,23 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const HTTP_PORT = 8080;
 const MANAGEMENT_PORT = 9000;
 const STARTUP_TIMEOUT_MS = 180_000;
+const EXPECTED_REPOSITORY = "keycloak/keycloak";
+const DEFAULT_IMAGE = "quay.io/keycloak/keycloak:latest";
 
 /**
  * A single-node Keycloak container started with `start-dev` (an
  * in-memory/dev-mode boot — no external database wiring needed for tests).
+ *
+ * No-arg construction floats to `quay.io/keycloak/keycloak:latest`, so the
+ * version tracks upstream rather than this library's release cycle
+ * (verified against `quay.io/keycloak/keycloak:26.0`, patch `26.0.8`
+ * specifically). The compatibility check expects the repository
+ * `keycloak/keycloak` — `quay.io` is a registry host, stripped by the same
+ * Docker-reference convention this library applies everywhere else.
  *
  * Two pins here are version-sensitive and were verified against 26.0.8
  * specifically:
@@ -31,8 +41,8 @@ export class KeycloakContainer extends GenericContainer {
   private adminUsernameState = "admin";
   private adminPasswordState = "admin";
 
-  constructor(image = "quay.io/keycloak/keycloak:26.0") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(HTTP_PORT, MANAGEMENT_PORT)
       .withCommand("start-dev")
       .withEnv("KC_BOOTSTRAP_ADMIN_USERNAME", this.adminUsernameState)
@@ -42,7 +52,7 @@ export class KeycloakContainer extends GenericContainer {
       .waitingFor(Wait.forHttp("/health/ready").forPort(MANAGEMENT_PORT).withStartupTimeout(STARTUP_TIMEOUT_MS));
   }
 
-  static override async start(image = "quay.io/keycloak/keycloak:26.0"): Promise<KeycloakContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<KeycloakContainer> {
     return (await new KeycloakContainer(image).start()) as KeycloakContainer;
   }
 

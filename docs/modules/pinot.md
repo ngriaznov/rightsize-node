@@ -4,7 +4,7 @@ A single-container Apache Pinot QuickStart cluster — controller, broker,
 server, and ZooKeeper, all four JVMs colocated in one image, started with
 `QuickStart -type EMPTY` for a clean cluster with no demo tables.
 
-**Default image:** `apachepinot/pinot:1.5.1`
+**Default image:** `apachepinot/pinot:latest`
 **Exposed ports:** `9000` (controller REST), `8000` (broker query — **not**
 8099)
 **Wait strategy:** `Wait.forHttp("/health").forPort(9000)`, 180s startup
@@ -37,6 +37,14 @@ console.log(await (await fetch(`${pinot.brokerUrl}/health`)).text());
 
 ## Backend notes
 
+- **No-arg construction floats to `apachepinot/pinot:latest`.** Verified
+  against `apachepinot/pinot:1.5.1`, including both facts below.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `apachepinot/pinot` (registry host, tag, and digest
+  stripped). A different repository throws `IncompatibleImageError` before
+  any backend call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("apachepinot/pinot")`
+  for a verified compatible fork or mirror.
 - **The broker's query port is 8000, not 8099.** The image exposes several
   internal ports in the 8096–8099 range plus 9000, but QuickStart's broker
   binds 8000 for client queries — 8099 is never opened by this entrypoint.

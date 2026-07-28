@@ -1,11 +1,21 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const CQL_PORT = 9042;
 const STARTUP_TIMEOUT_MS = 300_000;
+const EXPECTED_REPOSITORY = "cassandra";
+const DEFAULT_IMAGE = "cassandra:latest";
 
 /**
  * A single-node Cassandra container.
+ *
+ * No-arg construction floats to `cassandra:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `cassandra:5.0.8`, including every fact below — the `GPG_KEYS` override
+ * stays unconditional regardless of which version ends up running, since
+ * it's a no-op against a build that never baked the problem tab and required
+ * against one that does).
  *
  * ### `GPG_KEYS` must be overridden — this is the difference between booting and aborting
  *
@@ -42,8 +52,8 @@ const STARTUP_TIMEOUT_MS = 300_000;
  * either Keycloak or MySQL, both of which carry 180s in this library.
  */
 export class CassandraContainer extends GenericContainer {
-  constructor(image = "cassandra:5.0.8") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(CQL_PORT)
       // Required — see the class doc for the exact panic this avoids.
       .withEnv("GPG_KEYS", "")
@@ -55,7 +65,7 @@ export class CassandraContainer extends GenericContainer {
       );
   }
 
-  static override async start(image = "cassandra:5.0.8"): Promise<CassandraContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<CassandraContainer> {
     return (await new CassandraContainer(image).start()) as CassandraContainer;
   }
 

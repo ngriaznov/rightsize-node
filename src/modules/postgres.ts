@@ -1,21 +1,32 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const GUEST_PORT = 5432;
+const EXPECTED_REPOSITORY = "postgres";
+const DEFAULT_IMAGE = "postgres:latest";
 
 /**
  * A single-node PostgreSQL container. Defaults to a `test`/`test`/`test`
  * user/password/database trio so `connectionString` is usable with zero
  * configuration; call `withUsername`/`withPassword`/`withDatabase` before
  * `start()` to override any of them.
+ *
+ * No-arg construction floats to `postgres:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `postgres:18-alpine`, including the wait-strategy and `DOCKER_PG_LLVM_DEPS`
+ * facts below). `latest` is Debian-based rather than Alpine — functionally
+ * equivalent, larger to pull. The `DOCKER_PG_LLVM_DEPS` override stays in
+ * place regardless: it's a no-op against a build that never baked the
+ * problem tab character, and required against one that does.
  */
 export class PostgresContainer extends GenericContainer {
   private usernameState = "test";
   private passwordState = "test";
   private databaseState = "test";
 
-  constructor(image = "postgres:18-alpine") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(GUEST_PORT)
       .withEnv("POSTGRES_USER", this.usernameState)
       .withEnv("POSTGRES_PASSWORD", this.passwordState)
@@ -39,7 +50,7 @@ export class PostgresContainer extends GenericContainer {
       .waitingFor(Wait.forLogMessage(".*database system is ready to accept connections.*", 2));
   }
 
-  static override async start(image = "postgres:18-alpine"): Promise<PostgresContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<PostgresContainer> {
     return (await new PostgresContainer(image).start()) as PostgresContainer;
   }
 

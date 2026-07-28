@@ -1,9 +1,16 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const AWS_PORT = 4566;
 const AZURE_PORT = 4577;
 const GCP_PORT = 4588;
+const AWS_REPOSITORY = "floci/floci";
+const AZURE_REPOSITORY = "floci/floci-az";
+const GCP_REPOSITORY = "floci/floci-gcp";
+const AWS_DEFAULT_IMAGE = "floci/floci:latest";
+const AZURE_DEFAULT_IMAGE = "floci/floci-az:latest";
+const GCP_DEFAULT_IMAGE = "floci/floci-gcp:latest";
 
 /**
  * A [floci.io](https://floci.io) cloud emulator — one native Quarkus image
@@ -22,6 +29,17 @@ const GCP_PORT = 4588;
  * (verified against real boots of `floci/floci:1.5.30`,
  * `floci/floci-az:0.8.0`, and `floci/floci-gcp:0.4.0`) — pinned as the one
  * wait path that works across all three; no log-wait fallback was needed.
+ *
+ * ### No-arg factories float, each to its own repository's `latest`
+ *
+ * `aws()`, `azure()`, and `gcp()` each default to that provider's
+ * `floci/floci*:latest`, so the version tracks upstream rather than this
+ * library's release cycle — verified against `floci/floci:1.5.30`,
+ * `floci/floci-az:0.8.0`, and `floci/floci-gcp:0.4.0` respectively, the same
+ * boots every other fact on this page cites. Each factory checks its own
+ * repository (`floci/floci`, `floci/floci-az`, `floci/floci-gcp`) — an image
+ * meant for one variant is rejected by another's factory with
+ * `IncompatibleImageError` before any backend call.
  *
  * ### No signing needed — verified against the AWS variant's S3 surface
  *
@@ -46,19 +64,31 @@ export class FlociContainer extends GenericContainer {
     this.withExposedPorts(port).waitingFor(Wait.forHttp("/health").forPort(port));
   }
 
-  /** The AWS emulator (`floci/floci:1.5.30`), guest port 4566 — S3, DynamoDB, SQS, etc. */
-  static aws(image = "floci/floci:1.5.30"): FlociContainer {
-    return new FlociContainer(image, AWS_PORT);
+  /**
+   * The AWS emulator, guest port 4566 — S3, DynamoDB, SQS, etc. Floats to
+   * `floci/floci:latest` (verified against `floci/floci:1.5.30`); only
+   * accepts images whose repository is `floci/floci`.
+   */
+  static aws(image: string | DockerImageName = AWS_DEFAULT_IMAGE): FlociContainer {
+    return new FlociContainer(DockerImageName.requireCompatible(image, AWS_REPOSITORY), AWS_PORT);
   }
 
-  /** The Azure emulator (`floci/floci-az:0.8.0`), guest port 4577. */
-  static azure(image = "floci/floci-az:0.8.0"): FlociContainer {
-    return new FlociContainer(image, AZURE_PORT);
+  /**
+   * The Azure emulator, guest port 4577. Floats to
+   * `floci/floci-az:latest` (verified against `floci/floci-az:0.8.0`); only
+   * accepts images whose repository is `floci/floci-az`.
+   */
+  static azure(image: string | DockerImageName = AZURE_DEFAULT_IMAGE): FlociContainer {
+    return new FlociContainer(DockerImageName.requireCompatible(image, AZURE_REPOSITORY), AZURE_PORT);
   }
 
-  /** The GCP emulator (`floci/floci-gcp:0.4.0`), guest port 4588. */
-  static gcp(image = "floci/floci-gcp:0.4.0"): FlociContainer {
-    return new FlociContainer(image, GCP_PORT);
+  /**
+   * The GCP emulator, guest port 4588. Floats to
+   * `floci/floci-gcp:latest` (verified against `floci/floci-gcp:0.4.0`);
+   * only accepts images whose repository is `floci/floci-gcp`.
+   */
+  static gcp(image: string | DockerImageName = GCP_DEFAULT_IMAGE): FlociContainer {
+    return new FlociContainer(DockerImageName.requireCompatible(image, GCP_REPOSITORY), GCP_PORT);
   }
 
   /** This variant's REST endpoint — the base URL for every emulated API call. */

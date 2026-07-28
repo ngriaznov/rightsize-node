@@ -2,7 +2,7 @@
 
 A single-node Kafka broker running in KRaft mode (no ZooKeeper).
 
-**Default image:** `apache/kafka:4.0.0`
+**Default image:** `apache/kafka:latest`
 **Exposed port:** `9092`
 **Wait strategy:** log message `".*Kafka Server started.*"`
 
@@ -27,6 +27,14 @@ await producer.disconnect();
 
 ## Backend notes
 
+- **No-arg construction floats to `apache/kafka:latest`.** Verified against
+  `apache/kafka:4.0.0`, including the heap-override fact below.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `apache/kafka` (registry host, tag, and digest stripped). A
+  different repository throws `IncompatibleImageError` before any backend
+  call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("apache/kafka")`
+  for a verified compatible fork or mirror.
 - **The advertised listener is rewritten to carry the mapped host port**,
   known only once ports are allocated — the same `customizeSpec` mechanism
   [Redpanda](/modules/redpanda) uses, applied here to Kafka's single

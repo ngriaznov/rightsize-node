@@ -6,7 +6,7 @@ library's HTTP-first module convention ([ClickHouse](/modules/clickhouse),
 [Pinot](/modules/pinot)). The bolt port is still exposed and its URI
 available for callers who do want a real driver.
 
-**Default image:** `neo4j:5-community`
+**Default image:** `neo4j:latest`
 **Exposed ports:** `7474` (HTTP), `7687` (bolt)
 **Wait strategy:** log message `"Started\\."`, 120s startup timeout
 **Memory:** `withMemoryLimit(1024)` by default
@@ -38,6 +38,14 @@ console.log(await res.json());
 
 ## Backend notes
 
+- **No-arg construction floats to `neo4j:latest`.** Verified against
+  `neo4j:5-community`, including every fact on this page.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `neo4j` (registry host, tag, and digest stripped). A
+  different repository throws `IncompatibleImageError` before any backend
+  call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("neo4j")` for a
+  verified compatible fork or mirror.
 - **The image refuses passwords under 8 characters** — `neo4j`/`neo4j` is
   rejected at boot. This module's default password (`rightsize-test`) is
   already 8+ characters; if you override it with `withPassword`, keep that

@@ -6,7 +6,7 @@ A single-node MongoDB container running as a one-member replica set
 so `connectionString` is always usable immediately, with no manual
 replica-set setup.
 
-**Default image:** `mongo:8.0`
+**Default image:** `mongo:latest`
 **Exposed port:** `27017`
 **Command:** `mongod --replSet docker-rs --bind_ip_all`
 
@@ -33,10 +33,17 @@ await client.close();
 
 ## Backend notes
 
-The replica-set initiation races the same early-accept behavior every
-`Wait.forListeningPort()` container has to account for (see
-[Wait strategies](/guide/wait-strategies)) — the first `rs.initiate()` attempt
-can hit the container before `mongod` is genuinely ready to serve it. This
-module's post-start hook retries both `rs.initiate()` and the
-writable-primary check in a bounded loop for exactly this reason; no action
-needed on your part.
+- **No-arg construction floats to `mongo:latest`.** Verified against
+  `mongo:8.0`.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `mongo` (registry host, tag, and digest stripped). A
+  different repository throws `IncompatibleImageError` before any backend
+  call; override with `DockerImageName.parse(image).asCompatibleSubstituteFor("mongo")`
+  for a verified compatible fork or mirror.
+- The replica-set initiation races the same early-accept behavior every
+  `Wait.forListeningPort()` container has to account for (see
+  [Wait strategies](/guide/wait-strategies)) — the first `rs.initiate()`
+  attempt can hit the container before `mongod` is genuinely ready to serve
+  it. This module's post-start hook retries both `rs.initiate()` and the
+  writable-primary check in a bounded loop for exactly this reason; no action
+  needed on your part.

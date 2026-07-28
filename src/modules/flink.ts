@@ -2,6 +2,7 @@ import { GenericContainer } from "../core/generic-container.js";
 import { Network } from "../core/network.js";
 import { Wait } from "../core/wait.js";
 import { UnsupportedByBackendError } from "../core/errors.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 import type { SandboxBackend } from "../core/backend.js";
 
 const RPC_PORT = 6123;
@@ -9,10 +10,17 @@ const REST_PORT = 8081;
 const JOBMANAGER_MEMORY_MB = 1024;
 const TASKMANAGER_MEMORY_MB = 1024;
 const JOBMANAGER_ALIAS = "flink-jobmanager";
+const EXPECTED_REPOSITORY = "flink";
+const DEFAULT_IMAGE = "flink:latest";
 
 /**
  * A Flink JobManager container (REST 8081, RPC 6123), with an optional
  * companion TaskManager on Docker only — see `withTaskManager()`.
+ *
+ * No-arg construction floats to `flink:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `flink:1.20.5`, including the `nc`/busybox absence this class doc relies
+ * on below).
  *
  * `FLINK_PROPERTIES` must set `jobmanager.rpc.address` on the JobManager
  * itself (not just the TaskManager): the JobManager's own Pekko/Akka actor
@@ -49,9 +57,10 @@ export class FlinkContainer extends GenericContainer {
   private taskManagerNetwork: Network | undefined;
   private ownedNetwork: Network | undefined;
 
-  constructor(image = "flink:1.20.5") {
-    super(image);
-    this.imageTag = image;
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    const resolvedImage = DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY);
+    super(resolvedImage);
+    this.imageTag = resolvedImage;
     this.withExposedPorts(RPC_PORT, REST_PORT)
       .withEnv("FLINK_PROPERTIES", `jobmanager.rpc.address: ${JOBMANAGER_ALIAS}`)
       .withCommand("jobmanager")
@@ -60,7 +69,7 @@ export class FlinkContainer extends GenericContainer {
       .waitingFor(Wait.forHttp("/overview").forPort(REST_PORT).withStartupTimeout(120_000));
   }
 
-  static override async start(image = "flink:1.20.5"): Promise<FlinkContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<FlinkContainer> {
     return (await new FlinkContainer(image).start()) as FlinkContainer;
   }
 

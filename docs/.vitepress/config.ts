@@ -59,6 +59,8 @@ export default defineConfig({
           { text: "Flink", link: "/modules/flink" },
           { text: "MinIO", link: "/modules/minio" },
           { text: "Cassandra", link: "/modules/cassandra" },
+          { text: "Elasticsearch", link: "/modules/elasticsearch" },
+          { text: "Qdrant", link: "/modules/qdrant" },
         ],
       },
     ],

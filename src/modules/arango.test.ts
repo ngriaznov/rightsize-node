@@ -1,6 +1,8 @@
 import { describe, it, assert } from "../../test/harness.js";
 import { ArangoContainer } from "./arango.js";
 import { FakeModuleBackend, instantReadyWait } from "./test-fake-backend.js";
+import { DockerImageName } from "../core/docker-image-name.js";
+import { IncompatibleImageError } from "../core/errors.js";
 
 describe("ArangoContainer", () => {
   it("defaults to no-auth mode and exposes port 8529", async () => {
@@ -8,7 +10,7 @@ describe("ArangoContainer", () => {
     const arango = new ArangoContainer().withBackend(backend).waitingFor(instantReadyWait());
     await arango.start();
     try {
-      assert.equal(backend.lastSpec?.image, "arangodb:3.11");
+      assert.equal(backend.lastSpec?.image, "arangodb:latest");
       assert.deepEqual(backend.lastSpec?.ports.map((p) => p.guestPort), [8529]);
       assert.deepEqual(backend.lastSpec?.env, [["ARANGO_NO_AUTH", "1"]]);
     } finally {
@@ -37,6 +39,41 @@ describe("ArangoContainer", () => {
     await arango.start();
     try {
       assert.deepEqual(backend.lastSpec?.env, [["ARANGO_ROOT_PASSWORD", "secret123"]]);
+    } finally {
+      await arango.stop();
+    }
+  });
+
+  it("accepts a DockerImageName instance whose repository matches", async () => {
+    const backend = new FakeModuleBackend();
+    const image = DockerImageName.parse("arangodb:3.12");
+    const arango = new ArangoContainer(image).withBackend(backend).waitingFor(instantReadyWait());
+    await arango.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "arangodb:3.12");
+    } finally {
+      await arango.stop();
+    }
+  });
+
+  it("throws IncompatibleImageError before start() for a mismatched repository", () => {
+    try {
+      new ArangoContainer("mongo:latest");
+      assert.ok(false, "expected the constructor to throw");
+    } catch (err) {
+      assert.ok(err instanceof IncompatibleImageError);
+      assert.equal((err as IncompatibleImageError).suppliedRepository, "mongo");
+      assert.equal((err as IncompatibleImageError).expectedRepository, "arangodb");
+    }
+  });
+
+  it("accepts a mismatched image explicitly marked asCompatibleSubstituteFor('arangodb')", async () => {
+    const backend = new FakeModuleBackend();
+    const substitute = DockerImageName.parse("mycorp/arangodb-hardened:3.11").asCompatibleSubstituteFor("arangodb");
+    const arango = new ArangoContainer(substitute).withBackend(backend).waitingFor(instantReadyWait());
+    await arango.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mycorp/arangodb-hardened:3.11");
     } finally {
       await arango.stop();
     }

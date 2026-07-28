@@ -1,5 +1,5 @@
 /**
- * `rightsize/modules` — twenty-one preconfigured containers.
+ * `rightsize/modules` — twenty-three preconfigured containers.
  *
  * Each module is a `GenericContainer` subclass with sensible defaults (image
  * tag, exposed ports, wait strategy, and any memory floor its image needs)
@@ -31,3 +31,5 @@ export { Neo4jContainer } from "./neo4j.js";
 export { FlociContainer } from "./floci.js";
 export { MinIOContainer } from "./minio.js";
 export { CassandraContainer } from "./cassandra.js";
+export { ElasticsearchContainer } from "./elasticsearch.js";
+export { QdrantContainer } from "./qdrant.js";

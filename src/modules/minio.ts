@@ -1,8 +1,11 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const API_PORT = 9000;
 const CONSOLE_PORT = 9001;
+const EXPECTED_REPOSITORY = "minio/minio";
+const DEFAULT_IMAGE = "minio/minio:latest";
 
 /**
  * A single-node MinIO container — an S3-compatible object store. Requires
@@ -20,13 +23,17 @@ const CONSOLE_PORT = 9001;
  *
  * Readiness is a protocol-aware HTTP check against `/minio/health/live` on
  * the API port — verified answering 200 on the very first poll after boot.
+ *
+ * No-arg construction floats to `minio/minio:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `minio/minio:RELEASE.2025-09-07T16-13-09Z`).
  */
 export class MinIOContainer extends GenericContainer {
   private rootUserState = "testuser";
   private rootPasswordState = "testpassword";
 
-  constructor(image = "minio/minio:RELEASE.2025-09-07T16-13-09Z") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(API_PORT, CONSOLE_PORT)
       .withCommand("server", "/data", "--console-address", ":9001")
       .withEnv("MINIO_ROOT_USER", this.rootUserState)
@@ -39,7 +46,7 @@ export class MinIOContainer extends GenericContainer {
     // number that included the whole round-trip's overhead.
   }
 
-  static override async start(image = "minio/minio:RELEASE.2025-09-07T16-13-09Z"): Promise<MinIOContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<MinIOContainer> {
     return (await new MinIOContainer(image).start()) as MinIOContainer;
   }
 

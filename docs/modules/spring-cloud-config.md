@@ -24,6 +24,13 @@ console.log(await (await fetch(`${config.uri}/actuator/health`)).json());
 
 ## Backend notes
 
+**Compatibility check:** the constructor only accepts images whose
+repository is `hyness/spring-cloud-config-server` (registry host, tag, and
+digest stripped). A different repository throws `IncompatibleImageError`
+before any backend call; override with
+`DockerImageName.parse(image).asCompatibleSubstituteFor("hyness/spring-cloud-config-server")`
+for a verified compatible fork or mirror.
+
 **The 1024MB memory floor is required on microsandbox, not optional.**
 Paketo's memory calculator sizes this JVM image's fixed regions (measured
 around 705MB) above microsandbox's default microVM RAM (~450MB) — without

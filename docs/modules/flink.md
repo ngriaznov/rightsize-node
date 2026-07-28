@@ -3,7 +3,7 @@
 A Flink JobManager container (REST + RPC), with an optional companion
 TaskManager — **Docker only**.
 
-**Default image:** `flink:1.20.5`
+**Default image:** `flink:latest`
 **Exposed ports:** `8081` (REST), `6123` (RPC)
 **Wait strategy:** `Wait.forHttp("/overview").forPort(8081)`, 120s startup
 timeout
@@ -35,15 +35,27 @@ await using flink = await new FlinkContainer().withTaskManager().start();
 console.log(await (await fetch(`${flink.restUrl}/taskmanagers`)).json()); // one registered TM
 ```
 
-## Backend notes: the `withTaskManager()` limitation, stated precisely
+## Backend notes
+
+- **No-arg construction floats to `flink:latest`.** Verified against
+  `flink:1.20.5`, including the `nc`/busybox absence the `withTaskManager()`
+  limitation below relies on.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `flink` (registry host, tag, and digest stripped). A
+  different repository throws `IncompatibleImageError` before any backend
+  call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("flink")` for a
+  verified compatible fork or mirror.
+
+## The `withTaskManager()` limitation, stated precisely
 
 A real Flink session cluster needs a TaskManager to run anything, and a
 TaskManager registers with its JobManager over a **persistent bidirectional
 RPC connection** (Pekko/Akka). Two independent facts rule this topology out
 on the microsandbox backend:
 
-1. **The `flink` image ships neither `nc` nor `busybox`** — confirmed
-   directly against the pinned tag (`command -v nc` and `command -v busybox`
+1. **The `flink:1.20.5` image ships neither `nc` nor `busybox`** — confirmed
+   directly against that tag (`command -v nc` and `command -v busybox`
    both exit 127 inside the image). microsandbox's network-link emulation
    depends on an in-guest `nc -l` listener (see
    [Networking](/guide/networking)); without it, the emulation's own

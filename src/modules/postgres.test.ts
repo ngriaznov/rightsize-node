@@ -1,6 +1,8 @@
 import { describe, it, assert } from "../../test/harness.js";
 import { PostgresContainer } from "./postgres.js";
 import { FakeModuleBackend, instantReadyWait } from "./test-fake-backend.js";
+import { DockerImageName } from "../core/docker-image-name.js";
+import { IncompatibleImageError } from "../core/errors.js";
 
 describe("PostgresContainer", () => {
   it("exposes port 5432 with test/test/test defaults and overrides the LLVM-deps env", async () => {
@@ -8,7 +10,7 @@ describe("PostgresContainer", () => {
     const postgres = new PostgresContainer().withBackend(backend).waitingFor(instantReadyWait());
     await postgres.start();
     try {
-      assert.equal(backend.lastSpec?.image, "postgres:18-alpine");
+      assert.equal(backend.lastSpec?.image, "postgres:latest");
       assert.deepEqual(backend.lastSpec?.ports.map((p) => p.guestPort), [5432]);
       const env = new Map(backend.lastSpec?.env ?? []);
       assert.equal(env.get("POSTGRES_USER"), "test");
@@ -60,6 +62,41 @@ describe("PostgresContainer", () => {
     await postgres.start();
     try {
       assert.equal(backend.lastSpec?.image, "postgres:17-alpine");
+    } finally {
+      await postgres.stop();
+    }
+  });
+
+  it("accepts a DockerImageName instance whose repository matches", async () => {
+    const backend = new FakeModuleBackend();
+    const image = DockerImageName.parse("postgres:17-alpine");
+    const postgres = new PostgresContainer(image).withBackend(backend).waitingFor(instantReadyWait());
+    await postgres.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "postgres:17-alpine");
+    } finally {
+      await postgres.stop();
+    }
+  });
+
+  it("throws IncompatibleImageError before start() for a mismatched repository", () => {
+    try {
+      new PostgresContainer("mysql:latest");
+      assert.ok(false, "expected the constructor to throw");
+    } catch (err) {
+      assert.ok(err instanceof IncompatibleImageError);
+      assert.equal((err as IncompatibleImageError).suppliedRepository, "mysql");
+      assert.equal((err as IncompatibleImageError).expectedRepository, "postgres");
+    }
+  });
+
+  it("accepts a mismatched image explicitly marked asCompatibleSubstituteFor('postgres')", async () => {
+    const backend = new FakeModuleBackend();
+    const substitute = DockerImageName.parse("mycorp/pg-hardened:18").asCompatibleSubstituteFor("postgres");
+    const postgres = new PostgresContainer(substitute).withBackend(backend).waitingFor(instantReadyWait());
+    await postgres.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mycorp/pg-hardened:18");
     } finally {
       await postgres.stop();
     }

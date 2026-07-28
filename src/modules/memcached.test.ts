@@ -2,6 +2,8 @@ import * as net from "node:net";
 import { describe, it, assert } from "../../test/harness.js";
 import { MemcachedContainer, MemcachedRespondsStrategy } from "./memcached.js";
 import { FakeModuleBackend, instantReadyWait } from "./test-fake-backend.js";
+import { DockerImageName } from "../core/docker-image-name.js";
+import { IncompatibleImageError } from "../core/errors.js";
 import type { WaitTarget } from "../core/wait.js";
 
 function listen(server: net.Server): Promise<number> {
@@ -90,6 +92,41 @@ describe("MemcachedContainer wait strategy", () => {
     await mc.start();
     try {
       assert.equal(backend.lastSpec?.image, "memcached:1.6.31-alpine");
+    } finally {
+      await mc.stop();
+    }
+  });
+
+  it("accepts a DockerImageName instance whose repository matches", async () => {
+    const backend = new FakeModuleBackend();
+    const image = DockerImageName.parse("memcached:1.6.31-alpine");
+    const mc = new MemcachedContainer(image).withBackend(backend).waitingFor(instantReadyWait());
+    await mc.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "memcached:1.6.31-alpine");
+    } finally {
+      await mc.stop();
+    }
+  });
+
+  it("throws IncompatibleImageError before start() for a mismatched repository", () => {
+    try {
+      new MemcachedContainer("redis:latest");
+      assert.ok(false, "expected the constructor to throw");
+    } catch (err) {
+      assert.ok(err instanceof IncompatibleImageError);
+      assert.equal((err as IncompatibleImageError).suppliedRepository, "redis");
+      assert.equal((err as IncompatibleImageError).expectedRepository, "memcached");
+    }
+  });
+
+  it("accepts a mismatched image explicitly marked asCompatibleSubstituteFor('memcached')", async () => {
+    const backend = new FakeModuleBackend();
+    const substitute = DockerImageName.parse("mycorp/memcached-hardened:1.6").asCompatibleSubstituteFor("memcached");
+    const mc = new MemcachedContainer(substitute).withBackend(backend).waitingFor(instantReadyWait());
+    await mc.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mycorp/memcached-hardened:1.6");
     } finally {
       await mc.stop();
     }

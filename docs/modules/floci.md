@@ -5,8 +5,8 @@ provider, each speaking that provider's REST APIs against an in-memory
 backing store. One module covers all three provider variants; pick one via
 a factory function.
 
-**Default images:** `floci/floci:1.5.30` (AWS), `floci/floci-az:0.8.0`
-(Azure), `floci/floci-gcp:0.4.0` (GCP)
+**Default images:** `floci/floci:latest` (AWS), `floci/floci-az:latest`
+(Azure), `floci/floci-gcp:latest` (GCP)
 **Exposed ports:** `4566` (AWS), `4577` (Azure), `4588` (GCP)
 **Wait strategy:** `Wait.forHttp("/health").forPort(...)` — works uniformly
 across all three variants
@@ -38,8 +38,20 @@ console.log(await (await fetch(`${floci.endpointUrl}/my-bucket/key`)).text()); /
 
 ## Backend notes
 
-**No signing needed for the AWS variant.** Its S3-shaped endpoints
-(create-bucket, put-object, get-object) accept unsigned requests with no
-`Authorization` header at all — no SigV4, no AWS SDK dependency required, as
-shown above. All three images are small native binaries with no memory-limit
-override needed on either backend.
+- **Each factory floats to its own repository's `latest`.** `aws()` defaults
+  to `floci/floci:latest` (verified against `floci/floci:1.5.30`), `azure()`
+  to `floci/floci-az:latest` (verified against `floci/floci-az:0.8.0`), and
+  `gcp()` to `floci/floci-gcp:latest` (verified against
+  `floci/floci-gcp:0.4.0`).
+- **Compatibility check, one per factory.** Each factory only accepts images
+  whose repository matches that variant's own (`floci/floci`,
+  `floci/floci-az`, `floci/floci-gcp`; registry host, tag, and digest
+  stripped) — an image meant for one variant is rejected by another's
+  factory with `IncompatibleImageError` before any backend call. Override
+  with `DockerImageName.parse(image).asCompatibleSubstituteFor(...)` for a
+  verified compatible fork or mirror.
+- **No signing needed for the AWS variant.** Its S3-shaped endpoints
+  (create-bucket, put-object, get-object) accept unsigned requests with no
+  `Authorization` header at all — no SigV4, no AWS SDK dependency required,
+  as shown above. All three images are small native binaries with no
+  memory-limit override needed on either backend.

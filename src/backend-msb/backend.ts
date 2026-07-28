@@ -10,6 +10,7 @@ import { invoke, CLOSED_STDIN } from "./invoke.js";
 import { isPortBindConflictOutput } from "./port-conflict.js";
 import { isImageCacheCorruption } from "./image-cache.js";
 import { isMsbStateDbError } from "./state-db.js";
+import { isAgentEndpointNotReady } from "./agent-endpoint.js";
 import { isSnapshotNotFoundError } from "./snapshot-not-found.js";
 import { isSnapshotAlreadyExistsError, parseImportedDigestDirName } from "./snapshot-import.js";
 import { parseSnapshotList, confirmDigestDirNamePresent } from "./snapshot-list.js";
@@ -21,6 +22,12 @@ const FIRST_RUN_PULL_TIMEOUT_MS = 600_000; // a cold pull can be slow
 const READINESS_POLL_MS = 300;
 const STOP_TIMEOUT_MS = 60_000;
 const EXEC_TIMEOUT_MS = 120_000;
+// How long an exec keeps retrying while the guest agent's endpoint has not
+// appeared yet, and how long it pauses between attempts — see
+// `isAgentEndpointNotReady`. Costs nothing on the ordinary path, where the
+// first attempt connects.
+const AGENT_ENDPOINT_RETRY_BUDGET_MS = 30_000;
+const AGENT_ENDPOINT_RETRY_DELAY_MS = 250;
 const LOGS_TIMEOUT_MS = 30_000;
 const ATTACHED_PROC_STOP_TIMEOUT_MS = 10_000;
 const TAIL_LINES = 50;
@@ -644,9 +651,27 @@ export class MsbCliBackend implements SandboxBackend {
     return runningNames(result.stdout);
   }
 
+  /**
+   * Runs `cmd` in the guest, retrying while msb reports it cannot reach the
+   * guest agent's endpoint yet (see `isAgentEndpointNotReady`). A sandbox
+   * shows `"Running"` before that endpoint is guaranteed to exist, so an exec
+   * issued immediately after `start()` returns can arrive first; this closes
+   * that window rather than leaving every caller to rediscover it. Only that
+   * one failure shape is retried — a guest command's own non-zero exit
+   * returns on the first attempt, unchanged, and so does any agent error
+   * raised once the connection is actually established.
+   */
   async exec(handle: SandboxHandle, cmd: ReadonlyArray<string>): Promise<ExecResult> {
     const msbPath = await this.msbPath();
-    return invoke(msbPath, MsbCommands.exec(handle.id, cmd), EXEC_TIMEOUT_MS);
+    const args = MsbCommands.exec(handle.id, cmd);
+    const deadline = Date.now() + AGENT_ENDPOINT_RETRY_BUDGET_MS;
+    for (;;) {
+      const result = await invoke(msbPath, args, EXEC_TIMEOUT_MS);
+      if (result.exitCode === 0 || !isAgentEndpointNotReady(result.stderr) || Date.now() >= deadline) {
+        return result;
+      }
+      await sleep(AGENT_ENDPOINT_RETRY_DELAY_MS);
+    }
   }
 
   /**

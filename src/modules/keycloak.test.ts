@@ -1,6 +1,8 @@
 import { describe, it, assert } from "../../test/harness.js";
 import { KeycloakContainer } from "./keycloak.js";
 import { FakeModuleBackend, instantReadyWait } from "./test-fake-backend.js";
+import { DockerImageName } from "../core/docker-image-name.js";
+import { IncompatibleImageError } from "../core/errors.js";
 
 describe("KeycloakContainer", () => {
   it("exposes HTTP (8080) and management (9000) ports, runs start-dev, and sets the 26.x bootstrap-admin env", async () => {
@@ -8,7 +10,7 @@ describe("KeycloakContainer", () => {
     const keycloak = new KeycloakContainer().withBackend(backend).waitingFor(instantReadyWait());
     await keycloak.start();
     try {
-      assert.equal(backend.lastSpec?.image, "quay.io/keycloak/keycloak:26.0");
+      assert.equal(backend.lastSpec?.image, "quay.io/keycloak/keycloak:latest");
       assert.deepEqual(backend.lastSpec?.ports.map((p) => p.guestPort), [8080, 9000]);
       assert.deepEqual(backend.lastSpec?.command, ["start-dev"]);
       const env = new Map(backend.lastSpec?.env ?? []);
@@ -68,6 +70,54 @@ describe("KeycloakContainer", () => {
     await keycloak.start();
     try {
       assert.equal(backend.lastSpec?.image, "quay.io/keycloak/keycloak:26.0.8");
+    } finally {
+      await keycloak.stop();
+    }
+  });
+
+  it("accepts a DockerImageName instance whose repository matches", async () => {
+    const backend = new FakeModuleBackend();
+    const image = DockerImageName.parse("quay.io/keycloak/keycloak:26.0.8");
+    const keycloak = new KeycloakContainer(image).withBackend(backend).waitingFor(instantReadyWait());
+    await keycloak.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "quay.io/keycloak/keycloak:26.0.8");
+    } finally {
+      await keycloak.stop();
+    }
+  });
+
+  it("accepts the plain keycloak/keycloak repository with no registry host", async () => {
+    const backend = new FakeModuleBackend();
+    const keycloak = new KeycloakContainer("keycloak/keycloak:26.0.8").withBackend(backend).waitingFor(instantReadyWait());
+    await keycloak.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "keycloak/keycloak:26.0.8");
+    } finally {
+      await keycloak.stop();
+    }
+  });
+
+  it("throws IncompatibleImageError before start() for a mismatched repository", () => {
+    try {
+      new KeycloakContainer("mongo:latest");
+      assert.ok(false, "expected the constructor to throw");
+    } catch (err) {
+      assert.ok(err instanceof IncompatibleImageError);
+      assert.equal((err as IncompatibleImageError).suppliedRepository, "mongo");
+      assert.equal((err as IncompatibleImageError).expectedRepository, "keycloak/keycloak");
+    }
+  });
+
+  it("accepts a mismatched image explicitly marked asCompatibleSubstituteFor('keycloak/keycloak')", async () => {
+    const backend = new FakeModuleBackend();
+    const substitute = DockerImageName.parse("mycorp/keycloak-hardened:26.0").asCompatibleSubstituteFor(
+      "keycloak/keycloak",
+    );
+    const keycloak = new KeycloakContainer(substitute).withBackend(backend).waitingFor(instantReadyWait());
+    await keycloak.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mycorp/keycloak-hardened:26.0");
     } finally {
       await keycloak.stop();
     }

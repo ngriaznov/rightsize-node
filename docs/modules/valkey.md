@@ -3,7 +3,7 @@
 A single-node Valkey container — the Redis-protocol-compatible fork,
 following [Redis](/modules/redis)'s builder shape exactly.
 
-**Default image:** `valkey/valkey:9.1-alpine`
+**Default image:** `valkey/valkey:latest`
 **Exposed port:** `6379`
 **Wait strategy:** `Wait.forLogMessage(".*Ready to accept connections.*", 1)`
 
@@ -28,6 +28,9 @@ await client.quit();
 
 ## Backend notes
 
+- **No-arg construction floats to `valkey/valkey:latest`.** Verified against
+  `valkey/valkey:9.1-alpine` — `latest` is Debian-based rather than Alpine,
+  larger to pull but functionally equivalent.
 - **`.uri` uses `redis://`, not `valkey://`.** Every client this library's
   tests and its users reach for — lettuce, node-redis, or raw RESP over
   TCP — parses `redis://`, and Valkey speaks that same wire protocol. This
@@ -38,4 +41,10 @@ await client.quit();
   hold a TCP connection before the guest process is actually listening, so a
   bare listening-port wait risks returning before the server serves.
 - No memory-limit override is needed; verified booting and answering `PING`
-  with no limit set, well under 512 MB.
+  with no limit set, well under 512 MB, against `valkey/valkey:9.1-alpine`.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `valkey/valkey` (registry host, tag, and digest stripped). A
+  different repository throws `IncompatibleImageError` before any backend
+  call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("valkey/valkey")`
+  for a verified compatible fork or mirror.

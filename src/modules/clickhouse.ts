@@ -1,8 +1,11 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const HTTP_PORT = 8123;
 const NATIVE_PORT = 9000;
+const EXPECTED_REPOSITORY = "clickhouse/clickhouse-server";
+const DEFAULT_IMAGE = "clickhouse/clickhouse-server:latest";
 
 /**
  * A single-node ClickHouse container, ready-checked via `/ping` (returns
@@ -17,14 +20,19 @@ const NATIVE_PORT = 9000;
  * entirely — once set, the unauthenticated `default` user's usual
  * passwordless access is gone, and every query needs the configured
  * credentials.
+ *
+ * No-arg construction floats to `clickhouse/clickhouse-server:latest`, so
+ * the version tracks upstream rather than this library's release cycle
+ * (verified against `clickhouse/clickhouse-server:25.8`, including the
+ * memory and startup-timeout facts below).
  */
 export class ClickHouseContainer extends GenericContainer {
   private usernameState = "test";
   private passwordState = "test";
   private databaseState = "test";
 
-  constructor(image = "clickhouse/clickhouse-server:25.8") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(HTTP_PORT, NATIVE_PORT)
       .withEnv("CLICKHOUSE_USER", this.usernameState)
       .withEnv("CLICKHOUSE_PASSWORD", this.passwordState)
@@ -38,7 +46,7 @@ export class ClickHouseContainer extends GenericContainer {
     // practice (verified booting and answering /ping on msb's default).
   }
 
-  static override async start(image = "clickhouse/clickhouse-server:25.8"): Promise<ClickHouseContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<ClickHouseContainer> {
     return (await new ClickHouseContainer(image).start()) as ClickHouseContainer;
   }
 

@@ -1,7 +1,10 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const GUEST_PORT = 3306;
+const EXPECTED_REPOSITORY = "mariadb";
+const DEFAULT_IMAGE = "mariadb:latest";
 
 /**
  * A single-node MariaDB container. Defaults to a `test`/`test`/`test`
@@ -35,14 +38,19 @@ const GUEST_PORT = 3306;
  * `.*port: 3306.*mariadb\.org binary distribution.*` with `times=1` matches
  * only the last line above — the temp server's equivalent line has `port: 0`
  * instead of `port: 3306`, so it never satisfies the pattern.
+ *
+ * No-arg construction floats to `mariadb:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `mariadb:11.4`, including the readiness regex above and the log excerpt it
+ * was captured from).
  */
 export class MariaDBContainer extends GenericContainer {
   private usernameState = "test";
   private passwordState = "test";
   private databaseState = "test";
 
-  constructor(image = "mariadb:11.4") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(GUEST_PORT)
       .withEnv("MARIADB_USER", this.usernameState)
       .withEnv("MARIADB_PASSWORD", this.passwordState)
@@ -55,7 +63,7 @@ export class MariaDBContainer extends GenericContainer {
     // InnoDB default footprint fits msb's default microVM RAM comfortably.
   }
 
-  static override async start(image = "mariadb:11.4"): Promise<MariaDBContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<MariaDBContainer> {
     return (await new MariaDBContainer(image).start()) as MariaDBContainer;
   }
 

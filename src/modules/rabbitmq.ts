@@ -1,14 +1,25 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const AMQP_PORT = 5672;
 const MANAGEMENT_PORT = 15672;
+const EXPECTED_REPOSITORY = "rabbitmq";
+const DEFAULT_IMAGE = "rabbitmq:management";
 
 /**
  * A single-node RabbitMQ container with the management plugin enabled.
  * Defaults to the image's own `guest`/`guest` credentials; call
  * `withUsername`/`withPassword` before `start()` to override either (sets
  * `RABBITMQ_DEFAULT_USER`/`RABBITMQ_DEFAULT_PASS`).
+ *
+ * No-arg construction floats to `rabbitmq:management`, not plain
+ * `rabbitmq:latest`: this module is built around the management plugin and
+ * its readiness check reads the plugin-count clause the management image
+ * prints on boot, and plain `latest` doesn't ship that plugin at all.
+ * Verified against `rabbitmq:4-management-alpine` — `management` carries no
+ * `-alpine` suffix, so it floats onto Debian rather than Alpine the same way
+ * the plain `latest` tag does elsewhere in this library.
  *
  * Readiness waits on the boot log line captured from a real
  * `rabbitmq:4-management-alpine` run: `Server startup complete; N plugins
@@ -34,14 +45,14 @@ export class RabbitMQContainer extends GenericContainer {
   private usernameState = "guest";
   private passwordState = "guest";
 
-  constructor(image = "rabbitmq:4-management-alpine") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(AMQP_PORT, MANAGEMENT_PORT).waitingFor(
       Wait.forLogMessage(".*Server startup complete.*"),
     );
   }
 
-  static override async start(image = "rabbitmq:4-management-alpine"): Promise<RabbitMQContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<RabbitMQContainer> {
     return (await new RabbitMQContainer(image).start()) as RabbitMQContainer;
   }
 

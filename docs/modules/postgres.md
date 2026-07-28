@@ -4,7 +4,7 @@ A single-node PostgreSQL container. Defaults to a `test`/`test`/`test`
 user/password/database trio so `connectionString` is usable with zero
 configuration.
 
-**Default image:** `postgres:18-alpine`
+**Default image:** `postgres:latest`
 **Exposed port:** `5432`
 **Wait strategy:** log message `"database system is ready to accept connections"`, **twice**
 
@@ -34,6 +34,15 @@ await client.end();
 
 ## Backend notes
 
+- **No-arg construction floats to `postgres:latest`.** Verified against
+  `postgres:18-alpine` — `latest` is Debian-based rather than Alpine, larger
+  to pull but functionally equivalent.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `postgres` (registry host, tag, and digest stripped). A
+  different repository throws `IncompatibleImageError` before any backend
+  call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("postgres")` for a
+  verified compatible fork or mirror.
 - **Why the wait strategy counts to two, not one.** The official entrypoint
   boots the server once to run init scripts, shuts it down, then starts it
   again for real — printing the readiness line both times. Waiting for the
@@ -46,4 +55,6 @@ await client.end();
   (`DOCKER_PG_LLVM_DEPS`) containing a literal tab character, which crashes
   microsandbox's VM builder before the guest ever boots. This module clears
   that variable by default — invisible on Docker, required on microsandbox.
-  Nothing you need to do.
+  Nothing you need to do. The override stays in place under the new
+  Debian-based default too: harmless where the problem tab doesn't exist,
+  required where it does.

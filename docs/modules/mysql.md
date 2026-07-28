@@ -4,7 +4,7 @@ A single-node MySQL container. Defaults to a `test`/`test`/`test`
 user/password/database trio (plus a `test` root password) so
 `connectionString` is usable with zero configuration.
 
-**Default image:** `mysql:8.4`
+**Default image:** `mysql:latest`
 **Exposed port:** `3306`
 **Wait strategy:** an anchored log-message regex — see below
 
@@ -32,6 +32,15 @@ await conn.end();
 ```
 
 ## Backend notes
+
+**No-arg construction floats to `mysql:latest`.** Verified against `mysql:8.4`,
+including the readiness regex and captured log excerpt below.
+
+**Compatibility check:** the constructor only accepts images whose
+repository is `mysql` (registry host, tag, and digest stripped). A different
+repository throws `IncompatibleImageError` before any backend call; override
+with `DockerImageName.parse(image).asCompatibleSubstituteFor("mysql")` for a
+verified compatible fork or mirror.
 
 **Why the wait regex is anchored, not a naive substring match.** MySQL's
 entrypoint boots `mysqld` twice — once as a throwaway "temp server" to run

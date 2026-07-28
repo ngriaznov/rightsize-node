@@ -1,6 +1,7 @@
 import * as net from "node:net";
 import { GenericContainer } from "../core/generic-container.js";
 import { ContainerLaunchError } from "../core/errors.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 import type { WaitStrategy, WaitTarget } from "../core/wait.js";
 
 const GUEST_PORT = 11211;
@@ -8,6 +9,8 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 250;
 const PROBE_TIMEOUT_MS = 1_000;
 const LOG_TAIL_LINES = 50;
+const EXPECTED_REPOSITORY = "memcached";
+const DEFAULT_IMAGE = "memcached:latest";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -99,14 +102,22 @@ export class MemcachedRespondsStrategy implements WaitStrategy {
   }
 }
 
-/** A single-node Memcached container, ready-checked with a protocol-level `version` probe. */
+/**
+ * A single-node Memcached container, ready-checked with a protocol-level
+ * `version` probe.
+ *
+ * No-arg construction floats to `memcached:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `memcached:1.6-alpine`). `latest` is Debian-based rather than Alpine —
+ * functionally equivalent, larger to pull.
+ */
 export class MemcachedContainer extends GenericContainer {
-  constructor(image = "memcached:1.6-alpine") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(GUEST_PORT).waitingFor(new MemcachedRespondsStrategy());
   }
 
-  static override async start(image = "memcached:1.6-alpine"): Promise<MemcachedContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<MemcachedContainer> {
     return (await new MemcachedContainer(image).start()) as MemcachedContainer;
   }
 

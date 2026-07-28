@@ -1,9 +1,17 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const GUEST_PORT = 27017;
-const REPLICA_SET_TIMEOUT_MS = 60_000;
+// 180s, not the 60s this module used while it pinned `mongo:8.0`. A loaded Windows CI
+// runner was observed failing `rs.initiate` at the 60s mark against the floating default
+// (`mongo:latest`, 8.2.12 at the time), on a run whose whole suite took 28 minutes. This
+// matches the budget the MySQL and ClickHouse modules already carry for the same reason:
+// a first-boot sequence that is comfortable locally and marginal on a contended runner.
+const REPLICA_SET_TIMEOUT_MS = 180_000;
 const POLL_INTERVAL_MS = 500;
+const EXPECTED_REPOSITORY = "mongo";
+const DEFAULT_IMAGE = "mongo:latest";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -15,16 +23,20 @@ function sleep(ms: number): Promise<void> {
  * initiates the replica set and waits for a primary to be elected before
  * `start()` returns, so `connectionString` is always usable immediately
  * after the container boots.
+ *
+ * No-arg construction floats to `mongo:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `mongo:8.0`).
  */
 export class MongoDBContainer extends GenericContainer {
-  constructor(image = "mongo:8.0") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(GUEST_PORT)
       .withCommand("mongod", "--replSet", "docker-rs", "--bind_ip_all")
       .waitingFor(Wait.forListeningPort());
   }
 
-  static override async start(image = "mongo:8.0"): Promise<MongoDBContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<MongoDBContainer> {
     return (await new MongoDBContainer(image).start()) as MongoDBContainer;
   }
 

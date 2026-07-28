@@ -1,21 +1,31 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 import type { ContainerSpec } from "../core/model.js";
 
 const GUEST_PORT = 8529;
+const EXPECTED_REPOSITORY = "arangodb";
+const DEFAULT_IMAGE = "arangodb:latest";
 
-/** A single-node ArangoDB container. Auth is disabled by default; see `withRootPassword` to enable it. */
+/**
+ * A single-node ArangoDB container. Auth is disabled by default; see
+ * `withRootPassword` to enable it.
+ *
+ * No-arg construction floats to `arangodb:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `arangodb:3.11`).
+ */
 export class ArangoContainer extends GenericContainer {
   private rootPassword: string | undefined;
 
-  constructor(image = "arangodb:3.11") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(GUEST_PORT)
       .withEnv("ARANGO_NO_AUTH", "1")
       .waitingFor(Wait.forHttp("/_api/version").forPort(GUEST_PORT).forStatusCode(200));
   }
 
-  static override async start(image = "arangodb:3.11"): Promise<ArangoContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<ArangoContainer> {
     return (await new ArangoContainer(image).start()) as ArangoContainer;
   }
 

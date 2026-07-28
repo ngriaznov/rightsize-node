@@ -4,7 +4,7 @@ A single-node MariaDB container, mirroring [MySQL](/modules/mysql)'s builder
 shape. MariaDB speaks the MySQL wire protocol, so `connectionString` uses the
 same `mysql://` scheme and any MySQL client works against it unmodified.
 
-**Default image:** `mariadb:11.4`
+**Default image:** `mariadb:latest`
 **Exposed port:** `3306`
 **Wait strategy:** an anchored log-message regex, following MySQL's precedent
 
@@ -33,9 +33,17 @@ await conn.end();
 
 ## Backend notes
 
-Like MySQL, MariaDB's entrypoint boots the server twice (a throwaway "temp
-server" for init scripts, then for real), and this module's wait regex is
-anchored on the real server's line shape for the same reason MySQL's is —
-see [the MySQL module page](/modules/mysql#backend-notes) for the full
-explanation. No memory-limit override is needed; MariaDB's default footprint
-fits microsandbox's default microVM RAM comfortably.
+- **No-arg construction floats to `mariadb:latest`.** Verified against
+  `mariadb:11.4`, including the readiness regex and captured log excerpt.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `mariadb` (registry host, tag, and digest stripped). A
+  different repository throws `IncompatibleImageError` before any backend
+  call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("mariadb")` for a
+  verified compatible fork or mirror.
+- Like MySQL, MariaDB's entrypoint boots the server twice (a throwaway "temp
+  server" for init scripts, then for real), and this module's wait regex is
+  anchored on the real server's line shape for the same reason MySQL's is —
+  see [the MySQL module page](/modules/mysql#backend-notes) for the full
+  explanation. No memory-limit override is needed; MariaDB's default
+  footprint fits microsandbox's default microVM RAM comfortably.

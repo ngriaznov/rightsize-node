@@ -1,9 +1,12 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const CONTROLLER_PORT = 9000;
 const BROKER_PORT = 8000;
 const STARTUP_TIMEOUT_MS = 180_000;
+const EXPECTED_REPOSITORY = "apachepinot/pinot";
+const DEFAULT_IMAGE = "apachepinot/pinot:latest";
 
 /**
  * A single-container Apache Pinot QuickStart cluster (controller + broker +
@@ -24,10 +27,14 @@ const STARTUP_TIMEOUT_MS = 180_000;
  *   under any load; 4096MB is the first limit that boots AND stays stable
  *   (~74% steady-state utilization). This is a hard floor, not a tunable
  *   default — do not lower it.
+ *
+ * No-arg construction floats to `apachepinot/pinot:latest`, so the version
+ * tracks upstream rather than this library's release cycle (verified
+ * against `apachepinot/pinot:1.5.1`, including both facts above).
  */
 export class PinotContainer extends GenericContainer {
-  constructor(image = "apachepinot/pinot:1.5.1") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(CONTROLLER_PORT, BROKER_PORT)
       .withCommand("QuickStart", "-type", "EMPTY")
       .withMemoryLimit(4096)
@@ -37,7 +44,7 @@ export class PinotContainer extends GenericContainer {
       .waitingFor(Wait.forHttp("/health").forPort(CONTROLLER_PORT).withStartupTimeout(STARTUP_TIMEOUT_MS));
   }
 
-  static override async start(image = "apachepinot/pinot:1.5.1"): Promise<PinotContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<PinotContainer> {
     return (await new PinotContainer(image).start()) as PinotContainer;
   }
 

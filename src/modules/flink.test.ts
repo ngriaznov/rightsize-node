@@ -1,6 +1,7 @@
 import { describe, it, assert } from "../../test/harness.js";
 import { FlinkContainer } from "./flink.js";
-import { UnsupportedByBackendError } from "../core/errors.js";
+import { UnsupportedByBackendError, IncompatibleImageError } from "../core/errors.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 import { FakeModuleBackend, instantReadyWait } from "./test-fake-backend.js";
 
 /** A fake backend whose `name` reads "microsandbox" — proves the msb guard branches on the real resolved backend name. */
@@ -14,7 +15,7 @@ describe("FlinkContainer", () => {
     const flink = new FlinkContainer().withBackend(backend).waitingFor(instantReadyWait());
     await flink.start();
     try {
-      assert.equal(backend.lastSpec?.image, "flink:1.20.5");
+      assert.equal(backend.lastSpec?.image, "flink:latest");
       assert.deepEqual(backend.lastSpec?.ports.map((p) => p.guestPort), [6123, 8081]);
       assert.deepEqual(backend.lastSpec?.command, ["jobmanager"]);
       const env = new Map(backend.lastSpec?.env ?? []);
@@ -117,6 +118,56 @@ describe("FlinkContainer", () => {
     await flink.start();
     try {
       assert.equal(backend.lastSpec?.image, "flink:1.20.5-scala_2.12");
+    } finally {
+      await flink.stop();
+    }
+  });
+
+  it("accepts a DockerImageName instance whose repository matches", async () => {
+    const backend = new FakeModuleBackend();
+    const image = DockerImageName.parse("flink:1.20.5-scala_2.12");
+    const flink = new FlinkContainer(image).withBackend(backend).waitingFor(instantReadyWait());
+    await flink.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "flink:1.20.5-scala_2.12");
+    } finally {
+      await flink.stop();
+    }
+  });
+
+  it("throws IncompatibleImageError before start() for a mismatched repository", () => {
+    try {
+      new FlinkContainer("mongo:latest");
+      assert.ok(false, "expected the constructor to throw");
+    } catch (err) {
+      assert.ok(err instanceof IncompatibleImageError);
+      assert.equal((err as IncompatibleImageError).suppliedRepository, "mongo");
+      assert.equal((err as IncompatibleImageError).expectedRepository, "flink");
+    }
+  });
+
+  it("accepts a mismatched image explicitly marked asCompatibleSubstituteFor('flink')", async () => {
+    const backend = new FakeModuleBackend();
+    const substitute = DockerImageName.parse("mycorp/flink-hardened:1.20").asCompatibleSubstituteFor("flink");
+    const flink = new FlinkContainer(substitute).withBackend(backend).waitingFor(instantReadyWait());
+    await flink.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mycorp/flink-hardened:1.20");
+    } finally {
+      await flink.stop();
+    }
+  });
+
+  it("withTaskManager() companion resolves the substituted image, not the raw DockerImageName", async () => {
+    const backend = new FakeModuleBackend();
+    const substitute = DockerImageName.parse("mycorp/flink-hardened:1.20").asCompatibleSubstituteFor("flink");
+    const flink = new FlinkContainer(substitute).withBackend(backend).waitingFor(instantReadyWait()).withTaskManager();
+    await flink.start();
+    try {
+      // lastSpec reflects the TaskManager companion's create() call (the most
+      // recent one) — proving containerIsStarted() constructs it from the
+      // resolved raw image string, not from a DockerImageName instance.
+      assert.equal(backend.lastSpec?.image, "mycorp/flink-hardened:1.20");
     } finally {
       await flink.stop();
     }

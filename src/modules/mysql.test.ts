@@ -1,6 +1,8 @@
 import { describe, it, assert } from "../../test/harness.js";
 import { MySQLContainer } from "./mysql.js";
 import { FakeModuleBackend, instantReadyWait } from "./test-fake-backend.js";
+import { DockerImageName } from "../core/docker-image-name.js";
+import { IncompatibleImageError } from "../core/errors.js";
 
 describe("MySQLContainer", () => {
   it("exposes port 3306 with test/test/test defaults plus MYSQL_ROOT_PASSWORD", async () => {
@@ -8,7 +10,7 @@ describe("MySQLContainer", () => {
     const mysql = new MySQLContainer().withBackend(backend).waitingFor(instantReadyWait());
     await mysql.start();
     try {
-      assert.equal(backend.lastSpec?.image, "mysql:8.4");
+      assert.equal(backend.lastSpec?.image, "mysql:latest");
       assert.deepEqual(backend.lastSpec?.ports.map((p) => p.guestPort), [3306]);
       const env = new Map(backend.lastSpec?.env ?? []);
       assert.equal(env.get("MYSQL_USER"), "test");
@@ -60,6 +62,41 @@ describe("MySQLContainer", () => {
     await mysql.start();
     try {
       assert.equal(backend.lastSpec?.image, "mysql:8.4.10");
+    } finally {
+      await mysql.stop();
+    }
+  });
+
+  it("accepts a DockerImageName instance whose repository matches", async () => {
+    const backend = new FakeModuleBackend();
+    const image = DockerImageName.parse("mysql:8.4.10");
+    const mysql = new MySQLContainer(image).withBackend(backend).waitingFor(instantReadyWait());
+    await mysql.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mysql:8.4.10");
+    } finally {
+      await mysql.stop();
+    }
+  });
+
+  it("throws IncompatibleImageError before start() for a mismatched repository", () => {
+    try {
+      new MySQLContainer("mariadb:latest");
+      assert.ok(false, "expected the constructor to throw");
+    } catch (err) {
+      assert.ok(err instanceof IncompatibleImageError);
+      assert.equal((err as IncompatibleImageError).suppliedRepository, "mariadb");
+      assert.equal((err as IncompatibleImageError).expectedRepository, "mysql");
+    }
+  });
+
+  it("accepts a mismatched image explicitly marked asCompatibleSubstituteFor('mysql')", async () => {
+    const backend = new FakeModuleBackend();
+    const substitute = DockerImageName.parse("mycorp/mysql-hardened:8.4").asCompatibleSubstituteFor("mysql");
+    const mysql = new MySQLContainer(substitute).withBackend(backend).waitingFor(instantReadyWait());
+    await mysql.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mycorp/mysql-hardened:8.4");
     } finally {
       await mysql.stop();
     }

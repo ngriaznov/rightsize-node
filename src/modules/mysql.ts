@@ -1,7 +1,10 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const GUEST_PORT = 3306;
+const EXPECTED_REPOSITORY = "mysql";
+const DEFAULT_IMAGE = "mysql:latest";
 
 /**
  * A single-node MySQL container. Defaults to a `test`/`test`/`test`
@@ -40,14 +43,19 @@ const GUEST_PORT = 3306;
  * 3306` with a trailing non-digit-or-end boundary, so it cannot match
  * `33060`, and `times=1` is then unambiguous (that exact line appears once,
  * only after the real server is up).
+ *
+ * No-arg construction floats to `mysql:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `mysql:8.4`, including the readiness regex above and the log excerpt it
+ * was captured from).
  */
 export class MySQLContainer extends GenericContainer {
   private usernameState = "test";
   private passwordState = "test";
   private databaseState = "test";
 
-  constructor(image = "mysql:8.4") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(GUEST_PORT)
       .withEnv("MYSQL_USER", this.usernameState)
       .withEnv("MYSQL_PASSWORD", this.passwordState)
@@ -70,7 +78,7 @@ export class MySQLContainer extends GenericContainer {
     // microVM RAM, so no module-level memory floor is warranted here.
   }
 
-  static override async start(image = "mysql:8.4"): Promise<MySQLContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<MySQLContainer> {
     return (await new MySQLContainer(image).start()) as MySQLContainer;
   }
 

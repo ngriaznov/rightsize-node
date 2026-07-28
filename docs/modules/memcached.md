@@ -7,7 +7,7 @@ bespoke `WaitStrategy` (`MemcachedRespondsStrategy`) that sends a `version`
 command over the wire and requires a real `VERSION` reply before declaring
 readiness.
 
-**Default image:** `memcached:1.6-alpine`
+**Default image:** `memcached:latest`
 **Exposed port:** `11211`
 
 | Member | Returns |
@@ -35,7 +35,17 @@ socket.end();
 
 ## Backend notes
 
-None specific to this module — the protocol-level wait strategy exists
-precisely so this container is trustworthy readiness-wise on either backend,
-sidestepping the userland-proxy-accepts-early behavior both backends share
-for a bare port wait (see [Wait strategies](/guide/wait-strategies)).
+- **No-arg construction floats to `memcached:latest`.** Verified against
+  `memcached:1.6-alpine` — `latest` is Debian-based rather than Alpine,
+  larger to pull but functionally equivalent.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `memcached` (registry host, tag, and digest stripped). A
+  different repository throws `IncompatibleImageError` before any backend
+  call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("memcached")` for a
+  verified compatible fork or mirror.
+- Otherwise nothing specific to this module — the protocol-level wait
+  strategy exists precisely so this container is trustworthy readiness-wise
+  on either backend, sidestepping the userland-proxy-accepts-early behavior
+  both backends share for a bare port wait (see
+  [Wait strategies](/guide/wait-strategies)).

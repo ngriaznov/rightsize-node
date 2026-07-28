@@ -1,6 +1,8 @@
 import { describe, it, assert } from "../../test/harness.js";
 import { Neo4jContainer } from "./neo4j.js";
 import { FakeModuleBackend, instantReadyWait } from "./test-fake-backend.js";
+import { DockerImageName } from "../core/docker-image-name.js";
+import { IncompatibleImageError } from "../core/errors.js";
 
 describe("Neo4jContainer", () => {
   it("exposes HTTP (7474) and bolt (7687) ports with a rightsize-test default password", async () => {
@@ -8,7 +10,7 @@ describe("Neo4jContainer", () => {
     const neo4j = new Neo4jContainer().withBackend(backend).waitingFor(instantReadyWait());
     await neo4j.start();
     try {
-      assert.equal(backend.lastSpec?.image, "neo4j:5-community");
+      assert.equal(backend.lastSpec?.image, "neo4j:latest");
       assert.deepEqual(backend.lastSpec?.ports.map((p) => p.guestPort), [7474, 7687]);
       const env = new Map(backend.lastSpec?.env ?? []);
       assert.equal(env.get("NEO4J_AUTH"), "neo4j/rightsize-test");
@@ -64,6 +66,41 @@ describe("Neo4jContainer", () => {
     await neo4j.start();
     try {
       assert.equal(backend.lastSpec?.image, "neo4j:5.26-community");
+    } finally {
+      await neo4j.stop();
+    }
+  });
+
+  it("accepts a DockerImageName instance whose repository matches", async () => {
+    const backend = new FakeModuleBackend();
+    const image = DockerImageName.parse("neo4j:5.26-community");
+    const neo4j = new Neo4jContainer(image).withBackend(backend).waitingFor(instantReadyWait());
+    await neo4j.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "neo4j:5.26-community");
+    } finally {
+      await neo4j.stop();
+    }
+  });
+
+  it("throws IncompatibleImageError before start() for a mismatched repository", () => {
+    try {
+      new Neo4jContainer("mongo:latest");
+      assert.ok(false, "expected the constructor to throw");
+    } catch (err) {
+      assert.ok(err instanceof IncompatibleImageError);
+      assert.equal((err as IncompatibleImageError).suppliedRepository, "mongo");
+      assert.equal((err as IncompatibleImageError).expectedRepository, "neo4j");
+    }
+  });
+
+  it("accepts a mismatched image explicitly marked asCompatibleSubstituteFor('neo4j')", async () => {
+    const backend = new FakeModuleBackend();
+    const substitute = DockerImageName.parse("mycorp/neo4j-hardened:5.26").asCompatibleSubstituteFor("neo4j");
+    const neo4j = new Neo4jContainer(substitute).withBackend(backend).waitingFor(instantReadyWait());
+    await neo4j.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mycorp/neo4j-hardened:5.26");
     } finally {
       await neo4j.stop();
     }

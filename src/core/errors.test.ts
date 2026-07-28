@@ -7,6 +7,7 @@ import {
   ProvisionError,
   ReuseWithNetworkError,
   IsolationRequiredError,
+  IncompatibleImageError,
 } from "./errors.js";
 import type { ContainerSpec, FileMount } from "./model.js";
 
@@ -115,6 +116,19 @@ describe("IsolationRequiredError", () => {
     assert.match(err.message, /withRequireIsolation\(\)/);
     assert.match(err.message, /'docker'/);
     assert.match(err.message, /RIGHTSIZE_BACKEND=microsandbox/);
+  });
+});
+
+describe("IncompatibleImageError", () => {
+  it("is an Error with the right name, names both repositories, and gives the asCompatibleSubstituteFor remedy", () => {
+    const err = new IncompatibleImageError("mysql", "postgres");
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "IncompatibleImageError");
+    assert.equal(err.suppliedRepository, "mysql");
+    assert.equal(err.expectedRepository, "postgres");
+    assert.match(err.message, /'mysql'/);
+    assert.match(err.message, /'postgres'/);
+    assert.match(err.message, /asCompatibleSubstituteFor\("postgres"\)/);
   });
 });
 

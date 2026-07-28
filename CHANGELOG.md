@@ -5,7 +5,43 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`DockerImageName`** (`src/core/docker-image-name.ts`) — a parsed
+  `[registry/]repository[:tag][@digest]` image reference, built via
+  `DockerImageName.parse(string)`. Every module constructor now accepts
+  `string | DockerImageName` and resolves it through `requireCompatible`,
+  which checks the supplied image's repository against the one the module
+  declares before any port, wait-strategy, or backend work runs, throwing the
+  new typed `IncompatibleImageError` on a mismatch rather than degrading into
+  a bare wait-strategy timeout. `DockerImageName.asCompatibleSubstituteFor(string)`
+  is the escape hatch for a private mirror, a hardened rebuild, or a rename.
+  Registry-host stripping follows the Docker convention: the first path
+  segment is a registry only if it contains a `.` or a `:`, or is exactly
+  `localhost`.
+- **`ElasticsearchContainer`** — a single-node Elasticsearch container.
+  Elastic publishes no floating tag for this image
+  (`elasticsearch:latest`/`:9`/`:8` are all `404` on Docker Hub), so this
+  module has no default parameter — an explicit image is required. Readiness
+  checks plain connectivity rather than cluster health, since a single
+  node's health stays `yellow` forever (no peer to place replica shards on).
+- **`QdrantContainer`** — a single-node Qdrant vector database container,
+  defaulting to `qdrant/qdrant:latest`. Readiness is Qdrant's own `/readyz`
+  probe, which answered on the first poll in direct verification; no memory
+  limit is needed.
+
+### Changed
+
+- **Every one of the 21 pre-existing modules now defaults to a floating
+  image reference** instead of a pinned version, and checks any explicitly
+  supplied image against the repository it understands via `DockerImageName`
+  (see above). Most float to `<repository>:latest`; `RabbitMQContainer`
+  floats to `rabbitmq:management` instead, since plain `latest` lacks the
+  management plugin the module is built around. Redis, Valkey, Postgres, and
+  Memcached move from a pinned Alpine variant to the Debian-based `latest`.
+  No env var, port, wait strategy, memory limit, or command changed — each
+  module's own doc comment and docs page states which pinned version its
+  readiness signal, memory floor, and timing facts were verified against.
 
 ## [0.5.0] - 2026-07-25
 

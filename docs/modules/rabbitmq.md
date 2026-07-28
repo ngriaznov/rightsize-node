@@ -3,7 +3,7 @@
 A single-node RabbitMQ container with the management plugin enabled. Defaults
 to the image's own `guest`/`guest` credentials.
 
-**Default image:** `rabbitmq:4-management-alpine`
+**Default image:** `rabbitmq:management`
 **Exposed ports:** `5672` (AMQP), `15672` (management HTTP API)
 **Wait strategy:** log message `".*Server startup complete.*"`
 
@@ -33,7 +33,19 @@ await conn.close();
 
 ## Backend notes
 
-**RabbitMQ 4.x rejects declaring a transient (non-durable), non-exclusive
-queue** — a behavior change from 3.x. Declare durable or exclusive queues, as
-in the example above; a transient shared queue now errors at declare time,
-independent of which backend you're running on.
+- **No-arg construction floats to `rabbitmq:management`, not plain
+  `rabbitmq:latest`.** This module depends on the management plugin, and
+  plain `latest` doesn't ship it — verified against
+  `rabbitmq:4-management-alpine`; the `management` tag carries no `-alpine`
+  suffix, so it floats onto Debian rather than Alpine the same way this
+  library's other `latest` defaults do.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `rabbitmq` (registry host, tag, and digest stripped). A
+  different repository throws `IncompatibleImageError` before any backend
+  call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("rabbitmq")` for a
+  verified compatible fork or mirror.
+- **RabbitMQ 4.x rejects declaring a transient (non-durable), non-exclusive
+  queue** — a behavior change from 3.x. Declare durable or exclusive queues,
+  as in the example above; a transient shared queue now errors at declare
+  time, independent of which backend you're running on.

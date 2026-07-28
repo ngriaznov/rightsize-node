@@ -2,7 +2,7 @@
 
 A single-node Cassandra container.
 
-**Default image:** `cassandra:5.0.8`
+**Default image:** `cassandra:latest`
 **Exposed port:** `9042`
 **Wait strategy:** `Wait.forLogMessage(".*Starting listening for CQL clients.*", 1)`, 300s startup timeout
 **Memory:** `withMemoryLimit(2560)`, alongside a heap sized down with
@@ -36,6 +36,17 @@ console.log(result.stdout); // contains "hello"
 
 ## Backend notes
 
+- **No-arg construction floats to `cassandra:latest`.** Verified against
+  `cassandra:5.0.8`, including every fact on this page. The `GPG_KEYS`
+  override below stays unconditional under the floating default too — a
+  no-op against a build that never baked the problem tab, required against
+  one that does.
+- **Compatibility check:** the constructor only accepts images whose
+  repository is `cassandra` (registry host, tag, and digest stripped). A
+  different repository throws `IncompatibleImageError` before any backend
+  call; override with
+  `DockerImageName.parse(image).asCompatibleSubstituteFor("cassandra")` for a
+  verified compatible fork or mirror.
 - **`GPG_KEYS` must be overridden — this is the difference between booting
   and aborting.** `cassandra:5.0.8`'s baked-in `GPG_KEYS` build arg contains
   a literal TAB character, and msb 0.6.6 panics on any image whose baked env

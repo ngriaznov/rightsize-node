@@ -1,9 +1,12 @@
 import { GenericContainer } from "../core/generic-container.js";
 import { Wait } from "../core/wait.js";
+import { DockerImageName } from "../core/docker-image-name.js";
 
 const HTTP_PORT = 7474;
 const BOLT_PORT = 7687;
 const DEFAULT_PASSWORD = "rightsize-test";
+const EXPECTED_REPOSITORY = "neo4j";
+const DEFAULT_IMAGE = "neo4j:latest";
 
 /**
  * A single-node Neo4j Community container, queried over its HTTP Cypher
@@ -47,19 +50,23 @@ const DEFAULT_PASSWORD = "rightsize-test";
  * no memory cap sits at ~430MiB RSS, just over that default budget.
  * `withMemoryLimit(1024)` is this module's default (verified: boots clean,
  * the HTTP Cypher endpoint answers well within the startup timeout).
+ *
+ * No-arg construction floats to `neo4j:latest`, so the version tracks
+ * upstream rather than this library's release cycle (verified against
+ * `neo4j:5-community`, including every fact above).
  */
 export class Neo4jContainer extends GenericContainer {
   private passwordState = DEFAULT_PASSWORD;
 
-  constructor(image = "neo4j:5-community") {
-    super(image);
+  constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
+    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(HTTP_PORT, BOLT_PORT)
       .withEnv("NEO4J_AUTH", `neo4j/${this.passwordState}`)
       .withMemoryLimit(1024)
       .waitingFor(Wait.forLogMessage(".*Started\\..*", 1).withStartupTimeout(120_000));
   }
 
-  static override async start(image = "neo4j:5-community"): Promise<Neo4jContainer> {
+  static override async start(image: string | DockerImageName = DEFAULT_IMAGE): Promise<Neo4jContainer> {
     return (await new Neo4jContainer(image).start()) as Neo4jContainer;
   }
 

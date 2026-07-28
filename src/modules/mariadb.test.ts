@@ -1,6 +1,8 @@
 import { describe, it, assert } from "../../test/harness.js";
 import { MariaDBContainer } from "./mariadb.js";
 import { FakeModuleBackend, instantReadyWait } from "./test-fake-backend.js";
+import { DockerImageName } from "../core/docker-image-name.js";
+import { IncompatibleImageError } from "../core/errors.js";
 
 describe("MariaDBContainer", () => {
   it("exposes port 3306 with test/test/test defaults plus MARIADB_ROOT_PASSWORD", async () => {
@@ -8,7 +10,7 @@ describe("MariaDBContainer", () => {
     const mariadb = new MariaDBContainer().withBackend(backend).waitingFor(instantReadyWait());
     await mariadb.start();
     try {
-      assert.equal(backend.lastSpec?.image, "mariadb:11.4");
+      assert.equal(backend.lastSpec?.image, "mariadb:latest");
       assert.deepEqual(backend.lastSpec?.ports.map((p) => p.guestPort), [3306]);
       const env = new Map(backend.lastSpec?.env ?? []);
       assert.equal(env.get("MARIADB_USER"), "test");
@@ -60,6 +62,41 @@ describe("MariaDBContainer", () => {
     await mariadb.start();
     try {
       assert.equal(backend.lastSpec?.image, "mariadb:11.4.3");
+    } finally {
+      await mariadb.stop();
+    }
+  });
+
+  it("accepts a DockerImageName instance whose repository matches", async () => {
+    const backend = new FakeModuleBackend();
+    const image = DockerImageName.parse("mariadb:11.4.3");
+    const mariadb = new MariaDBContainer(image).withBackend(backend).waitingFor(instantReadyWait());
+    await mariadb.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mariadb:11.4.3");
+    } finally {
+      await mariadb.stop();
+    }
+  });
+
+  it("throws IncompatibleImageError before start() for a mismatched repository", () => {
+    try {
+      new MariaDBContainer("mysql:latest");
+      assert.ok(false, "expected the constructor to throw");
+    } catch (err) {
+      assert.ok(err instanceof IncompatibleImageError);
+      assert.equal((err as IncompatibleImageError).suppliedRepository, "mysql");
+      assert.equal((err as IncompatibleImageError).expectedRepository, "mariadb");
+    }
+  });
+
+  it("accepts a mismatched image explicitly marked asCompatibleSubstituteFor('mariadb')", async () => {
+    const backend = new FakeModuleBackend();
+    const substitute = DockerImageName.parse("mycorp/mariadb-hardened:11.4").asCompatibleSubstituteFor("mariadb");
+    const mariadb = new MariaDBContainer(substitute).withBackend(backend).waitingFor(instantReadyWait());
+    await mariadb.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mycorp/mariadb-hardened:11.4");
     } finally {
       await mariadb.stop();
     }

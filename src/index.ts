@@ -5,10 +5,12 @@
  * (the builder + async-dispose lifecycle guard), `Network`, the `Wait`
  * strategies, `FreePorts`, `RunId`, `Checkpoints` (rediscovering named
  * checkpoints across processes), the `SandboxBackend`/`BackendProvider`
- * contracts plus the `registerBackend` registry, and the typed error
- * classes. This module depends on no backend — import `rightsize/backend-msb`
- * and/or `rightsize/backend-docker` to register one, or `rightsize/modules`
- * for the twenty-one preconfigured containers built on top of this surface.
+ * contracts plus the `registerBackend` registry, `DockerImageName` (image-
+ * reference parsing plus the Testcontainers-style compatibility check), and
+ * the typed error classes. This module depends on no backend — import
+ * `rightsize/backend-msb` and/or `rightsize/backend-docker` to register one,
+ * or `rightsize/modules` for the twenty-three preconfigured containers built
+ * on top of this surface.
  *
  * @packageDocumentation
  */
@@ -27,7 +29,9 @@ export {
   InvalidCheckpointNameError,
   CheckpointArtifactMissingError,
   MalformedCheckpointArchiveError,
+  IncompatibleImageError,
 } from "./core/errors.js";
+export { DockerImageName } from "./core/docker-image-name.js";
 export type { PortBinding, FileMount, ExecResult, ContainerSpec, Checkpoint } from "./core/model.js";
 export type {
   NetworkLink,

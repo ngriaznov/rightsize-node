@@ -1,6 +1,8 @@
 import { describe, it, assert } from "../../test/harness.js";
 import { MongoDBContainer } from "./mongodb.js";
 import { FakeModuleBackend, instantReadyWait } from "./test-fake-backend.js";
+import { DockerImageName } from "../core/docker-image-name.js";
+import { IncompatibleImageError } from "../core/errors.js";
 import type { ExecResult } from "../core/model.js";
 
 /** A fake exec that reports rs.initiate and db.hello() as already satisfied on the first call, so containerIsStarted's poll resolves immediately instead of racing the module's own 60s deadline. */
@@ -21,7 +23,7 @@ describe("MongoDBContainer", () => {
     const mongo = new MongoDBContainer().withBackend(backend).waitingFor(instantReadyWait());
     await mongo.start();
     try {
-      assert.equal(backend.lastSpec?.image, "mongo:8.0");
+      assert.equal(backend.lastSpec?.image, "mongo:latest");
       assert.deepEqual(backend.lastSpec?.ports.map((p) => p.guestPort), [27017]);
       assert.deepEqual(backend.lastSpec?.command, ["mongod", "--replSet", "docker-rs", "--bind_ip_all"]);
     } finally {
@@ -88,4 +90,40 @@ describe("MongoDBContainer", () => {
     }
   });
 
+  it("accepts a DockerImageName instance whose repository matches", async () => {
+    const backend = new FakeModuleBackend();
+    backend.execImpl = instantPrimaryExec();
+    const image = DockerImageName.parse("mongo:8.2.3");
+    const mongo = new MongoDBContainer(image).withBackend(backend).waitingFor(instantReadyWait());
+    await mongo.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mongo:8.2.3");
+    } finally {
+      await mongo.stop();
+    }
+  });
+
+  it("throws IncompatibleImageError before start() for a mismatched repository", () => {
+    try {
+      new MongoDBContainer("redis:latest");
+      assert.ok(false, "expected the constructor to throw");
+    } catch (err) {
+      assert.ok(err instanceof IncompatibleImageError);
+      assert.equal((err as IncompatibleImageError).suppliedRepository, "redis");
+      assert.equal((err as IncompatibleImageError).expectedRepository, "mongo");
+    }
+  });
+
+  it("accepts a mismatched image explicitly marked asCompatibleSubstituteFor('mongo')", async () => {
+    const backend = new FakeModuleBackend();
+    backend.execImpl = instantPrimaryExec();
+    const substitute = DockerImageName.parse("mycorp/mongo-hardened:8.0").asCompatibleSubstituteFor("mongo");
+    const mongo = new MongoDBContainer(substitute).withBackend(backend).waitingFor(instantReadyWait());
+    await mongo.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "mycorp/mongo-hardened:8.0");
+    } finally {
+      await mongo.stop();
+    }
+  });
 });

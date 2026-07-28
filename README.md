@@ -62,7 +62,7 @@ import "rightsize/backend-msb";
 import "rightsize/backend-docker";
 ```
 
-Drive any image directly with `GenericContainer`, or use one of twenty-one
+Drive any image directly with `GenericContainer`, or use one of twenty-three
 preconfigured modules:
 
 ```ts
@@ -108,12 +108,21 @@ a `GenericContainer` subclass, so the fluent builders (`withEnv`,
 | `FlinkContainer` | `restUrl`; `withTaskManager()` for a full session cluster — **Docker only**¹ |
 | `MinIOContainer` | `endpointUrl`, `rootUser`, `rootPassword`; `withRootUser`/`withRootPassword(...)` — S3-compatible object store |
 | `CassandraContainer` | `contactPoint`, `cqlPort`, `localDatacenter` |
+| `ElasticsearchContainer` | `restUrl` — no no-arg constructor, Elastic publishes no floating tag; an explicit image is required |
+| `QdrantContainer` | `restUrl` — vector search engine |
 
 Some modules raise a memory floor for their image (`withMemoryLimit`):
 heavyweight JVM images - Spring Cloud Config, Keycloak, Neo4j, Flink
-(1024 MB), Cassandra (2560 MB) - and Pinot's multi-JVM QuickStart cluster
-(4096 MB) - need more than the microVM default. That's baked into the
-module; you don't set it.
+(1024 MB), Cassandra and Elasticsearch (2560 MB each) - and Pinot's
+multi-JVM QuickStart cluster (4096 MB) - need more than the microVM
+default. That's baked into the module; you don't set it.
+
+Every module here also accepts a `DockerImageName` in place of a plain
+string, and checks the supplied image's repository against the one it
+declares — a mismatch throws `IncompatibleImageError` before any backend
+call, with an `asCompatibleSubstituteFor(...)` escape hatch for a verified
+compatible fork or mirror. See [Image compatibility](https://ngriaznov.github.io/rightsize-node/modules/#image-compatibility).
+
 Every module's page under [`docs/modules/`](https://ngriaznov.github.io/rightsize-node/modules/)
 documents its exact image tag, wait strategy, and the measured reasoning
 behind these choices.
