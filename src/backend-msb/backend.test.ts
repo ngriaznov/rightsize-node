@@ -428,8 +428,8 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     );
     assert.deepEqual(
       cycle[3]?.args,
-      ["run", "--name", handle.id, "-p", "15999:80", "-e", "FOO=bar", "--snapshot", "rz-ckpt-abcdef012345"],
-      "expected the reboot's run to carry --snapshot <ref> plus every other flag from the original spec",
+      ["run", "--name", handle.id, "-p", "15999:80", "-e", "FOO=bar", "--from-snapshot", "rz-ckpt-abcdef012345"],
+      "expected the reboot's run to carry --from-snapshot <ref> plus every other flag from the original spec",
     );
 
     await backend.stop(handle);
@@ -601,7 +601,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
-  it("exportCheckpoint drives msb snapshot export <ref> <dest>, writing the payload file", async () => {
+  it("exportCheckpoint drives msb snapshot save <ref> <dest>, writing the payload file", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -618,7 +618,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
 
       const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
       const exportCall = state.callLog.find((c) => c.cmd === "snapshotExport");
-      assert.deepEqual(exportCall?.args, ["snapshot", "export", "rz-ckpt-toexport", dest]);
+      assert.deepEqual(exportCall?.args, ["snapshot", "save", "rz-ckpt-toexport", dest]);
     } finally {
       await fs.rm(dest, { force: true });
     }
@@ -643,6 +643,41 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.match((thrown as Error).message, /rz-ckpt-never-existed/);
   });
 
+  it("exportCheckpoint does not salvage a staging file when the failure is not msb's Windows fsync bug", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // A staging file shaped exactly like the one msb leaves behind when its
+    // read-only fsync fails on Windows (see snapshot-save-fsync.ts), but a
+    // failure that has nothing to do with that bug. The salvage must not fire:
+    // msb's own error is what the caller needs, and the destination must not
+    // be conjured out of a file this export did not write.
+    //
+    // On this host it is the `process.platform === "win32"` gate that decides
+    // the outcome — the predicate and the salvage are never reached. What the
+    // salvage itself does with a non-matching failure is pinned directly, and
+    // platform-independently, by snapshot-save-fsync.test.ts.
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-export-nosalvage-test-"));
+    try {
+      const dest = path.join(dir, "artifact");
+      const staged = path.join(dir, ".artifact.tmp.8980.1785507050813959600");
+      await fs.writeFile(staged, "leftover-bytes");
+
+      let thrown: unknown;
+      try {
+        await backend.exportCheckpoint("rz-ckpt-never-existed", dest);
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+      assert.match((thrown as Error).message, /snapshot not found/);
+      assert.deepEqual(await fs.readdir(dir), [path.basename(staged)]);
+      assert.equal(await fs.readFile(staged, "utf8"), "leftover-bytes");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("importCheckpoint resolves the effective digest via snapshot list, treating a re-import of the same bytes as success", async () => {
     if (skipOnWindows()) {
       return;
@@ -662,7 +697,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       // The exact regression this backend once had: importCheckpoint
       // returning `msb snapshot list`'s full `sha256:<64hex>` digest field
       // instead of the digest-dir name. That full digest does not resolve
-      // as a snapshot ref at all (live-verified against msb 0.6.6), so
+      // as a snapshot ref at all (live-verified against msb 0.6.8), so
       // Checkpoints.find's hasCheckpoint probe on it would report the
       // freshly imported artifact absent and evict the registry entry.
       // Asserting hasCheckpoint(effectiveRef) here pins that the returned

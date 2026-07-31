@@ -145,7 +145,7 @@ export interface SandboxBackend {
    * Writes this checkpoint's backend payload to `destFile` — the artifact
    * step of `Checkpoints.exportTo`, byte-for-byte what the backend's own CLI
    * produces (docker: `docker save -o <destFile> <ref>`; microsandbox:
-   * `msb snapshot export <ref> <destFile>`, never `--with-image` — see the
+   * `msb snapshot save <ref> <destFile>`, never `--with-image` — see the
    * checkpoints guide for why). Only ever called once the generic layer has
    * already confirmed `ref` belongs to the ACTIVE backend and probed it
    * exists via `hasCheckpoint`; a failure surfaces the underlying tool's
@@ -156,7 +156,7 @@ export interface SandboxBackend {
    * Materializes an exported archive's backend payload from `srcFile` and
    * returns the EFFECTIVE ref to use from here on — not necessarily `ref`
    * itself. docker preserves the original tag on `docker load`, so its
-   * effective ref IS `ref`; microsandbox's `snapshot import` writes under a
+   * effective ref IS `ref`; microsandbox's `snapshot load` writes under a
    * digest-derived DIRECTORY NAME (e.g. `sha256-b9c0448ee9d54e33`) it never
    * lets the caller choose, so its effective ref is that directory name,
    * confirmed present via `snapshot list --format json` — never the full

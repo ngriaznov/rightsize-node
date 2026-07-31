@@ -45,18 +45,18 @@ export function parseSnapshotList(json: string): SnapshotListEntry[] {
 
 /**
  * Confirms an imported snapshot's digest-dir basename (e.g.
- * `sha256-b9c0448ee9d54e33`, parsed from `msb snapshot import`'s own
+ * `sha256-b9c0448ee9d54e33`, parsed from `msb snapshot load`'s own
  * output — see `snapshot-import.ts`) actually appears in `msb snapshot
  * list`: an entry whose `name` equals `digestDirName` outright, or whose
  * `artifact_path`'s basename does (`msb snapshot list` was verified to
  * report both shapes depending on how the snapshot was created).
  *
  * Returns `digestDirName` itself once confirmed present — NOT the entry's
- * `digest` field. Live-verified against msb 0.6.6: the full
+ * `digest` field. Live-verified against msb 0.6.8: the full
  * `sha256:<64hex>` digest does not resolve as a snapshot ref at all (`msb
  * snapshot inspect sha256:<full>` fails "snapshot not found" — msb treats
  * it as a literal path). Only the digest-dir name resolves for
- * `inspect`/`rm`/`run --snapshot`, so it — not the `digest` field — is the
+ * `inspect`/`rm`/`run --from-snapshot`, so it — not the `digest` field — is the
  * effective ref `importCheckpoint` must hand back. `undefined` means no
  * entry matched — the caller throws rather than returning an unconfirmed
  * ref.

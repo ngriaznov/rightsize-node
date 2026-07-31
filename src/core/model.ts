@@ -6,13 +6,18 @@ export interface PortBinding {
   readonly guestPort: number;
 }
 
-/** A host path copied into the guest before boot. `readOnly` defaults to `true` via the builder (`withCopyFileToContainer`). */
+/** A host path mounted into the guest before boot. `readOnly` is `false` via the builder (`withCopyFileToContainer`). */
 export interface FileMount {
-  /** Absolute host path to copy from. */
+  /** Absolute host path to mount from. */
   readonly hostPath: string;
   /** Destination path inside the guest. */
   readonly guestPath: string;
-  /** Enforced on docker; advisory only on msb (current microsandbox releases do not enforce guest-side read-only mounts). */
+  /**
+   * Whether the guest may only read it. Enforced as a genuine guest-side write block on
+   * both backends. When `false`, a guest write reaches the host file itself: the mount is
+   * a view of that file, not a copy — docker binds the host path directly, microsandbox
+   * hard-links it into its staging directory.
+   */
   readonly readOnly: boolean;
 }
 
@@ -74,7 +79,7 @@ export interface ContainerSpec {
    * identity hash — reuse and `fromCheckpoint` is not a supported
    * combination (see `ReuseFromCheckpointError`). docker ignores it (the ref
    * IS an image, so the normal create path already boots from it via
-   * `image`); microsandbox boots via `msb run --snapshot <ref>` instead of
+   * `image`); microsandbox boots via `msb run --from-snapshot <ref>` instead of
    * its normal image boot when this is set.
    */
   readonly checkpointRef: string | undefined;

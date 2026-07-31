@@ -2,7 +2,7 @@ import { describe, it, assert } from "../../test/harness.js";
 import { isSnapshotNotFoundError } from "./snapshot-not-found.js";
 
 describe("isSnapshotNotFoundError", () => {
-  it("matches the captured 'snapshot not found' shape verbatim (real msb 0.6.6 binary)", () => {
+  it("matches the captured 'snapshot not found' shape verbatim (real msb 0.6.8 binary)", () => {
     assert.ok(isSnapshotNotFoundError("error: snapshot not found: /home/user/.microsandbox/snapshots/rz-ckpt-abc123"));
   });
 

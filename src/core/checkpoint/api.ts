@@ -211,7 +211,7 @@ export async function exportTo(cp: Checkpoint, destPath: string): Promise<void> 
  * either way, before any backend call or registry write), then hands the
  * extracted `artifact` to `SandboxBackend.importCheckpoint`, which
  * materializes it and returns the EFFECTIVE ref (docker: the same `ref` the
- * archive recorded; microsandbox: the digest `snapshot import` actually
+ * archive recorded; microsandbox: the digest `snapshot load` actually
  * assigned it — never necessarily the archive's own `ref`).
  *
  * A NAMED archive (`name` non-null) gets replace semantics matching

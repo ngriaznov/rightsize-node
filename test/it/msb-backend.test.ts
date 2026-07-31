@@ -26,7 +26,7 @@ import { Backends } from "../../src/core/backends.js";
 import "../../src/backend-msb/index.js";
 
 /**
- * Live gates against the real `msb 0.6.6` binary at `~/.cache/rightsize`
+ * Live gates against the real `msb 0.6.8` binary at `~/.cache/rightsize`
  * (`RIGHTSIZE_IT=1`). Every sandbox this file creates carries the
  * `rz-<RunId.value>-*` naming convention the reaper filters on, and every
  * test cleans up its own sandbox before returning so `msb ls` is empty both
@@ -72,7 +72,7 @@ async function withSandbox<T>(
   }
 }
 
-describe("MsbCliBackend integration (real msb 0.6.6 binary)", () => {
+describe("MsbCliBackend integration (real msb 0.6.8 binary)", () => {
   itIntegration("attached-mode boot reaches Running; exec and logs work against it", async () => {
     const backend = new MsbCliBackend(ensureInstalled());
     const spec = baseSpec({ env: [["FOO", "bar"]] });
@@ -473,7 +473,10 @@ describe("MsbCliBackend integration (real msb 0.6.6 binary)", () => {
         const imported = await Checkpoints.importFrom(archivePath);
         assert.equal(imported.backend, "microsandbox");
         assert.ok(imported.ref !== originalRef, "expected the imported ref to be a digest, distinct from the original rz-ckpt-<name> ref");
-        assert.match(imported.ref, /^sha256-[0-9a-f]+$/, "expected msb's digest-shaped effective ref");
+        // Digest-shaped: msb has published both `sha256-<16hex>` (0.6.6) and a bare
+        // 64-hex digest (0.6.8) for a loaded snapshot, so the prefix is optional — what
+        // must hold is that the ref is a content digest and not the original name.
+        assert.match(imported.ref, /^(sha256-)?[0-9a-f]{16,64}$/, "expected msb's digest-shaped effective ref");
 
         // Named archive: replace semantics re-register it under the same name.
         const rediscovered = await Checkpoints.find(name);

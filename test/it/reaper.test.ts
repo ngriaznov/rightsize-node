@@ -87,7 +87,7 @@ function dumpWatchdogDebugState(dir: string, runId: string): void {
 }
 
 /**
- * Two ends of the reaper's contract, both against the real msb 0.6.6 binary:
+ * Two ends of the reaper's contract, both against the real msb 0.6.8 binary:
  * a process that dies via SIGKILL gets its sandbox reaped by its OWN
  * watchdog (the prompt-layer backstop); a dead run's leftovers get reaped by
  * a FRESH process's init-time sweep (the always-on backstop). Both use the

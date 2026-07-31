@@ -9,7 +9,7 @@ import { cacheDir as defaultCacheDir } from "../core/cache-dir.js";
 import { PlatformInfo } from "./platform.js";
 import type { Platform } from "./platform.js";
 
-export const MSB_VERSION = "0.6.6";
+export const MSB_VERSION = "0.6.8";
 
 const DEFAULT_BASE = `https://github.com/superradcompany/microsandbox/releases/download/v${MSB_VERSION}`;
 const CONNECT_READ_TIMEOUT_MS = 300_000;

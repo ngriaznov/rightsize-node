@@ -207,7 +207,7 @@ if (cmd === "run") {
   }
   writeState(state);
   process.exit(0);
-} else if (cmd === "snapshot" && args[1] === "export") {
+} else if (cmd === "snapshot" && args[1] === "save") {
   // snapshot export <ref> <dest> — exportCheckpoint's backend call. Writes a
   // recognizable payload file naming the source ref, so a test can assert
   // byte-identity through the archive round trip without a real .tar.zst.
@@ -229,7 +229,7 @@ if (cmd === "run") {
   fs.writeFileSync(dest, `fake-msb-artifact-for:${ref}`);
   writeState(state);
   process.exit(0);
-} else if (cmd === "snapshot" && args[1] === "import") {
+} else if (cmd === "snapshot" && args[1] === "load") {
   // snapshot import <archive> — importCheckpoint's backend call. The
   // effective ref is content-addressed (a digest-dir name derived from the
   // archive's own bytes), reproducing the real binary's "re-importing the

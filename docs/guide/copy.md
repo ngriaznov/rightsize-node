@@ -11,7 +11,14 @@ performs before `start()`.
 | When | Before `start()` — configures the container | Any time after `start()` — against a live container |
 | Direction | Host → guest only | Both directions |
 | Mechanism | A bind mount (docker) / mounted file (msb) | An actual copy through each backend's own tool (`docker cp` / `msb copy`) |
-| Read-only option | Yes (`FileMount.readOnly`, advisory-only on msb) | N/A — every copy is a one-time transfer, not a live mount |
+| Read-only option | Yes (`FileMount.readOnly`, enforced in-guest on both backends; `false` for mounts made through the builder) | N/A — every copy is a one-time transfer, not a live mount |
+
+The start-time mount is a **view of the host file, not a copy**: the docker
+backend binds the host path directly, the msb backend hard-links it into its
+staging directory. Mounts made through `withCopyFileToContainer` are
+read-write on both backends, so a guest write reaches the host file itself.
+A mount whose `FileMount.readOnly` is `true` blocks guest writes instead —
+an in-guest write fails with `Read-only file system`, on both backends.
 
 Reach for `withCopyFileToContainer` for fixtures a container needs from the
 moment it boots (config files, seed data the entrypoint reads on startup).

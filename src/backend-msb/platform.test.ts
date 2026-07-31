@@ -46,8 +46,8 @@ describe("PlatformInfo", () => {
 
   it("installs krun under the canonical name msb resolves, versioned on macOS/Linux and unversioned on Windows", () => {
     assert.equal(PlatformInfo.krunInstallName("darwin-arm64"), "libkrunfw.5.dylib");
-    assert.equal(PlatformInfo.krunInstallName("linux-x64"), "libkrunfw.so.5.5.0");
-    assert.equal(PlatformInfo.krunInstallName("linux-arm64"), "libkrunfw.so.5.5.0");
+    assert.equal(PlatformInfo.krunInstallName("linux-x64"), "libkrunfw.so.5.6.1");
+    assert.equal(PlatformInfo.krunInstallName("linux-arm64"), "libkrunfw.so.5.6.1");
     assert.equal(PlatformInfo.krunInstallName("win32-x64"), "libkrunfw.dll");
     assert.equal(PlatformInfo.krunInstallName("win32-arm64"), "libkrunfw.dll");
   });

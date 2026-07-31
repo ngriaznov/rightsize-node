@@ -20,7 +20,8 @@ const DEFAULT_IMAGE = "cassandra:latest";
  * ### `GPG_KEYS` must be overridden — this is the difference between booting and aborting
  *
  * `cassandra:5.0.8`'s baked-in `GPG_KEYS` build arg contains a literal TAB
- * character, and msb 0.6.6 panics on any image whose baked env contains one
+ * character, and msb panics on any image whose baked env contains one — 0.6.6
+ * and the pinned 0.6.8 alike
  * — before the guest even boots:
  *
  * ```

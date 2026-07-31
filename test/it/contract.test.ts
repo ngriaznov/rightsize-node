@@ -39,11 +39,6 @@ import { readRegistry, removeRegistry } from "../../src/core/reuse/registry.js";
 
 const BACKEND_NAME = process.env["RIGHTSIZE_BACKEND"] ?? "microsandbox";
 
-// msb does not enforce `:ro` mounts in-guest (advisory only); docker
-// does. The contract test for the default read-only mount parameterizes on
-// this rather than asserting one universal outcome.
-const readOnlyMountEnforced = BACKEND_NAME === "docker";
-
 function makeBackend(): SandboxBackend {
   if (BACKEND_NAME === "docker") {
     return new DockerBackend(DockerClient.fromEnv());
@@ -197,28 +192,40 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
     assert.equal(hostRead.stdout.trim(), "from-host-path");
   });
 
-  itIntegration(
-    `default read-only mount ${readOnlyMountEnforced ? "rejects" : "does not reject"} an in-guest write`,
-    async () => {
-      const bundled = MountableFile.forResource("../fixtures/contract-bundled.txt", import.meta.url);
+  // A mount made through the builder is read-write, identically on both backends. The
+  // mount is a view of the host file rather than a copy of it — docker binds the host
+  // path directly, microsandbox hard-links it into its staging directory — so the guest
+  // and the host share one inode. Callers who need the host copy protected set the
+  // mount's `readOnly`, which both backends enforce as a real write block.
+  itIntegration("a mount is read-write by default", async () => {
+    // Its own temp file rather than the bundled fixture, and world-writable, so this test
+    // measures the mount's access mode and nothing else. The guest's uid is not this test's
+    // to control: a docker daemon running with userns-remap (or rootless) maps container
+    // root to an unprivileged host uid, which cannot write a checked-out 0644 fixture
+    // however the mount is flagged. That denial is EACCES; a read-only mount denies with
+    // EROFS. Leaving the mode alone would let one hide the other — which is exactly what the
+    // predecessor of this test did, crediting `:ro` for a permission failure.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rightsize-contract-rw-"));
+    const hostFile = path.join(dir, "mounted.txt");
+    fs.writeFileSync(hostFile, "seed\n");
+    fs.chmodSync(hostFile, 0o666);
 
+    try {
       await using c = await new GenericContainer("alpine:3.19")
         .withBackend(makeBackend())
-        .withCopyFileToContainer(bundled, "/data/bundled.txt")
+        .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/data/mounted.txt")
         .withCommand("sleep", "60")
         .start();
 
-      const write = await c.exec("sh", "-c", "echo mutated > /data/bundled.txt");
-      if (readOnlyMountEnforced) {
-        assert.ok(write.exitCode !== 0, "expected the write to a read-only mount to fail on this backend");
-      } else {
-        // msb's documented non-enforcement (advisory-only `:ro`): the
-        // write succeeds in-guest. This branch exists to document the
-        // divergence with an executed assertion, not to skip the case.
-        assert.equal(write.exitCode, 0, "expected msb's advisory-only read-only mount to permit the write");
-      }
-    },
-  );
+      const write = await c.exec("sh", "-c", "echo mutated > /data/mounted.txt && sync");
+      assert.equal(write.exitCode, 0, `a default mount must accept an in-guest write: ${write.stderr}`);
+
+      const readBack = await c.exec("cat", "/data/mounted.txt");
+      assert.match(readBack.stdout, /mutated/, "the write must be visible in the guest");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   // Runtime copy against an ALREADY-RUNNING container — distinct from
   // withCopyFileToContainer's start-time mount above. Same alpine + sleep

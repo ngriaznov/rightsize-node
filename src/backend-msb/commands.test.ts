@@ -49,7 +49,9 @@ describe("MsbCommands", () => {
       "-e",
       "POSTGRES_USER=test",
       "--mount-file",
-      "/host/f.txt:/guest/f.txt",
+      // readOnly: true above — the token is always present, and `ro` is what makes the
+      // flag mean anything on this backend.
+      "/host/f.txt:/guest/f.txt:ro,nodev",
       "redis:8.6-alpine",
     ]);
   });
@@ -83,7 +85,9 @@ describe("MsbCommands", () => {
       "-e",
       "A=1",
       "--mount-file",
-      "/h:/g",
+      // readOnly: false above. A two-segment spec is never emitted: on Windows msb
+      // splits a token-less spec at the drive letter's colon and rejects the path tail.
+      "/h:/g:rw,nodev",
       "redis:8.6-alpine",
       "--",
       "sh",
@@ -134,7 +138,7 @@ describe("MsbCommands", () => {
     ]);
   });
 
-  it("run: checkpointRef boots via --snapshot instead of the image, keeping every other flag", () => {
+  it("run: checkpointRef boots via --from-snapshot instead of the image, keeping every other flag", () => {
     const argv = MsbCommands.run(
       baseSpec({
         checkpointRef: "rz-ckpt-abcdef012345",
@@ -154,14 +158,14 @@ describe("MsbCommands", () => {
       "1111:22",
       "-e",
       "A=1",
-      "--snapshot",
+      "--from-snapshot",
       "rz-ckpt-abcdef012345",
       "--",
       "sh",
       "-c",
       "true",
     ]);
-    assert.equal(argv.includes("redis:8.6-alpine"), false, "the image must never appear alongside --snapshot");
+    assert.equal(argv.includes("redis:8.6-alpine"), false, "the image must never appear alongside --from-snapshot");
   });
 
   it("snapshotCreate", () => {
@@ -185,14 +189,14 @@ describe("MsbCommands", () => {
   it("snapshotExport", () => {
     assert.deepEqual(MsbCommands.snapshotExport("rz-ckpt-abcdef012345", "/out/archive.tar.zst"), [
       "snapshot",
-      "export",
+      "save",
       "rz-ckpt-abcdef012345",
       "/out/archive.tar.zst",
     ]);
   });
 
   it("snapshotImport", () => {
-    assert.deepEqual(MsbCommands.snapshotImport("/in/archive.tar.zst"), ["snapshot", "import", "/in/archive.tar.zst"]);
+    assert.deepEqual(MsbCommands.snapshotImport("/in/archive.tar.zst"), ["snapshot", "load", "/in/archive.tar.zst"]);
   });
 
   it("snapshotList: --format json, never --json", () => {

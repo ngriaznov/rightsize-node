@@ -13,6 +13,7 @@ import { isMsbStateDbError } from "./state-db.js";
 import { isAgentEndpointNotReady } from "./agent-endpoint.js";
 import { isSnapshotNotFoundError } from "./snapshot-not-found.js";
 import { isSnapshotAlreadyExistsError, parseImportedDigestDirName } from "./snapshot-import.js";
+import { isSnapshotSaveAccessDeniedFailure, salvageStagedArchive } from "./snapshot-save-fsync.js";
 import { parseSnapshotList, confirmDigestDirNamePresent } from "./snapshot-list.js";
 import { undeliveredLines } from "./follow-replay.js";
 import { requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript } from "./network-links.js";
@@ -71,11 +72,51 @@ class StateDbError extends Error {
 }
 
 /**
+ * True if `output` (an `msb run` invocation's combined output) is msb
+ * refusing to run anything while its internal install lock is held. Captured
+ * verbatim from windows-2025 hosted runners (once in each sibling CI lane),
+ * mid-suite with ordinary boots succeeding on both sides of the failure:
+ *
+ * ```
+ * error: runtime error: microsandbox install operation in progress until
+ * 2026-07-31 20:55:04.779845600; retry after it completes
+ * ```
+ *
+ * The deadline in the message reads ~30 minutes out, but every captured
+ * occurrence cleared within the same run — boots seconds later succeeded — so
+ * the boot path polls briefly (see `start`) instead of failing on the first
+ * refusal or trusting the deadline. Matches on the stable phrase only; the
+ * timestamp varies per occurrence.
+ */
+export function isMsbInstallLockActive(output: string): boolean {
+  return output.includes("install operation in progress");
+}
+
+/** Boot-path classified failure for `isMsbInstallLockActive` — internal to
+ * the boot path, like its two siblings above; `start()` owns the retry
+ * policy. */
+class InstallLockActiveError extends Error {
+  constructor(readonly output: string) {
+    super(`msb install lock active:\n${output}`);
+  }
+}
+
+/**
  * How long to wait before retrying a boot that hit msb's state-database
  * error — enough for a winning concurrent invocation's migration transaction
  * to commit; the retry's own `msb run` startup dwarfs this either way.
  */
 const STATE_DB_RETRY_DELAY_MS = 500;
+
+/**
+ * How long the boot path keeps polling while msb's install-operation lock is
+ * held, and the pause between attempts (see `isMsbInstallLockActive`) —
+ * observed clearing within seconds despite the message's ~30-minute deadline,
+ * so a short budget covers the real cases and a lock outliving it is
+ * surfaced as stuck.
+ */
+const INSTALL_LOCK_RETRY_BUDGET_MS = 30_000;
+const INSTALL_LOCK_RETRY_DELAY_MS = 2_000;
 
 /**
  * Fetches one msb invocation's stdout byte-exact (CRLF normalized to LF, but
@@ -295,6 +336,34 @@ export class MsbCliBackend implements SandboxBackend {
       await this.bootOnce(msbPath, handle, state);
       return;
     } catch (first) {
+      if (first instanceof InstallLockActiveError) {
+        // msb refuses `run` outright while its internal install lock is held
+        // (see isMsbInstallLockActive). The message names a deadline ~30
+        // minutes out, but every captured occurrence cleared within the same
+        // test run — boots seconds later succeeded — so this polls briefly
+        // rather than trusting the deadline. The budget expiring surfaces the
+        // last refusal: a lock held that long really is stuck, and waiting
+        // here would only hide it.
+        const deadline = Date.now() + INSTALL_LOCK_RETRY_BUDGET_MS;
+        let last = first;
+        while (Date.now() < deadline) {
+          await sleep(INSTALL_LOCK_RETRY_DELAY_MS);
+          try {
+            await this.bootOnce(msbPath, handle, state);
+            return;
+          } catch (again) {
+            if (!(again instanceof InstallLockActiveError)) {
+              throw again;
+            }
+            last = again;
+          }
+        }
+        throw new BackendError(
+          `msb run for sandbox ${handle.id} was refused for ${INSTALL_LOCK_RETRY_BUDGET_MS / 1000}s ` +
+            `by msb's install-operation lock — every observed occurrence cleared within seconds, so a ` +
+            `lock held this long looks like a genuinely stuck msb install on this host.\n${last.output}`,
+        );
+      }
       if (first instanceof StateDbError) {
         // Usually the startup-migration race, transient by construction (see
         // isMsbStateDbError): the winning msb invocation's migration commits
@@ -388,6 +457,9 @@ export class MsbCliBackend implements SandboxBackend {
         }
         if (isMsbStateDbError(output)) {
           throw new StateDbError(output);
+        }
+        if (isMsbInstallLockActive(output)) {
+          throw new InstallLockActiveError(output);
         }
         if (isPortBindConflictOutput(output)) {
           throw new PortBindConflictError(
@@ -489,7 +561,7 @@ export class MsbCliBackend implements SandboxBackend {
    * cargo/node test runner on a hosted Windows runner, or any process that
    * embeds this library inside its own restrictive job object — and that
    * denial is deterministic, not transient, so no retry shape fixes it.
-   * Attached `msb run` (this backend's normal boot, including `--snapshot`
+   * Attached `msb run` (this backend's normal boot, including `--from-snapshot`
    * boots) never hits it, which is why the reboot reuses `bootOnce` instead
    * of resuming in place: the stopped sandbox's disk state is already IN the
    * snapshot, so `rm`-ing it first and booting a fresh attached sandbox
@@ -551,7 +623,7 @@ export class MsbCliBackend implements SandboxBackend {
    * `msb snapshot inspect <ref>` — exit 0 means the snapshot exists. A
    * non-zero exit whose stderr carries msb's own "snapshot not found"
    * framing (see `isSnapshotNotFoundError`, confirmed verbatim against the
-   * real msb 0.6.6 binary) resolves `false` — a genuine miss. Any OTHER
+   * real msb 0.6.8 binary) resolves `false` — a genuine miss. Any OTHER
    * non-zero exit (a corrupted state db, a permission error, a malformed
    * argument, an msb crash) throws `BackendError` carrying the raw stderr
    * instead of collapsing to `false`: `invoke()` itself only rejects on a
@@ -575,25 +647,45 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
-   * `msb snapshot export <ref> <destFile>` — writes the `.tar.zst` artifact
+   * `msb snapshot save <ref> <destFile>` — writes the `.tar.zst` artifact
    * `Checkpoints.exportTo` bundles into its own archive container. Never
    * `--with-image` (see the checkpoints guide's own note on why: its import
    * fails an integrity check in 0.6.6, so archives never bundle the OCI
    * image — the destination machine pulls it on the restored container's
    * first boot).
+   *
+   * On Windows, msb 0.6.7 and 0.6.8 fail this call every single time: they
+   * finish writing the archive to a staging file beside the destination and
+   * then fsync it through a read-only handle, which Windows refuses with
+   * `ERROR_ACCESS_DENIED`, so the rename onto the destination never happens.
+   * When that specific failure is what came back, `salvageStagedArchive`
+   * performs the rename msb stopped one line short of and the export counts as
+   * having succeeded; anything else, on any platform, surfaces msb's own
+   * stderr as before. See `isSnapshotSaveAccessDeniedFailure` for why the
+   * match is on the error NUMBER and why the salvage insists on finding
+   * exactly one staging file. This heals itself once msb fixes the fsync — the
+   * error stops occurring and the branch stops being taken — so it is
+   * deliberately not tied to the pinned msb version.
    */
   async exportCheckpoint(ref: string, destFile: string): Promise<void> {
     const msbPath = await this.msbPath();
     const result = await invoke(msbPath, MsbCommands.snapshotExport(ref, destFile), CHECKPOINT_TIMEOUT_MS);
     if (result.exitCode !== 0) {
+      if (
+        process.platform === "win32" &&
+        isSnapshotSaveAccessDeniedFailure(result.stderr) &&
+        (await salvageStagedArchive(destFile))
+      ) {
+        return;
+      }
       throw new BackendError(
-        `msb snapshot export ${ref} ${destFile} failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+        `msb snapshot save ${ref} ${destFile} failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
       );
     }
   }
 
   /**
-   * `msb snapshot import <archive>`, then resolves the EFFECTIVE ref: msb
+   * `msb snapshot load <archive>`, then resolves the EFFECTIVE ref: msb
    * writes the import under a digest-derived directory name it never lets
    * the caller choose (never the archive's own recorded `ref`), parsed from
    * the printed artifact path's basename (see `parseImportedDigestDirName`).
@@ -603,10 +695,10 @@ export class MsbCliBackend implements SandboxBackend {
    * The digest-dir basename is then CONFIRMED present via `msb snapshot
    * list --format json` (matching it against each entry's
    * `name`/`artifact_path`) and returned as-is — never the entry's `digest`
-   * field. Live-verified against msb 0.6.6: the full `sha256:<64hex>`
+   * field. Live-verified against msb 0.6.8: the full `sha256:<64hex>`
    * digest does not resolve as a snapshot ref at all (`msb snapshot inspect
    * sha256:<full>` fails "snapshot not found"); only the digest-dir name
-   * resolves for `inspect`/`rm`/`run --snapshot`, so it — not the full
+   * resolves for `inspect`/`rm`/`run --from-snapshot`, so it — not the full
    * digest — is the ref this must hand back for `hasCheckpoint` and every
    * other snapshot-ref call to keep working. `_ref` (the archive's own
    * recorded ref) is unused here — msb's importer never takes one, unlike
@@ -623,12 +715,12 @@ export class MsbCliBackend implements SandboxBackend {
       digestDirName = parseImportedDigestDirName(imported.stderr);
     } else {
       throw new BackendError(
-        `msb snapshot import ${srcFile} failed (exit ${imported.exitCode}): ${imported.stderr.trim()}`,
+        `msb snapshot load ${srcFile} failed (exit ${imported.exitCode}): ${imported.stderr.trim()}`,
       );
     }
     if (digestDirName === undefined) {
       throw new BackendError(
-        `msb snapshot import ${srcFile} did not print a recognizable artifact path — output:\n` +
+        `msb snapshot load ${srcFile} did not print a recognizable artifact path — output:\n` +
           `${imported.stdout}${imported.stderr}`,
       );
     }

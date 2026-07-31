@@ -1,7 +1,7 @@
 /**
  * True if `output` (an `msb snapshot inspect <ref>` non-zero exit's stderr)
  * names msb's own "this snapshot does not exist" signal, as opposed to some
- * other probe failure. Observed verbatim against the real msb 0.6.6 binary:
+ * other probe failure. Observed verbatim against the real msb 0.6.8 binary:
  *
  * ```
  * error: snapshot not found: <path>

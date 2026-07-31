@@ -215,9 +215,15 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     return this;
   }
 
-  /** Copies a host file into the guest before boot, at `guestPath`. Read-only is enforced on docker; advisory only on msb (current microsandbox releases do not enforce guest-side read-only mounts). */
+  /**
+   * Mounts a host file into the guest before boot, at `guestPath`.
+   *
+   * The mount is read-write, and it is a view of the host file rather than a copy of it —
+   * docker binds the host path directly, microsandbox hard-links it into its staging
+   * directory — so a guest write reaches the host file itself.
+   */
   withCopyFileToContainer(file: MountableFile, guestPath: string): this {
-    this.mounts.push({ hostPath: file.path, guestPath, readOnly: true });
+    this.mounts.push({ hostPath: file.path, guestPath, readOnly: false });
     return this;
   }
 

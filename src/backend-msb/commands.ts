@@ -22,14 +22,29 @@ export const MsbCommands = {
     for (const [key, value] of spec.env) {
       argv.push("-e", `${key}=${value}`);
     }
+    // The option block is always spelled out, never left to msb's defaults, for two
+    // reasons on top of each other. The access token (`ro`/`rw`) carries
+    // FileMount.readOnly, which msb enforces as a genuine guest-side write block — and it
+    // keeps OUR spec parseable on Windows: msb stages each mount into a temp directory
+    // and canonicalizes it, which there yields the extended-length `\\?\C:\...` form, and
+    // its splitter skips a drive prefix only for a bare drive letter, so a spec with no
+    // option block splits at the drive's colon and rejects the path tail as options.
+    // `nodev` exists because msb then rebuilds an INTERNAL `tag:staged_path[:opts]` spec
+    // for the same mount, carrying over only NON-DEFAULT option tokens — `rw` is its
+    // default and is dropped, which on Windows strips the internal spec's option block
+    // and re-creates the same misparse one layer down (captured: `--mount
+    // "fm_…:\\?\C:\…": expected flag or key=value option`). `nodev` always survives the
+    // carry-over, and for a single-file mount it is meaningless (no device nodes to
+    // block): verified against a real msb 0.6.8 — `rw,nodev` mounts `rw,nodev` and
+    // accepts an in-guest write, `ro,nodev` rejects one with `Read-only file system`.
     for (const mount of spec.mounts) {
-      argv.push("--mount-file", `${mount.hostPath}:${mount.guestPath}`);
+      argv.push("--mount-file", `${mount.hostPath}:${mount.guestPath}:${mount.readOnly ? "ro" : "rw"},nodev`);
     }
     if (spec.checkpointRef !== undefined) {
-      // `--snapshot` is mutually exclusive with the IMAGE positional arg —
+      // `--from-snapshot` is mutually exclusive with the IMAGE positional arg —
       // the snapshot itself pins the image (see MsbCliBackend's own doc on
       // fromCheckpoint/checkpointRef).
-      argv.push("--snapshot", spec.checkpointRef);
+      argv.push("--from-snapshot", spec.checkpointRef);
     } else {
       argv.push(spec.image);
     }
@@ -55,14 +70,14 @@ export const MsbCommands = {
     return ["snapshot", "inspect", name];
   },
 
-  /** `msb snapshot export <ref> <dest>` — writes a `.tar.zst` artifact archive; deliberately never `--with-image` (its import fails an integrity check in 0.6.6, see the checkpoints guide). `exportCheckpoint`'s backend call. */
+  /** `msb snapshot save <ref> <dest>` — writes a `.tar.zst` artifact archive; deliberately never `--with-image` (its import fails an integrity check in 0.6.6, see the checkpoints guide). `exportCheckpoint`'s backend call. */
   snapshotExport(ref: string, dest: string): string[] {
-    return ["snapshot", "export", ref, dest];
+    return ["snapshot", "save", ref, dest];
   },
 
-  /** `msb snapshot import <archive>` — unpacks into a digest-derived directory under `~/.microsandbox/snapshots/`, never the original name; `importCheckpoint`'s backend call. */
+  /** `msb snapshot load <archive>` — unpacks into a digest-derived directory under `~/.microsandbox/snapshots/`, never the original name; `importCheckpoint`'s backend call. */
   snapshotImport(archive: string): string[] {
-    return ["snapshot", "import", archive];
+    return ["snapshot", "load", archive];
   },
 
   /** `msb snapshot list --format json` — full `digest`/`name`/`artifact_path`/`image_ref` entries, used to CONFIRM an imported snapshot's digest-dir basename is present (the basename itself, not the `digest` field, is the effective ref — the full digest does not resolve as a snapshot ref). */

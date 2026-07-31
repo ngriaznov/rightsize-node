@@ -19,7 +19,7 @@ relearning how rightsize behaves.
 Each behavior area below is exercised by a shared-body contract test that
 runs unchanged against both backends (parameterized by `RIGHTSIZE_BACKEND`),
 in every one of the three implementations. Where a backend genuinely
-diverges (for example, read-only mount enforcement), the divergence itself
+diverges (for example, network-alias tunnel capacity), the divergence itself
 is asserted rather than glossed over — see
 [Backends](/guide/backends#backend-differences).
 

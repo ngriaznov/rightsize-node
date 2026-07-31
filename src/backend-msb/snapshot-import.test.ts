@@ -2,7 +2,7 @@ import { describe, it, assert } from "../../test/harness.js";
 import { isSnapshotAlreadyExistsError, parseImportedDigestDirName } from "./snapshot-import.js";
 
 describe("isSnapshotAlreadyExistsError", () => {
-  it("matches the captured 'snapshot already exists' shape verbatim (real msb 0.6.6 binary)", () => {
+  it("matches the captured 'snapshot already exists' shape verbatim (real msb 0.6.8 binary)", () => {
     assert.ok(isSnapshotAlreadyExistsError("error: snapshot already exists: /home/user/.microsandbox/snapshots/sha256-b9c0448ee9d54e33"));
   });
 

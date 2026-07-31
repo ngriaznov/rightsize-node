@@ -29,8 +29,8 @@ const KRUN_ASSETS: Record<Platform, string> = {
 // re-verify all names when bumping the pin.
 const KRUN_INSTALL_NAMES: Record<Platform, string> = {
   "darwin-arm64": "libkrunfw.5.dylib",
-  "linux-x64": "libkrunfw.so.5.5.0",
-  "linux-arm64": "libkrunfw.so.5.5.0",
+  "linux-x64": "libkrunfw.so.5.6.1",
+  "linux-arm64": "libkrunfw.so.5.6.1",
   "win32-x64": "libkrunfw.dll",
   "win32-arm64": "libkrunfw.dll",
 };

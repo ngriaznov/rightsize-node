@@ -1,9 +1,9 @@
 import * as path from "node:path";
 
 /**
- * True if `stderr` (an `msb snapshot import` non-zero exit) names msb's own
+ * True if `stderr` (an `msb snapshot load` non-zero exit) names msb's own
  * "this digest is already imported" signal, as opposed to some other import
- * failure. Observed verbatim against the real msb 0.6.6 binary:
+ * failure. Observed verbatim against the real msb 0.6.8 binary:
  *
  * ```
  * error: snapshot already exists: <path>
@@ -21,8 +21,8 @@ export function isSnapshotAlreadyExistsError(stderr: string): boolean {
 }
 
 /**
- * Extracts the digest-dir basename from one `msb snapshot import`
- * invocation's output. Verified against the real msb 0.6.6 binary: on both a
+ * Extracts the digest-dir basename from one `msb snapshot load`
+ * invocation's output. Verified against the real msb 0.6.8 binary: on both a
  * success (the printed stdout line) and an already-exists failure (the
  * `error: snapshot already exists: <path>` stderr line), the relevant line
  * ENDS with the artifact path under `~/.microsandbox/snapshots/`, whose

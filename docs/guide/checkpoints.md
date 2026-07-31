@@ -326,7 +326,7 @@ ordinary `start()` against that image. Make sure the image is reachable
 **microsandbox refs change shape after import.** `importFrom`'s effective
 ref on microsandbox is a digest-derived directory name (`sha256-<16 hex
 chars>`, e.g. `sha256-b9c0448ee9d54e33`), never the `rz-ckpt-<name>` shape
-the archive itself carried — `msb snapshot import` writes under that
+the archive itself carried — `msb snapshot load` writes under that
 directory name and doesn't let you choose it. This is deliberately NOT the
 full `sha256:<64 hex chars>` digest `msb snapshot list` also reports: that
 full digest does not resolve as a snapshot ref at all (msb treats it as a
