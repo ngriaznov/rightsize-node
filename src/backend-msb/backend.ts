@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
-import { BackendError, PortBindConflictError, UnsupportedByBackendError } from "../core/errors.js";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { BackendError, PortBindConflictError, UnsupportedByBackendError, TmpfsRootCheckpointError } from "../core/errors.js";
 import type { SandboxBackend, SandboxHandle, FollowHandle, NetworkLink, ReaperKillCommand, BackendCapabilities } from "../core/backend.js";
 import type { ContainerSpec, ExecResult } from "../core/model.js";
 import { MsbCommands } from "./commands.js";
@@ -581,12 +583,34 @@ export class MsbCliBackend implements SandboxBackend {
    * sandbox has already been removed by the time that's known, so the error
    * instead names the checkpoint ref and points at `fromCheckpoint()` as the
    * recovery path.
+   *
+   * Refuses outright, before any of the above, when `handle.spec.tmpfsRootMb`
+   * is set: a tmpfs root has nothing on disk for a snapshot to capture.
    */
   async createCheckpoint(handle: SandboxHandle, ref: string): Promise<void> {
+    if (handle.spec.tmpfsRootMb !== undefined) {
+      // Checked before touching the sandbox at all: a tmpfs root is
+      // ephemeral, so stopping it first would gain nothing worth throwing
+      // away a running sandbox for.
+      throw new TmpfsRootCheckpointError();
+    }
     const msbPath = await this.msbPath();
     await this.stop(handle);
 
-    const snap = await invoke(msbPath, MsbCommands.snapshotCreate(handle.id, ref), CHECKPOINT_TIMEOUT_MS);
+    // A path ref (see checkpoint/ref.ts) stores its artifact under the ref
+    // itself: mkdirs the parent, then hands msb the ref's own basename as
+    // the snapshot name and the parent as --dest-dir, so the artifact msb
+    // writes lands at exactly <parent>/<basename> === ref. A bare-name ref
+    // (pre-dest-dir checkpoints, still restorable) keeps going through
+    // msb's own default snapshot store, unchanged.
+    const isPathRef = path.isAbsolute(ref);
+    if (isPathRef) {
+      await fs.mkdir(path.dirname(ref), { recursive: true });
+    }
+    const snapshotArgv = isPathRef
+      ? MsbCommands.snapshotCreate(handle.id, path.basename(ref), path.dirname(ref))
+      : MsbCommands.snapshotCreate(handle.id, ref);
+    const snap = await invoke(msbPath, snapshotArgv, CHECKPOINT_TIMEOUT_MS);
     if (snap.exitCode !== 0) {
       throw new BackendError(
         `msb snapshot create --from ${handle.id} ${ref} failed (exit ${snap.exitCode}): ${snap.stderr.trim()} — ` +
@@ -613,10 +637,22 @@ export class MsbCliBackend implements SandboxBackend {
     }
   }
 
-  /** Best-effort `msb snapshot rm <ref>` — "not found" is success, the same contract as `removeByName`. */
+  /**
+   * Best-effort `msb snapshot rm <basename(ref)>` — "not found" is success,
+   * the same contract as `removeByName`. msb's own removal deletes both its
+   * index entry and the dest-dir artifact for a path ref, but afterwards this
+   * also best-effort recursively deletes the ref path itself: if msb's index
+   * ever loses track of an artifact without deleting it, the directory would
+   * otherwise linger under the cache dir forever.
+   */
   async removeCheckpoint(ref: string): Promise<void> {
     const msbPath = await this.msbPath();
-    await invoke(msbPath, MsbCommands.snapshotRemove(ref), CHECKPOINT_TIMEOUT_MS).catch(() => {});
+    const isPathRef = path.isAbsolute(ref);
+    const name = isPathRef ? path.basename(ref) : ref;
+    await invoke(msbPath, MsbCommands.snapshotRemove(name), CHECKPOINT_TIMEOUT_MS).catch(() => {});
+    if (isPathRef) {
+      await fs.rm(ref, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   /**
@@ -633,8 +669,19 @@ export class MsbCliBackend implements SandboxBackend {
    * delete a perfectly valid registry entry over what may be a transient msb
    * failure — exactly the "no best-effort false on probe errors" the SPI's
    * own contract forbids.
+   *
+   * A path ref never reaches any of that: it names a directory msb itself
+   * wrote under the cache dir (see checkpoint/ref.ts and createCheckpoint's
+   * `--dest-dir` handling above), so its presence is answered by a plain
+   * filesystem check for `<ref>/snapshot.json` — no msb call at all.
    */
   async hasCheckpoint(ref: string): Promise<boolean> {
+    if (path.isAbsolute(ref)) {
+      return fs
+        .access(path.join(ref, "snapshot.json"))
+        .then(() => true)
+        .catch(() => false);
+    }
     const msbPath = await this.msbPath();
     const result = await invoke(msbPath, MsbCommands.snapshotInspect(ref), CHECKPOINT_TIMEOUT_MS);
     if (result.exitCode === 0) {

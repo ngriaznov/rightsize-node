@@ -238,7 +238,7 @@ describe("GenericContainer.checkpoint()", () => {
     await container.stop();
   });
 
-  it("mints a rz-ckpt-<12-hex> ref on a backend named 'microsandbox'", async () => {
+  it("mints an absolute <cacheDir>/checkpoints/rz-ckpt-<12-hex> ref on a backend named 'microsandbox'", async () => {
     const backend = new FakeCheckpointBackend("microsandbox", {
       hardwareIsolated: true,
       checkpoint: true,
@@ -249,7 +249,8 @@ describe("GenericContainer.checkpoint()", () => {
 
     const cp = await container.checkpoint();
 
-    assert.match(cp.ref, /^rz-ckpt-[0-9a-f]{12}$/);
+    assert.equal(path.isAbsolute(cp.ref), true, "expected a path ref, not a bare name");
+    assert.match(cp.ref, /^.*[/\\]checkpoints[/\\]rz-ckpt-[0-9a-f]{12}$/);
     assert.equal(cp.backend, "microsandbox");
 
     await container.stop();
@@ -420,10 +421,10 @@ describe("GenericContainer.checkpoint(name) — named checkpoints", () => {
     await container.stop();
   });
 
-  it("mints a deterministic ref from the name: rightsize/checkpoint:<name> on docker, rz-ckpt-<name> on microsandbox", async () => {
+  it("mints a deterministic ref from the name: rightsize/checkpoint:<name> on docker, <cacheDir>/checkpoints/rz-ckpt-<name> on microsandbox", async () => {
     // A named checkpoint also writes a registry entry, so this test must run against a
     // temp cache dir like the other named-checkpoint tests — never the real one.
-    await withTempCacheDirEnv(async () => {
+    await withTempCacheDirEnv(async (cacheDirPath) => {
       const docker = new FakeCheckpointBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
       const dockerContainer = new GenericContainer("alpine:3.19").withBackend(docker).withCommand("sleep", "60").waitingFor(instantReady());
       await dockerContainer.start();
@@ -435,7 +436,7 @@ describe("GenericContainer.checkpoint(name) — named checkpoints", () => {
       const msbContainer = new GenericContainer("alpine:3.19").withBackend(msb).withCommand("sleep", "60").waitingFor(instantReady());
       await msbContainer.start();
       const msbCp = await msbContainer.checkpoint("seeded-db");
-      assert.equal(msbCp.ref, "rz-ckpt-seeded-db");
+      assert.equal(msbCp.ref, path.join(cacheDirPath, "checkpoints", "rz-ckpt-seeded-db"));
       await msbContainer.stop();
     });
   });

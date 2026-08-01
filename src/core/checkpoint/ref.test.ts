@@ -1,0 +1,54 @@
+import * as path from "node:path";
+import { describe, it, assert } from "../../../test/harness.js";
+import { checkpointRef } from "./ref.js";
+import { cacheDir } from "../cache-dir.js";
+
+/** Runs `fn` with `RIGHTSIZE_CACHE_DIR` pinned to a known value, then restores the prior env value regardless of outcome. */
+function withCacheDirEnv<T>(dir: string, fn: () => T): T {
+  const saved = process.env["RIGHTSIZE_CACHE_DIR"];
+  process.env["RIGHTSIZE_CACHE_DIR"] = dir;
+  try {
+    return fn();
+  } finally {
+    if (saved === undefined) {
+      delete process.env["RIGHTSIZE_CACHE_DIR"];
+    } else {
+      process.env["RIGHTSIZE_CACHE_DIR"] = saved;
+    }
+  }
+}
+
+describe("checkpointRef", () => {
+  it("mints an absolute <cacheDir>/checkpoints/rz-ckpt-<12-hex> ref for the microsandbox backend", () => {
+    withCacheDirEnv("/fake/cache", () => {
+      const ref = checkpointRef("microsandbox", undefined);
+      assert.equal(path.isAbsolute(ref), true, "expected a path ref");
+      assert.match(ref, /^.*[/\\]checkpoints[/\\]rz-ckpt-[0-9a-f]{12}$/);
+      assert.equal(ref, path.join(cacheDir(), "checkpoints", ref.slice(ref.lastIndexOf("rz-ckpt-"))));
+    });
+  });
+
+  it("mints a deterministic path ref from a name: <cacheDir>/checkpoints/rz-ckpt-<name>", () => {
+    withCacheDirEnv("/fake/cache", () => {
+      const ref = checkpointRef("microsandbox", "seeded-db");
+      assert.equal(ref, path.join("/fake/cache", "checkpoints", "rz-ckpt-seeded-db"));
+    });
+  });
+
+  it("leaves the docker ref form unchanged: rightsize/checkpoint:<suffix>, never a path", () => {
+    withCacheDirEnv("/fake/cache", () => {
+      const unnamed = checkpointRef("docker", undefined);
+      assert.match(unnamed, /^rightsize\/checkpoint:[0-9a-f]{12}$/);
+
+      const named = checkpointRef("docker", "seeded-db");
+      assert.equal(named, "rightsize/checkpoint:seeded-db");
+    });
+  });
+
+  it("respects the RIGHTSIZE_CACHE_DIR override when minting a microsandbox path ref", () => {
+    withCacheDirEnv("/another/cache/dir", () => {
+      const ref = checkpointRef("microsandbox", "seeded-db");
+      assert.equal(ref, path.join("/another/cache/dir", "checkpoints", "rz-ckpt-seeded-db"));
+    });
+  });
+});

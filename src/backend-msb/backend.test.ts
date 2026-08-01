@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, assert, after, beforeEach } from "../../test/harness.js";
 import { MsbCliBackend } from "./backend.js";
-import { BackendError } from "../core/errors.js";
+import { BackendError, TmpfsRootCheckpointError } from "../core/errors.js";
 import type { ContainerSpec } from "../core/model.js";
 
 // Resolved relative to THIS module's own compiled location (dist-test or
@@ -400,6 +400,67 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
+  it("createCheckpoint refuses a tmpfs-root sandbox with TmpfsRootCheckpointError before stopping it", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-ckpt-tmpfs", { tmpfsRootMb: 256 });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    let thrown: unknown;
+    try {
+      await backend.createCheckpoint(handle, "rz-ckpt-tmpfsblocked");
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof TmpfsRootCheckpointError, `expected TmpfsRootCheckpointError, got: ${String(thrown)}`);
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { sandboxes: Record<string, { status: string }> };
+    assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the sandbox to never have been stopped");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("createCheckpoint on a path ref mkdirs the parent, emits --dest-dir, and reboots from the same path", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-pathref-create-test-"));
+    try {
+      const checkpointsDir = path.join(dir, "checkpoints");
+      const ref = path.join(checkpointsDir, "rz-ckpt-pathref01");
+      const spec = baseSpec("rz-testrun1-ckpt-pathref");
+      const handle = await backend.create(spec);
+      await backend.start(handle);
+
+      await backend.createCheckpoint(handle, ref);
+
+      const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+        sandboxes: Record<string, { status: string }>;
+        callLog: Array<{ cmd: string; args: string[] }>;
+      };
+      const snapshotCall = state.callLog.find((c) => c.cmd === "snapshotCreate");
+      assert.deepEqual(snapshotCall?.args, [
+        "snapshot",
+        "create",
+        "--from",
+        handle.id,
+        "rz-ckpt-pathref01",
+        "--dest-dir",
+        checkpointsDir,
+      ]);
+      assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the sandbox to be running again after the cycle");
+      assert.equal(await backend.hasCheckpoint(ref), true, "expected the artifact directory to hold a snapshot.json");
+
+      await backend.stop(handle);
+      await backend.remove(handle);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("createCheckpoint drives exactly stop -> snapshot create -> rm -> a reboot run from the snapshot, in order, leaving the sandbox Running", async () => {
     if (skipOnWindows()) {
       return;
@@ -547,6 +608,44 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
 
     await backend.stop(handle);
     await backend.remove(handle);
+  });
+
+  it("hasCheckpoint on a path ref checks the filesystem directly, never through msb: true only once snapshot.json exists", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-pathref-has-test-"));
+    try {
+      const ref = path.join(dir, "rz-ckpt-fsonly");
+      assert.equal(await backend.hasCheckpoint(ref), false, "expected a nonexistent artifact dir to resolve false");
+
+      await fs.mkdir(ref, { recursive: true });
+      assert.equal(await backend.hasCheckpoint(ref), false, "expected a dir without snapshot.json to still resolve false");
+
+      await fs.writeFile(path.join(ref, "snapshot.json"), "{}");
+      assert.equal(await backend.hasCheckpoint(ref), true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("removeCheckpoint on a path ref runs msb snapshot rm with just the basename, then clears any leftover artifact directory", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-pathref-remove-test-"));
+    try {
+      const ref = path.join(dir, "rz-ckpt-toremovepath");
+      await fs.mkdir(ref, { recursive: true });
+      await fs.writeFile(path.join(ref, "snapshot.json"), "{}");
+
+      await backend.removeCheckpoint(ref);
+
+      const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+      const rmCall = state.callLog.filter((c) => c.cmd === "snapshotRemove").at(-1);
+      assert.deepEqual(rmCall?.args, ["snapshot", "rm", "rz-ckpt-toremovepath"], "expected the basename, never the full path");
+
+      await assert.rejects(fs.access(ref), "expected the leftover artifact directory to have been removed");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("hasCheckpoint resolves true for a snapshot that exists and false for one that doesn't", async () => {

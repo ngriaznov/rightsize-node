@@ -99,6 +99,46 @@ describe("MsbCommands", () => {
     ]);
   });
 
+  it("run: disk limit emits --root-disk <mb>M right after memory, before ports", () => {
+    const argv = MsbCommands.run(baseSpec({ diskLimitMb: 2048 }));
+    assert.deepEqual(argv, ["run", "--name", "rz-abc12345-1", "--root-disk", "2048M", "redis:8.6-alpine"]);
+  });
+
+  it("run: tmpfs root emits --root-disk tmpfs:<mb>M", () => {
+    const argv = MsbCommands.run(baseSpec({ tmpfsRootMb: 512 }));
+    assert.deepEqual(argv, ["run", "--name", "rz-abc12345-1", "--root-disk", "tmpfs:512M", "redis:8.6-alpine"]);
+  });
+
+  it("run: networkDisabled emits --net private", () => {
+    const argv = MsbCommands.run(baseSpec({ networkDisabled: true }));
+    assert.deepEqual(argv, ["run", "--name", "rz-abc12345-1", "--net", "private", "redis:8.6-alpine"]);
+  });
+
+  it("run: memory, root-disk, and net-private appear together in that fixed order, ahead of ports", () => {
+    const argv = MsbCommands.run(
+      baseSpec({
+        memoryLimitMb: 1024,
+        diskLimitMb: 4096,
+        networkDisabled: true,
+        ports: [{ hostPort: 1111, guestPort: 22 }],
+      }),
+    );
+    assert.deepEqual(argv, [
+      "run",
+      "--name",
+      "rz-abc12345-1",
+      "-m",
+      "1024M",
+      "--root-disk",
+      "4096M",
+      "--net",
+      "private",
+      "-p",
+      "1111:22",
+      "redis:8.6-alpine",
+    ]);
+  });
+
   it("exec", () => {
     assert.deepEqual(MsbCommands.exec("box-1", ["echo", "hi"]), ["exec", "box-1", "--", "echo", "hi"]);
   });
@@ -178,6 +218,18 @@ describe("MsbCommands", () => {
       "--from",
       "box-1",
       "rz-ckpt-abcdef012345",
+    ]);
+  });
+
+  it("snapshotCreate with a destDir appends --dest-dir <dir>", () => {
+    assert.deepEqual(MsbCommands.snapshotCreate("box-1", "rz-ckpt-abcdef012345", "/cache/checkpoints"), [
+      "snapshot",
+      "create",
+      "--from",
+      "box-1",
+      "rz-ckpt-abcdef012345",
+      "--dest-dir",
+      "/cache/checkpoints",
     ]);
   });
 

@@ -16,6 +16,18 @@ export const MsbCommands = {
       // the argv can be compared against them verbatim.
       argv.push("-m", `${spec.memoryLimitMb}M`);
     }
+    // `--root-disk` right after memory, before ports — start()-time validation
+    // (RootDiskConflictError) guarantees diskLimitMb and tmpfsRootMb are never
+    // both set, so at most one of these two fires.
+    if (spec.diskLimitMb !== undefined) {
+      argv.push("--root-disk", `${spec.diskLimitMb}M`);
+    }
+    if (spec.tmpfsRootMb !== undefined) {
+      argv.push("--root-disk", `tmpfs:${spec.tmpfsRootMb}M`);
+    }
+    if (spec.networkDisabled) {
+      argv.push("--net", "private");
+    }
     for (const port of spec.ports) {
       argv.push("-p", `${port.hostPort}:${port.guestPort}`);
     }
@@ -55,9 +67,17 @@ export const MsbCommands = {
     return argv;
   },
 
-  /** `msb snapshot create --from <sandbox> <name>` — requires `sandbox` STOPPED; writes a sparse disk snapshot under `~/.microsandbox/snapshots/<name>`. */
-  snapshotCreate(sandbox: string, name: string): string[] {
-    return ["snapshot", "create", "--from", sandbox, name];
+  /**
+   * `msb snapshot create --from <sandbox> <name>` — requires `sandbox`
+   * STOPPED; writes a sparse disk snapshot under `~/.microsandbox/snapshots/<name>`,
+   * or under `<destDir>/<name>` when `destDir` is given (path-ref checkpoints).
+   */
+  snapshotCreate(sandbox: string, name: string, destDir?: string): string[] {
+    const argv = ["snapshot", "create", "--from", sandbox, name];
+    if (destDir !== undefined) {
+      argv.push("--dest-dir", destDir);
+    }
+    return argv;
   },
 
   /** `msb snapshot rm <name>` — best-effort per `removeCheckpoint`'s own contract; "not found" is fine. */

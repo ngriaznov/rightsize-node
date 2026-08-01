@@ -8,6 +8,7 @@
 // argv) so a test can assert the checkpoint stop/snapshot/reboot cycle's
 // exact call order and the reboot `run`'s exact argv, not just its end state.
 import * as fs from "node:fs";
+import * as path from "node:path";
 import * as crypto from "node:crypto";
 
 const statePath = process.env.RIGHTSIZE_FAKE_MSB_STATE;
@@ -149,10 +150,11 @@ if (cmd === "run") {
   process.stdout.write(`exec-ok:${rest.join(" ")}\n`);
   process.exit(0);
 } else if (cmd === "snapshot" && args[1] === "create") {
-  // snapshot create --from <sandbox> <name>
+  // snapshot create --from <sandbox> <name> [--dest-dir <dir>]
   const fromIdx = args.indexOf("--from");
   const from = args[fromIdx + 1];
-  const name = args[args.length - 1];
+  const name = args[fromIdx + 2];
+  const destDirIdx = args.indexOf("--dest-dir");
   const state = readState();
   logCall(state, "snapshotCreate", args);
   if ((state.failSnapshotCreate ?? 0) > 0) {
@@ -163,6 +165,15 @@ if (cmd === "run") {
   }
   state.snapshots = { ...(state.snapshots ?? {}), [name]: { from } };
   writeState(state);
+  if (destDirIdx !== -1) {
+    // --dest-dir <dir> writes the artifact directly under <dir>/<name>,
+    // matching the real binary's dest-dir behavior — the whole point of
+    // rightsize's path-ref checkpoints is that this directory IS the ref.
+    const destDir = args[destDirIdx + 1];
+    const artifactDir = path.join(destDir, name);
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.writeFileSync(path.join(artifactDir, "snapshot.json"), JSON.stringify({ from, name }));
+  }
   process.exit(0);
 } else if (cmd === "snapshot" && args[1] === "inspect") {
   // snapshot inspect <name> — exit 0 if the snapshot exists, exit 1
@@ -202,6 +213,7 @@ if (cmd === "run") {
   // real command's "not found" contract removeCheckpoint relies on.
   const name = args[2];
   const state = readState();
+  logCall(state, "snapshotRemove", args);
   if (state.snapshots) {
     delete state.snapshots[name];
   }
