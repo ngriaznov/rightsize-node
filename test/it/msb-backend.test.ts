@@ -311,7 +311,11 @@ describe("MsbCliBackend integration (real msb 0.6.8 binary)", () => {
         assert.equal(marker.exitCode, 0);
 
         cp = await source.checkpoint();
-        assert.match(cp.ref, /^rz-ckpt-[0-9a-f]{12}$/);
+        // The msb ref is an absolute artifact path under <cacheDir>/checkpoints —
+        // the artifact is created there via --dest-dir and restored by path.
+        assert.ok(path.isAbsolute(cp.ref), `expected an absolute path ref, got ${cp.ref}`);
+        assert.equal(path.basename(path.dirname(cp.ref)), "checkpoints");
+        assert.match(path.basename(cp.ref), /^rz-ckpt-[0-9a-f]{12}$/);
         assert.equal(cp.backend, "microsandbox");
 
         // Same container, still usable: proves the msb stop/snapshot/reboot
@@ -386,7 +390,8 @@ describe("MsbCliBackend integration (real msb 0.6.8 binary)", () => {
           assert.equal(marker.exitCode, 0);
 
           const cp = await source.checkpoint(name);
-          assert.equal(cp.ref, `rz-ckpt-${name}`);
+          assert.ok(path.isAbsolute(cp.ref), `expected an absolute path ref, got ${cp.ref}`);
+          assert.equal(path.basename(cp.ref), `rz-ckpt-${name}`);
         } finally {
           await source.stop();
         }
@@ -398,7 +403,7 @@ describe("MsbCliBackend integration (real msb 0.6.8 binary)", () => {
         if (found === undefined) {
           throw new Error("expected find() to rediscover the named checkpoint");
         }
-        assert.equal(found.ref, `rz-ckpt-${name}`);
+        assert.equal(path.basename(found.ref), `rz-ckpt-${name}`);
         assert.equal(found.backend, "microsandbox");
 
         const restored = GenericContainer.fromCheckpoint(found)
@@ -460,7 +465,8 @@ describe("MsbCliBackend integration (real msb 0.6.8 binary)", () => {
 
           const cp = await source.checkpoint(name);
           originalRef = cp.ref;
-          assert.equal(cp.ref, `rz-ckpt-${name}`);
+          assert.ok(path.isAbsolute(cp.ref), `expected an absolute path ref, got ${cp.ref}`);
+          assert.equal(path.basename(cp.ref), `rz-ckpt-${name}`);
 
           await Checkpoints.exportTo(cp, archivePath);
           const archiveStat = await fs.stat(archivePath);
