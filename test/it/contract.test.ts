@@ -8,7 +8,8 @@ import { GenericContainer } from "../../src/core/generic-container.js";
 import { Wait } from "../../src/core/wait.js";
 import { MountableFile } from "../../src/core/mountable-file.js";
 import type { SandboxBackend } from "../../src/core/backend.js";
-import { IsolationRequiredError } from "../../src/core/errors.js";
+import type { Checkpoint } from "../../src/core/model.js";
+import { IsolationRequiredError, TmpfsRootCheckpointError } from "../../src/core/errors.js";
 import { diagnostics } from "../../src/core/diagnostics.js";
 import { MsbCliBackend } from "../../src/backend-msb/backend.js";
 import { ensureInstalled } from "../../src/backend-msb/provisioner.js";
@@ -851,5 +852,123 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
     assert.ok(report.includes("(alpine:3.19)"));
     assert.ok(report.includes("state: running   host: 127.0.0.1   ports:"));
     assert.ok(report.includes("diagnostics-marker"));
+  });
+
+  // The five cases below hold msb 0.6.8's root-disk/tmpfs-root/net-private
+  // options to the same contract on both backends: docker ignores all three
+  // and just boots normally, msb actually enforces them.
+  itIntegration(
+    "a network-disabled container still serves its published port; on msb it loses public egress",
+    async () => {
+      await using c = await new GenericContainer("python:3.12-alpine")
+        .withBackend(makeBackend())
+        .withCommand("python3", "-m", "http.server", "8000")
+        .withExposedPorts(8000)
+        .withNetworkDisabled()
+        .waitingFor(Wait.forHttp("/").forPort(8000).withStartupTimeout(30_000))
+        .start();
+
+      const port = c.getMappedPort(8000);
+      assert.ok(await portIsReachable(port), `expected 127.0.0.1:${port} to be reachable once ready`);
+
+      if (BACKEND_NAME === "microsandbox") {
+        const script = [
+          "import urllib.request, sys",
+          "try:",
+          "    urllib.request.urlopen('http://example.com', timeout=5)",
+          "    sys.exit(0)",
+          "except Exception:",
+          "    sys.exit(1)",
+        ].join("\n");
+        const probe = await c.exec("python3", "-c", script);
+        assert.ok(probe.exitCode !== 0, "expected withNetworkDisabled() to block public-internet egress on msb");
+      }
+    },
+  );
+
+  itIntegration("a tmpfs-root container boots and accepts writes under /root", async () => {
+    await using c = await new GenericContainer("alpine:3.19")
+      .withBackend(makeBackend())
+      .withTmpfsRoot(256)
+      .withCommand("sleep", "60")
+      .start();
+
+    const write = await c.exec("sh", "-c", "echo tmpfs-write > /root/marker.txt && sync");
+    assert.equal(write.exitCode, 0, `expected the write to succeed: ${write.stderr}`);
+
+    const read = await c.exec("cat", "/root/marker.txt");
+    assert.equal(read.exitCode, 0);
+    assert.equal(read.stdout.trim(), "tmpfs-write");
+  });
+
+  itIntegration("a disk-limited container boots and runs commands normally", async () => {
+    await using c = await new GenericContainer("alpine:3.19")
+      .withBackend(makeBackend())
+      .withDiskLimit(1024)
+      .withCommand("sleep", "60")
+      .start();
+
+    const probe = await c.exec("true");
+    assert.equal(probe.exitCode, 0);
+  });
+
+  itIntegration("checkpointing a tmpfs-root container is refused on msb", async () => {
+    if (BACKEND_NAME === "docker") {
+      return;
+    }
+    const container = new GenericContainer("alpine:3.19")
+      .withBackend(makeBackend())
+      .withTmpfsRoot(256)
+      .withCommand("sleep", "60");
+    await container.start();
+    try {
+      let thrown: unknown;
+      try {
+        await container.checkpoint();
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof TmpfsRootCheckpointError, `expected TmpfsRootCheckpointError, got: ${String(thrown)}`);
+    } finally {
+      await container.stop();
+    }
+  });
+
+  itIntegration("a checkpoint stores its artifact under the cache dir and restores from it (msb)", async () => {
+    if (BACKEND_NAME === "docker") {
+      return;
+    }
+    const source = new GenericContainer("alpine:3.19")
+      .withBackend(makeBackend())
+      .withCommand("sh", "-c", "echo ready; sleep 60");
+    await source.start();
+
+    let cp: Checkpoint | undefined;
+    try {
+      const marker = await source.exec("sh", "-c", "echo dest-dir-marker > /marker.txt && sync");
+      assert.equal(marker.exitCode, 0);
+
+      cp = await source.checkpoint();
+      assert.ok(path.isAbsolute(cp.ref), `expected the checkpoint ref to be an absolute path, got: ${cp.ref}`);
+      assert.ok(fs.existsSync(cp.ref), `expected the checkpoint artifact dir to exist at ${cp.ref}`);
+      assert.ok(fs.existsSync(path.join(cp.ref, "snapshot.json")), "expected a snapshot.json under the artifact dir");
+    } finally {
+      await source.stop();
+    }
+
+    const restored = GenericContainer.fromCheckpoint(cp)
+      .withBackend(makeBackend())
+      .waitingFor(Wait.forLogMessage("ready").withStartupTimeout(60_000));
+    try {
+      await restored.start();
+      const read = await restored.exec("cat", "/marker.txt");
+      assert.equal(read.exitCode, 0);
+      assert.equal(read.stdout.trim(), "dest-dir-marker");
+    } finally {
+      await restored.stop();
+    }
+
+    await makeBackend().removeCheckpoint(cp.ref);
+    assert.equal(fs.existsSync(cp.ref), false, "expected the artifact dir to be removed after removeCheckpoint");
   });
 });

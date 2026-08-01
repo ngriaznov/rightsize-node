@@ -52,8 +52,8 @@ interface CreateContainerBody {
   };
 }
 
-/** Builds the `POST /containers/create` JSON body: port bindings pinned to `127.0.0.1`, read-only/read-write binds, the `host.docker.internal` extra host, and the run-id (or reuse) label — see `containerLabels`. */
-function buildCreateBody(spec: ContainerSpec): CreateContainerBody {
+/** Builds the `POST /containers/create` JSON body: port bindings pinned to `127.0.0.1`, read-only/read-write binds, the `host.docker.internal` extra host, and the run-id (or reuse) label — see `containerLabels`. The msb-only `diskLimitMb`/`tmpfsRootMb`/`networkDisabled` fields have no docker equivalent and are deliberately left unread here. */
+export function buildCreateBody(spec: ContainerSpec): CreateContainerBody {
   const exposedPorts: Record<string, Record<string, never>> = {};
   const portBindings: Record<string, Array<{ HostIp: string; HostPort: string }>> = {};
   for (const p of spec.ports) {

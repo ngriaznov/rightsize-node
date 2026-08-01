@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, assert } from "../../test/harness.js";
-import { DockerBackend } from "./backend.js";
+import { DockerBackend, buildCreateBody } from "./backend.js";
 import { DockerClient } from "./client.js";
 import { BackendError } from "../core/errors.js";
 import { isPortBindConflictMessage } from "./port-conflict.js";
@@ -76,6 +76,14 @@ async function fakeDaemon(
   await new Promise<void>((r) => server.listen(sockPath, r));
   return { close: () => server.close(), requests, client: new DockerClient(sockPath) };
 }
+
+describe("buildCreateBody — msb-only options are a deliberate no-op", () => {
+  it("a spec with diskLimitMb, tmpfsRootMb, and networkDisabled set produces the identical body as one without", () => {
+    const plain = baseSpec();
+    const withMsbOnly = baseSpec({ diskLimitMb: 1024, tmpfsRootMb: 256, networkDisabled: true });
+    assert.deepEqual(buildCreateBody(withMsbOnly), buildCreateBody(plain));
+  });
+});
 
 describe("isPortBindConflictMessage", () => {
   it("matches known daemon phrasings", () => {
