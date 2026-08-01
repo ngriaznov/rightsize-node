@@ -51,4 +51,18 @@ describe("checkpointRef", () => {
       assert.equal(ref, path.join("/another/cache/dir", "checkpoints", "rz-ckpt-seeded-db"));
     });
   });
+
+  it("resolves a RELATIVE RIGHTSIZE_CACHE_DIR override to an absolute ref, not a relative one", () => {
+    withCacheDirEnv(path.join("relative", "cache", "dir"), () => {
+      const ref = checkpointRef("microsandbox", "seeded-db");
+      assert.equal(
+        path.isAbsolute(ref),
+        true,
+        "expected an absolute ref even from a relative RIGHTSIZE_CACHE_DIR — every path-ref branch " +
+          "(MsbCliBackend's isPathRef, hasCheckpoint/removeCheckpoint's path.isAbsolute(ref)) classifies " +
+          "a ref by absoluteness alone, and a relative one would silently misclassify as a bare name",
+      );
+      assert.equal(ref, path.resolve(path.join("relative", "cache", "dir"), "checkpoints", "rz-ckpt-seeded-db"));
+    });
+  });
 });

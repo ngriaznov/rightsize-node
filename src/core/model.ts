@@ -124,9 +124,10 @@ export interface ContainerSpec {
 export interface Checkpoint {
   /**
    * The captured state's ref: a committed image tag
-   * (`rightsize/checkpoint:<12-hex>`) on docker, a snapshot name
-   * (`rz-ckpt-<12-hex>`) on microsandbox — random per checkpoint, never
-   * reused.
+   * (`rightsize/checkpoint:<12-hex>`) on docker, an absolute
+   * `<cacheDir>/checkpoints/rz-ckpt-<12-hex>` path on microsandbox — random
+   * per checkpoint, never reused. A named checkpoint (`checkpoint(name)`)
+   * mints the same shape with `name` in place of the 12-hex suffix.
    */
   readonly ref: string;
   /** The backend that created this checkpoint. Restoring it under a DIFFERENT active backend throws `CheckpointBackendMismatchError` before any backend call. */

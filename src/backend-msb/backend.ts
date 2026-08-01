@@ -194,6 +194,30 @@ function describeHeal(heal: ExecResult | unknown): string {
   return `'msb image remove' itself failed to run: ${heal instanceof Error ? heal.message : String(heal)}`;
 }
 
+/**
+ * True when `ref` (an absolute path ref) looks like a checkpoint artifact
+ * this backend itself would have written — a directory named `rz-ckpt-*`
+ * (`checkpointRef`'s own prefix) containing a `snapshot.json` file, the same
+ * shape `hasCheckpoint` checks for. `removeCheckpoint`'s recursive delete is
+ * gated on this: `ref` is caller-supplied (a corrupt or hand-edited registry
+ * entry), and skipping the shape check would let an arbitrary path get
+ * `fs.rm(..., { recursive: true })`'d just because it happened to be passed
+ * in as a "ref".
+ */
+async function looksLikeCheckpointArtifactDir(ref: string): Promise<boolean> {
+  if (!path.basename(ref).startsWith("rz-ckpt-")) {
+    return false;
+  }
+  const stat = await fs.stat(ref).catch(() => undefined);
+  if (stat === undefined || !stat.isDirectory()) {
+    return false;
+  }
+  return fs
+    .access(path.join(ref, "snapshot.json"))
+    .then(() => true)
+    .catch(() => false);
+}
+
 interface HandleState {
   attached: ChildProcess | undefined;
   // True once the attached `msb run` child has actually exited. The attached
@@ -643,14 +667,18 @@ export class MsbCliBackend implements SandboxBackend {
    * index entry and the dest-dir artifact for a path ref, but afterwards this
    * also best-effort recursively deletes the ref path itself: if msb's index
    * ever loses track of an artifact without deleting it, the directory would
-   * otherwise linger under the cache dir forever.
+   * otherwise linger under the cache dir forever. That recursive delete is
+   * gated on `looksLikeCheckpointArtifactDir` first — a `ref` is caller-
+   * supplied (a corrupt registry entry, a hand-edited env var, …), and a
+   * `fs.rm(ref, { recursive: true })` on an unverified path would happily
+   * wipe out an arbitrary directory that merely happens to share its name.
    */
   async removeCheckpoint(ref: string): Promise<void> {
     const msbPath = await this.msbPath();
     const isPathRef = path.isAbsolute(ref);
     const name = isPathRef ? path.basename(ref) : ref;
     await invoke(msbPath, MsbCommands.snapshotRemove(name), CHECKPOINT_TIMEOUT_MS).catch(() => {});
-    if (isPathRef) {
+    if (isPathRef && (await looksLikeCheckpointArtifactDir(ref))) {
       await fs.rm(ref, { recursive: true, force: true }).catch(() => {});
     }
   }

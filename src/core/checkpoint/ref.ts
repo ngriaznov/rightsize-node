@@ -15,12 +15,17 @@ import { cacheDir } from "../cache-dir.js";
  * ref, which is what makes the registry's replace semantics (remove the old
  * artifact under this ref, then create the new one) correct. `name`
  * `undefined` mints a fresh random 12-hex suffix instead, byte-for-byte the
- * pre-named-checkpoints behavior.
+ * pre-named-checkpoints behavior. Uses `path.resolve`, not `path.join`: a
+ * relative `RIGHTSIZE_CACHE_DIR` override must still yield an absolute ref —
+ * every path-ref branch elsewhere (`isPathRef` in `MsbCliBackend`,
+ * `path.isAbsolute(ref)` in `hasCheckpoint`/`removeCheckpoint`) classifies a
+ * ref by absoluteness alone, and a relative one would silently misclassify
+ * as a bare snapshot name instead.
  */
 export function checkpointRef(backendName: string, name: string | undefined): string {
   const suffix = name ?? randomBytes(6).toString("hex");
   if (backendName === "microsandbox") {
-    return path.join(cacheDir(), "checkpoints", `rz-ckpt-${suffix}`);
+    return path.resolve(cacheDir(), "checkpoints", `rz-ckpt-${suffix}`);
   }
   return `rightsize/checkpoint:${suffix}`;
 }

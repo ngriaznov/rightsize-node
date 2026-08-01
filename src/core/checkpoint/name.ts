@@ -5,8 +5,10 @@ import { InvalidCheckpointNameError } from "../errors.js";
  * named-checkpoints spec's own "Names and refs" section): lowercase letters,
  * digits, and hyphens only, starting with a letter or digit, at most 41
  * characters. This is also exactly the alphabet both backends' ref formats
- * embed verbatim (`rz-ckpt-<name>`, `rightsize/checkpoint:<name>`), so a
- * valid name is guaranteed to produce a valid ref on either backend.
+ * embed verbatim (the `rz-ckpt-<name>` path segment in the absolute
+ * `<cacheDir>/checkpoints/rz-ckpt-<name>` microsandbox ref, and
+ * `rightsize/checkpoint:<name>` on docker), so a valid name is guaranteed to
+ * produce a valid ref on either backend.
  */
 export const CHECKPOINT_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,40}$/;
 

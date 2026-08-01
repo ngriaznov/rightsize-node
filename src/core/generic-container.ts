@@ -17,6 +17,7 @@ import {
   RootDiskConflictError,
   TmpfsRootExceedsMemoryError,
   NetworkDisabledConflictError,
+  TmpfsRootCheckpointError,
 } from "./errors.js";
 import { requireValidCheckpointName } from "./checkpoint/name.js";
 import { checkpointRef } from "./checkpoint/ref.js";
@@ -972,9 +973,10 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * currently running.
    *
    * Passing `name` makes this checkpoint NAMED and durable: the ref becomes
-   * deterministic (`rz-ckpt-<name>` / `rightsize/checkpoint:<name>` instead
-   * of a random 12-hex suffix), and — only once the backend call below has
-   * actually succeeded — a registry entry is written under
+   * deterministic (an absolute `<cacheDir>/checkpoints/rz-ckpt-<name>` path
+   * on microsandbox, `rightsize/checkpoint:<name>` on docker — see
+   * `checkpointRef` — instead of a random 12-hex suffix), and — only once
+   * the backend call below has actually succeeded — a registry entry is written under
    * `<cacheDir>/checkpoints/<name>.json` that `Checkpoints.find`/`list`/
    * `remove` can rediscover later, in this process or a different one. `name`
    * must match `^[a-z0-9][a-z0-9-]{0,40}$`; an invalid name throws
@@ -1012,6 +1014,18 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     const { handle, backend } = this.requireHandle();
     if (!backend.capabilities.checkpoint) {
       throw new CheckpointUnsupportedError(backend.name);
+    }
+    // Hoisted ahead of the remove/registry/backend steps below — the
+    // backend-side guard in MsbCliBackend.createCheckpoint (see its own doc)
+    // catches this too, but only after this method has already
+    // best-effort-removed whatever checkpoint currently sits under `ref`
+    // (replace semantics, see below). For a NAMED checkpoint that means a
+    // refused re-checkpoint of a tmpfs-root container would otherwise
+    // destroy the prior artifact under that name before the refusal ever
+    // surfaces. Checked here, before `ref` is even minted, so a rejected
+    // call never touches anything.
+    if (handle.spec.tmpfsRootMb !== undefined && backend.name === "microsandbox") {
+      throw new TmpfsRootCheckpointError();
     }
     const ref = checkpointRef(backend.name, name);
     if (name !== undefined) {

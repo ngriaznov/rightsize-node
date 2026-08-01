@@ -6,6 +6,19 @@ import { describe, it, assert, after, beforeEach } from "../../test/harness.js";
 import { MsbCliBackend } from "./backend.js";
 import { BackendError, TmpfsRootCheckpointError } from "../core/errors.js";
 import type { ContainerSpec } from "../core/model.js";
+import { GenericContainer } from "../core/generic-container.js";
+import { readCheckpointRegistry } from "../core/checkpoint/registry.js";
+import type { WaitStrategy } from "../core/wait.js";
+
+/** A no-op readiness check — this suite never runs a real workload, only the fake-msb double. */
+function instantReady(): WaitStrategy {
+  return {
+    waitUntilReady: async () => {},
+    withStartupTimeout(): WaitStrategy {
+      return this;
+    },
+  };
+}
 
 // Resolved relative to THIS module's own compiled location (dist-test or
 // src, depending on which runtime is executing it), never process.cwd() —
@@ -423,6 +436,65 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
+  it("GenericContainer.checkpoint(name) hoists the tmpfs-root refusal ahead of replace semantics — a refused re-checkpoint leaves the prior artifact and registry entry intact", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const cacheDirPath = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-tmpfs-hoist-test-"));
+    const savedCacheDir = process.env["RIGHTSIZE_CACHE_DIR"];
+    process.env["RIGHTSIZE_CACHE_DIR"] = cacheDirPath;
+    try {
+      // First, an ordinary container checkpoints under the name "seeded" —
+      // this is the artifact + registry entry a later refused re-checkpoint
+      // must not touch.
+      const ordinary = new GenericContainer("fake:latest").withBackend(backend).waitingFor(instantReady());
+      await ordinary.start();
+      const first = await ordinary.checkpoint("seeded");
+      await ordinary.stop();
+
+      assert.equal(await backend.hasCheckpoint(first.ref), true, "expected the first checkpoint's artifact to exist");
+
+      // A second, tmpfs-root container tries to checkpoint under the SAME
+      // name — same deterministic ref. Before the hoist, checkpoint() would
+      // have already best-effort-removed the artifact under that ref
+      // (replace semantics) before ever reaching the backend's own
+      // tmpfs-root guard inside createCheckpoint.
+      const tmpfsContainer = new GenericContainer("fake:latest")
+        .withBackend(backend)
+        .withTmpfsRoot(256)
+        .waitingFor(instantReady());
+      await tmpfsContainer.start();
+
+      let thrown: unknown;
+      try {
+        await tmpfsContainer.checkpoint("seeded");
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof TmpfsRootCheckpointError, `expected TmpfsRootCheckpointError, got: ${String(thrown)}`);
+
+      assert.equal(
+        await backend.hasCheckpoint(first.ref),
+        true,
+        "expected the refused re-checkpoint to have left the prior artifact under 'seeded' untouched",
+      );
+      const read = await readCheckpointRegistry(cacheDirPath, "seeded");
+      assert.equal(read.kind, "found", "expected the registry entry under 'seeded' to still exist");
+      if (read.kind === "found") {
+        assert.equal(read.entry.ref, first.ref, "expected the registry entry to still point at the original artifact");
+      }
+
+      await tmpfsContainer.stop();
+    } finally {
+      if (savedCacheDir === undefined) {
+        delete process.env["RIGHTSIZE_CACHE_DIR"];
+      } else {
+        process.env["RIGHTSIZE_CACHE_DIR"] = savedCacheDir;
+      }
+      await fs.rm(cacheDirPath, { recursive: true, force: true });
+    }
+  });
+
   it("createCheckpoint on a path ref mkdirs the parent, emits --dest-dir, and reboots from the same path", async () => {
     if (skipOnWindows()) {
       return;
@@ -453,6 +525,16 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       ]);
       assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the sandbox to be running again after the cycle");
       assert.equal(await backend.hasCheckpoint(ref), true, "expected the artifact directory to hold a snapshot.json");
+
+      const rebootCall = state.callLog.filter((c) => c.cmd === "run").at(-1);
+      assert.ok(rebootCall !== undefined, "expected a reboot 'run' call after the snapshot/rm cycle");
+      const fromSnapshotIdx = rebootCall?.args.indexOf("--from-snapshot") ?? -1;
+      assert.ok(fromSnapshotIdx !== -1, "expected the reboot run to carry --from-snapshot");
+      assert.equal(
+        rebootCall?.args[fromSnapshotIdx + 1],
+        ref,
+        "expected the reboot run's --from-snapshot value to be the exact full path ref, not the bare snapshot name",
+      );
 
       await backend.stop(handle);
       await backend.remove(handle);
@@ -643,6 +725,48 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       assert.deepEqual(rmCall?.args, ["snapshot", "rm", "rz-ckpt-toremovepath"], "expected the basename, never the full path");
 
       await assert.rejects(fs.access(ref), "expected the leftover artifact directory to have been removed");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("removeCheckpoint never recursively deletes a path ref that doesn't look like a checkpoint artifact it wrote", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-corrupt-ref-remove-test-"));
+    try {
+      // A corrupt/attacker-controlled ref: some arbitrary POPULATED directory
+      // handed to removeCheckpoint as if it were a checkpoint artifact, but
+      // it neither carries the rz-ckpt- prefix checkpointRef mints nor
+      // contains a snapshot.json — nothing this backend itself ever wrote.
+      const wrongPrefixRef = path.join(dir, "not-a-checkpoint-at-all");
+      await fs.mkdir(wrongPrefixRef, { recursive: true });
+      await fs.writeFile(path.join(wrongPrefixRef, "important.txt"), "do not delete me");
+
+      await backend.removeCheckpoint(wrongPrefixRef);
+
+      const wrongPrefixSurvived = await fs
+        .access(path.join(wrongPrefixRef, "important.txt"))
+        .then(() => true)
+        .catch(() => false);
+      assert.equal(wrongPrefixSurvived, true, "expected a non-rz-ckpt--prefixed directory to be left untouched");
+
+      // Same guard, other half: the rz-ckpt- prefix alone isn't enough — a
+      // directory under that name with no snapshot.json is just as
+      // unverified (e.g. a stale/tampered registry entry pointing at a
+      // directory this backend never actually wrote an artifact into).
+      const noManifestRef = path.join(dir, "rz-ckpt-tampered");
+      await fs.mkdir(noManifestRef, { recursive: true });
+      await fs.writeFile(path.join(noManifestRef, "important.txt"), "do not delete me either");
+
+      await backend.removeCheckpoint(noManifestRef);
+
+      const noManifestSurvived = await fs
+        .access(path.join(noManifestRef, "important.txt"))
+        .then(() => true)
+        .catch(() => false);
+      assert.equal(noManifestSurvived, true, "expected an rz-ckpt- dir with no snapshot.json to be left untouched");
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }

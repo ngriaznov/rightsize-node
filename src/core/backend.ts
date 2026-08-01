@@ -112,10 +112,11 @@ export interface SandboxBackend {
    * unsupported backend never has to implement this for real (it may throw
    * defensively). Docker: commits the running container to image `ref`,
    * undisturbed. Microsandbox: stop the sandbox, `msb snapshot create` a
-   * disk snapshot named `ref`, then start the sandbox back up — the
-   * workload restarts, which is why `capabilities.checkpointRestartsWorkload`
-   * exists. Never called on a backend whose `capabilities.checkpoint` is
-   * `false`.
+   * disk snapshot under `ref` (an absolute `<cacheDir>/checkpoints/rz-ckpt-*`
+   * path — via `--dest-dir`, not msb's own default snapshot store), then
+   * start the sandbox back up — the workload restarts, which is why
+   * `capabilities.checkpointRestartsWorkload` exists. Never called on a
+   * backend whose `capabilities.checkpoint` is `false`.
    */
   createCheckpoint(handle: SandboxHandle, ref: string): Promise<void>;
   /**
@@ -128,8 +129,12 @@ export interface SandboxBackend {
   removeCheckpoint(ref: string): Promise<void>;
   /**
    * Probes whether a checkpoint artifact identified by `ref` still exists —
-   * docker: image inspect; microsandbox: `msb snapshot inspect <ref>` exit
-   * code. `Checkpoints.find`'s only caller: it never probes an entry
+   * docker: image inspect; microsandbox: a bare-name `ref` runs `msb
+   * snapshot inspect <ref>` and checks its exit code, while an absolute
+   * path `ref` (the `--dest-dir` shape every `checkpointRef`-minted ref
+   * uses today) is answered by a plain filesystem check for
+   * `<ref>/snapshot.json`, no msb call at all.
+   * `Checkpoints.find`'s only caller: it never probes an entry
    * recorded under a DIFFERENT backend than the one this is called on, so in
    * practice this is only ever invoked on a backend whose
    * `capabilities.checkpoint` is `true`. A backend that never supports

@@ -325,10 +325,15 @@ export class NetworkDisabledConflictError extends Error {
 }
 
 /**
- * Thrown by the microsandbox backend's `createCheckpoint` when the container
+ * Thrown when a checkpoint is attempted on a microsandbox container that
  * uses `withTmpfsRoot()` — a tmpfs root is ephemeral, so there is nothing on
- * disk for a snapshot to capture. Thrown first, before the backend stops the
- * sandbox for the snapshot attempt.
+ * disk for a snapshot to capture. Thrown from two places, both before any
+ * destructive step: `GenericContainer.checkpoint()` itself (ahead of the
+ * named-checkpoint replace semantics' best-effort removal of whatever
+ * currently sits under the same ref, so a refused re-checkpoint never
+ * destroys a prior artifact) and, redundantly, `MsbCliBackend.createCheckpoint`
+ * (ahead of stopping the sandbox for the snapshot attempt) for any caller
+ * that reaches the backend directly.
  */
 export class TmpfsRootCheckpointError extends Error {
   constructor() {
