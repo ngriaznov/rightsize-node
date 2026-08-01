@@ -24,14 +24,16 @@ describe("checkpointRef", () => {
       const ref = checkpointRef("microsandbox", undefined);
       assert.equal(path.isAbsolute(ref), true, "expected a path ref");
       assert.match(ref, /^.*[/\\]checkpoints[/\\]rz-ckpt-[0-9a-f]{12}$/);
-      assert.equal(ref, path.join(cacheDir(), "checkpoints", ref.slice(ref.lastIndexOf("rz-ckpt-"))));
+      // path.resolve, not path.join: production absolutizes with resolve, which on
+      // Windows prepends the current drive to a rootless override like /fake/cache.
+      assert.equal(ref, path.resolve(cacheDir(), "checkpoints", ref.slice(ref.lastIndexOf("rz-ckpt-"))));
     });
   });
 
   it("mints a deterministic path ref from a name: <cacheDir>/checkpoints/rz-ckpt-<name>", () => {
     withCacheDirEnv("/fake/cache", () => {
       const ref = checkpointRef("microsandbox", "seeded-db");
-      assert.equal(ref, path.join("/fake/cache", "checkpoints", "rz-ckpt-seeded-db"));
+      assert.equal(ref, path.resolve("/fake/cache", "checkpoints", "rz-ckpt-seeded-db"));
     });
   });
 
@@ -48,7 +50,7 @@ describe("checkpointRef", () => {
   it("respects the RIGHTSIZE_CACHE_DIR override when minting a microsandbox path ref", () => {
     withCacheDirEnv("/another/cache/dir", () => {
       const ref = checkpointRef("microsandbox", "seeded-db");
-      assert.equal(ref, path.join("/another/cache/dir", "checkpoints", "rz-ckpt-seeded-db"));
+      assert.equal(ref, path.resolve("/another/cache/dir", "checkpoints", "rz-ckpt-seeded-db"));
     });
   });
 
