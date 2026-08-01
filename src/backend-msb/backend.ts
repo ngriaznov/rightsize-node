@@ -82,7 +82,12 @@ class StateDbError extends Error {
  * ```
  * error: runtime error: microsandbox install operation in progress until
  * 2026-07-31 20:55:04.779845600; retry after it completes
+ * error: runtime error: another microsandbox install operation is in progress
+ * until 2026-08-01 19:26:19.025098100
  * ```
+ *
+ * Two phrasings, one condition — msb words the refusal differently depending
+ * on which side holds the lock, so the match tolerates the optional "is".
  *
  * The deadline in the message reads ~30 minutes out, but every captured
  * occurrence cleared within the same run — boots seconds later succeeded — so
@@ -91,7 +96,7 @@ class StateDbError extends Error {
  * timestamp varies per occurrence.
  */
 export function isMsbInstallLockActive(output: string): boolean {
-  return output.includes("install operation in progress");
+  return /install operation (is )?in progress/.test(output);
 }
 
 /** Boot-path classified failure for `isMsbInstallLockActive` — internal to
