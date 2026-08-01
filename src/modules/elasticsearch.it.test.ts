@@ -15,7 +15,12 @@ function requestJson(url: string, method: string, payload?: unknown): Promise<{ 
         port: parsed.port,
         path: `${parsed.pathname}${parsed.search}`,
         method,
-        timeout: 15_000,
+        // Generous for one JSON operation, deliberately: Elasticsearch's first write
+        // after boot warms mappings and codecs, and on a loaded windows-2025 runner
+        // that first request was observed blowing through a 15s socket timeout while
+        // the very same request completes in well under a second once warm. Matches
+        // the budget discipline the heavyweight modules use for readiness.
+        timeout: 120_000,
         headers:
           body !== undefined
             ? { "content-type": "application/json", "content-length": Buffer.byteLength(body) }
