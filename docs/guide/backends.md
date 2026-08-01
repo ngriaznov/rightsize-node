@@ -124,3 +124,9 @@ than incidental timing quirks:
   a timing quirk, and it means sustained bidirectional sibling traffic (a
   cross-container consumer reading continuously from a broker on a sibling
   microVM) isn't something the microsandbox backend supports.
+- **`withDiskLimit`, `withTmpfsRoot`, and `withNetworkDisabled` are
+  msb-only.** Docker runs its containers with an uncapped, disk-backed root
+  and normal networking regardless of any of the three — it silently ignores
+  all of them rather than approximating. See
+  [Isolation](/guide/isolation#guidance-for-untrusted-code) and
+  [Networking](/guide/networking#disabling-public-internet-access).

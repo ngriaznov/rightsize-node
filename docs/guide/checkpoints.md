@@ -34,8 +34,28 @@ mechanisms:
 | Mechanism | Commit the running container to a new image | Stops the sandbox, snapshots its disk, and boots it back from that snapshot under the same name and ports |
 | `capabilities.checkpoint` | `true` | `true` |
 | `capabilities.checkpointRestartsWorkload` | `false` — the container is undisturbed | `true` — the workload restarts |
-| Ref format | `rightsize/checkpoint:<12-hex>` (an image tag) | `rz-ckpt-<12-hex>` (a snapshot name) |
+| Ref format | `rightsize/checkpoint:<12-hex>` (an image tag) | an absolute path, `<cacheDir>/checkpoints/rz-ckpt-<12-hex>` |
 | Cleanup one-liner | `docker rmi rightsize/checkpoint:<ref>` | `msb snapshot rm rz-ckpt-<ref>` |
+
+On microsandbox, the artifact lands under `<cacheDir>/checkpoints/`
+(`~/.cache/rightsize` on macOS/Linux, `%LOCALAPPDATA%\rightsize` on
+Windows — see [Configuration](/guide/configuration)), via msb's own
+`--dest-dir` flag rather than its default snapshot store — `Checkpoint.ref`
+there is that absolute path. It's still an opaque string as far as this
+library's public API goes; nothing about `fromCheckpoint()` or
+`Checkpoints.find`/`remove` changes. msb also keeps its own global index
+entry for the snapshot alongside the dest-dir artifact — it still shows up
+in `msb snapshot list` — and `removeCheckpoint`/`Checkpoints.remove` clean
+up both together. A bare-name ref from a checkpoint created before this
+still restores fine.
+
+A microsandbox container using `withTmpfsRoot()` can't be checkpointed at
+all: its writable root lives in RAM, so there's nothing on disk for a
+snapshot to capture. `checkpoint()` throws `TmpfsRootCheckpointError` before
+touching anything — including a named checkpoint's replace step, so a
+refused re-checkpoint leaves the existing checkpoint under that name intact.
+Use `withDiskLimit()` or the default root disk for a container you plan to
+checkpoint.
 
 ```ts
 import "rightsize/backend-msb";
@@ -72,7 +92,8 @@ const source = await new GenericContainer("postgres:16-alpine")
 // ...migrate and seed the database via exec or a client connection...
 
 const checkpoint = await source.checkpoint();
-// { ref: "rightsize/checkpoint:<12-hex>" (docker) or "rz-ckpt-<12-hex>" (msb),
+// { ref: "rightsize/checkpoint:<12-hex>" (docker) or an absolute
+//   "<cacheDir>/checkpoints/rz-ckpt-<12-hex>" path (msb),
 //   backend: "docker" | "microsandbox", spec: <source's ContainerSpec> }
 await source.stop();
 
@@ -207,8 +228,9 @@ A checkpoint name must match `^[a-z0-9][a-z0-9-]{0,40}$` — lowercase
 letters, digits, and hyphens, starting with a letter or digit, at most 41
 characters — checked before any backend call; an invalid name throws
 `InvalidCheckpointNameError`. The name also makes the ref deterministic:
-`rightsize/checkpoint:<name>` on docker, `rz-ckpt-<name>` on microsandbox,
-instead of a random 12-hex suffix.
+`rightsize/checkpoint:<name>` on docker, the absolute path
+`<cacheDir>/checkpoints/rz-ckpt-<name>` on microsandbox, instead of a random
+12-hex suffix.
 
 Checkpointing under a name that's already taken REPLACES it: the same
 deterministic ref means the old artifact under that name is best-effort
@@ -325,12 +347,13 @@ ordinary `start()` against that image. Make sure the image is reachable
 
 **microsandbox refs change shape after import.** `importFrom`'s effective
 ref on microsandbox is a digest-derived directory name (`sha256-<16 hex
-chars>`, e.g. `sha256-b9c0448ee9d54e33`), never the `rz-ckpt-<name>` shape
-the archive itself carried — `msb snapshot load` writes under that
-directory name and doesn't let you choose it. This is deliberately NOT the
-full `sha256:<64 hex chars>` digest `msb snapshot list` also reports: that
-full digest does not resolve as a snapshot ref at all (msb treats it as a
-literal path), while the directory name does, for inspect/rm/restore alike.
+chars>`, e.g. `sha256-b9c0448ee9d54e33`), never the absolute
+`rz-ckpt-<name>` path the archive itself carried — `msb snapshot load`
+writes under that directory name and doesn't let you choose it. This is
+deliberately NOT the full `sha256:<64 hex chars>` digest `msb snapshot list`
+also reports: that full digest does not resolve as a snapshot ref at all
+(msb treats it as a literal path), while the directory name does, for
+inspect/rm/restore alike.
 This is harmless day to day (refs are opaque throughout this library; the
 returned `Checkpoint` restores normally, and `Checkpoints.find` on the
 importing machine shows the digest-dir-shaped ref from then on) but visible
@@ -355,6 +378,12 @@ entirely, the CLI one-liners still work:
 docker rmi rightsize/checkpoint:<ref>       # docker
 msb snapshot rm rz-ckpt-<ref>               # microsandbox
 ```
+
+`msb snapshot rm` takes the snapshot by name — its own index tracks a
+dest-dir artifact by name regardless of where the artifact itself lives on
+disk — so the one-liner above still works even though a library-minted
+`Checkpoint.ref` on microsandbox is the full `<cacheDir>/checkpoints/`
+path; drop everything before the trailing `rz-ckpt-<ref>` segment.
 
 Both backends' SPI also expose `removeCheckpoint(ref)` (best-effort, "not
 found" is success) for tests that want to clean up programmatically without

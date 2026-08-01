@@ -114,6 +114,34 @@ Every one of these is a real capability gap versus Docker's native bridge
 networking, not a timing quirk that resolves itself with retries — pick
 `RIGHTSIZE_BACKEND=docker` for a network topology this doesn't fit.
 
+## Disabling public-internet access
+
+`withNetworkDisabled()` blocks a container's outbound connections to the
+public internet on microsandbox (`--net private`): published ports keep
+serving inbound traffic and links to network-alias siblings on a private
+range keep working, but a connection out to anywhere else on the internet
+fails.
+
+```ts
+import { GenericContainer, Wait } from "rightsize";
+
+await using sandbox = await new GenericContainer("python:3.12-alpine")
+  .withNetworkDisabled()
+  .withCommand("sleep", "60")
+  .start();
+// published ports on `sandbox` still work; a call out to the public
+// internet from inside it doesn't.
+```
+
+docker ignores the flag entirely and runs with its normal networking —
+there's no portable way to block egress on docker while still keeping
+published ports reachable.
+
+`withNetworkDisabled()` cannot be combined with `withNetwork()`: `start()`
+throws `NetworkDisabledConflictError` before any backend call if both are
+set — a network-disabled container can't also join a `Network` for sibling
+connectivity.
+
 ## Duplicate ports and invalid aliases fail fast
 
 Two siblings on one network both exposing the same guest port, or an alias

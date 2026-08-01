@@ -200,6 +200,12 @@ backend-specific rather than behavioral divergences:
   hardware-virtualized isolation - for workloads that shouldn't silently
   degrade to a shared-kernel fallback. See
   [Isolation](https://ngriaznov.github.io/rightsize-node/guide/isolation).
+- **Resource and network controls, msb-only.** `.withDiskLimit(mb)` caps the
+  writable root disk, `.withTmpfsRoot(mb)` backs it with RAM instead, and
+  `.withNetworkDisabled()` blocks public-internet egress while published
+  ports keep serving - docker ignores all three. See
+  [Isolation](https://ngriaznov.github.io/rightsize-node/guide/isolation)
+  and [Networking](https://ngriaznov.github.io/rightsize-node/guide/networking).
 - **Checkpoint / restore.** `checkpoint()` captures a running container's
   filesystem (image commit on docker, disk snapshot on microsandbox);
   `fromCheckpoint()` boots fresh containers from it - skip repeated

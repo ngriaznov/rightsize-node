@@ -86,6 +86,17 @@ substitute for basic hygiene inside the sandbox itself:
 - **Set a memory limit.** `withMemoryLimit(megabytes)` caps what the
   workload can consume — untrusted code has no reason to be trusted with an
   unbounded ceiling either. See [Configuration](/guide/configuration).
+- **Cap or RAM-back the root disk.** `withDiskLimit(megabytes)` caps the
+  writable root disk on microsandbox; `withTmpfsRoot(megabytes)` backs it
+  with RAM instead, for a container you don't want leaving anything on disk
+  at all. Both are msb-only — docker ignores them. A tmpfs root can't be
+  checkpointed, so pick `withDiskLimit()` instead if you also plan to
+  checkpoint the container.
+- **Block public-internet egress if the workload doesn't need it.**
+  `withNetworkDisabled()` blocks outbound connections to the public internet
+  on microsandbox while published ports keep serving — untrusted code has no
+  reason to reach out either. See
+  [Networking](/guide/networking#disabling-public-internet-access).
 - **Never put secrets in `withEnv`.** Environment variables are visible to
   anything running inside the container, including the code you don't
   trust. Pass secrets in only if the workload specifically needs them, and

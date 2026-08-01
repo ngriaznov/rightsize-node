@@ -5,7 +5,61 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`GenericContainer.withDiskLimit(megabytes)`** caps the writable root disk
+  on microsandbox (`--root-disk <mb>M`); docker runs without a ceiling and
+  ignores it. On an msb reboot the ceiling can only grow, never shrink.
+  Mutually exclusive with `withTmpfsRoot()` — `start()` throws
+  `RootDiskConflictError` before any backend call if both are set. msb also
+  rejects any root-disk setting on a `fromCheckpoint()` restore before boot,
+  since the snapshot itself pins the root disk.
+- **`GenericContainer.withTmpfsRoot(megabytes)`** backs the writable root
+  with RAM instead of disk on microsandbox (`--root-disk tmpfs:<mb>M`) —
+  faster ephemeral containers, no disk residue left behind; docker ignores
+  it. Must fit inside the guest memory: msb defaults to 512M when
+  `withMemoryLimit` is unset, and `start()` throws
+  `TmpfsRootExceedsMemoryError` when both are set and the tmpfs size exceeds
+  the memory limit. A tmpfs root cannot be checkpointed — `checkpoint()`
+  throws `TmpfsRootCheckpointError` before touching anything, so a refused
+  named re-checkpoint leaves the existing checkpoint under that name intact.
+- **`GenericContainer.withNetworkDisabled()`** blocks the guest's
+  public-internet access on microsandbox (`--net private`) — published ports
+  keep serving and private-range links keep working, only outbound
+  connections to the public internet fail; docker ignores the flag entirely,
+  since there's no portable way to block egress there while keeping
+  published ports reachable. Cannot be combined with `withNetwork()` —
+  `start()` throws `NetworkDisabledConflictError` before any backend call if
+  both are set.
+
+### Changed
+
+- **msb checkpoint artifacts now live under `<cacheDir>/checkpoints/`**
+  (`~/.cache/rightsize` on macOS/Linux, `%LOCALAPPDATA%\rightsize` on
+  Windows), created via msb's `--dest-dir` rather than its own default
+  snapshot store. `Checkpoint.ref` for msb is now the absolute artifact
+  path — the ref remains an opaque string throughout the public API, and an
+  old bare-name ref from an earlier release still restores. The snapshot
+  still appears in `msb snapshot list` (msb keeps its own global index
+  alongside the dest-dir artifact); removing it through this library
+  (`Checkpoints.remove`, the `removeCheckpoint` SPI) cleans both. Export and
+  import are unaffected.
+- **`ContainerSpec` gained three required members** —
+  `diskLimitMb: number | undefined`, `tmpfsRootMb: number | undefined`, and
+  `networkDisabled: boolean` — backing the three builders above. Anything
+  constructing a `ContainerSpec` object literal directly, such as a custom
+  `SandboxBackend` test fixture, needs to add them.
+
+### Fixed
+
+- **Container boot's install-lock retry now also recognizes msb's second
+  refusal phrasing.** msb 0.6.8 words the "an install is already in
+  progress" refusal differently depending on which side holds the lock —
+  "microsandbox install operation in progress until `<ts>`; retry after it
+  completes" or "another microsandbox install operation is in progress until
+  `<ts>`" — and the boot-retry classifier only recognized the first. Both
+  phrasings now route through the same 30-second polling retry instead of
+  the second one failing the boot outright.
 
 ## [0.6.1] - 2026-08-01
 
