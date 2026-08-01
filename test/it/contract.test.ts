@@ -816,7 +816,7 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
   // real backends today, minting the backend-appropriate ref shape and
   // naming itself as the creator.
   itIntegration(
-    `checkpoint gating: checkpoint() succeeds on a running container and mints a ${BACKEND_NAME === "docker" ? "rightsize/checkpoint:<12-hex> image ref" : "rz-ckpt-<12-hex> snapshot ref"}`,
+    `checkpoint gating: checkpoint() succeeds on a running container and mints a ${BACKEND_NAME === "docker" ? "rightsize/checkpoint:<12-hex> image ref" : "<cacheDir>/checkpoints/rz-ckpt-<12-hex> artifact-path ref"}`,
     async () => {
       const container = new GenericContainer("alpine:3.19").withBackend(makeBackend()).withCommand("sleep", "60");
       await container.start();
@@ -827,7 +827,11 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
         if (BACKEND_NAME === "docker") {
           assert.match(cp.ref, /^rightsize\/checkpoint:[0-9a-f]{12}$/);
         } else {
-          assert.match(cp.ref, /^rz-ckpt-[0-9a-f]{12}$/);
+          // The msb ref is the absolute artifact path — created under the cache
+          // dir via --dest-dir and restored by path.
+          assert.ok(path.isAbsolute(cp.ref), `expected an absolute path ref, got ${cp.ref}`);
+          assert.equal(path.basename(path.dirname(cp.ref)), "checkpoints");
+          assert.match(path.basename(cp.ref), /^rz-ckpt-[0-9a-f]{12}$/);
           // msb's stop/snapshot/reboot cycle restarts the workload — the
           // container must come back up and answer exec normally.
           const probe = await container.exec("true");
