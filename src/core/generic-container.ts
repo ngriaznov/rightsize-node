@@ -251,6 +251,8 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * docker runs without a ceiling. On an msb reboot the ceiling can only
    * grow, never shrink. Mutually exclusive with `withTmpfsRoot()`: `start()`
    * throws `RootDiskConflictError` before any backend call if both are set.
+   * msb rejects a root-disk setting on a `fromCheckpoint()` restore before
+   * boot — the snapshot pins the root disk.
    */
   withDiskLimit(megabytes: number): this {
     this.diskLimitMb = megabytes;
@@ -264,7 +266,8 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * `TmpfsRootExceedsMemoryError` when it's set and exceeded). A tmpfs root
    * is ephemeral and cannot be checkpointed. Mutually exclusive with
    * `withDiskLimit()`. docker runs with its normal disk-backed rootfs and
-   * ignores this.
+   * ignores this. msb rejects a root-disk setting on a `fromCheckpoint()`
+   * restore before boot — the snapshot pins the root disk.
    */
   withTmpfsRoot(megabytes: number): this {
     this.tmpfsRootMb = megabytes;
