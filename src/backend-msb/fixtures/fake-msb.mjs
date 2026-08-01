@@ -25,6 +25,12 @@ function logCall(state, cmd, args) {
   state.callLog = [...(state.callLog ?? []), { cmd, args }];
 }
 function writeState(state) {
+  // A test that never inspects state may spawn this fixture without
+  // RIGHTSIZE_FAKE_MSB_STATE — persisting would then target the literal
+  // path "undefined" (and leak its tmp file into the cwd), so skip.
+  if (statePath === undefined) {
+    return;
+  }
   // Several fixture processes (the long-lived `run`, and one-shot `ls`/
   // `stop`/`rm` invocations) read and write this same file concurrently
   // with no locking. A direct writeFileSync can be observed mid-write by a

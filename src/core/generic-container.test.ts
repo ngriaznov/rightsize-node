@@ -593,6 +593,47 @@ describe("GenericContainer — root-disk/tmpfs/network-disabled pre-start valida
     assert.ok(thrown instanceof NetworkDisabledConflictError, `expected NetworkDisabledConflictError, got: ${String(thrown)}`);
     assert.equal(backend.calls.length, 0);
   });
+
+  it("a customizeSpec override that introduces the root-disk conflict is still rejected before any backend call", async () => {
+    // The builder-level check runs before customizeSpec, so a subclass that
+    // mutates the spec is caught only by the final-spec re-validation.
+    class TmpfsInjectingContainer extends GenericContainer {
+      protected override customizeSpec(spec: ContainerSpec, _mapped: (guest: number) => number): ContainerSpec {
+        return { ...spec, tmpfsRootMb: 256 };
+      }
+    }
+    const backend = new FakeBackend();
+    const container = new TmpfsInjectingContainer("alpine:3.19").withBackend(backend).withDiskLimit(1024).waitingFor(instantReady());
+
+    let thrown: unknown;
+    try {
+      await container.start();
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof RootDiskConflictError, `expected RootDiskConflictError, got: ${String(thrown)}`);
+    assert.equal(backend.calls.filter((c) => c.op === "create").length, 0);
+  });
+
+  it("a customizeSpec override that disables networking on a networked spec is still rejected", async () => {
+    class NetworkDisablingContainer extends GenericContainer {
+      protected override customizeSpec(spec: ContainerSpec, _mapped: (guest: number) => number): ContainerSpec {
+        return { ...spec, networkDisabled: true };
+      }
+    }
+    const backend = new FakeBackend();
+    const net = Network.newNetwork();
+    const container = new NetworkDisablingContainer("alpine:3.19").withBackend(backend).withNetwork(net).waitingFor(instantReady());
+
+    let thrown: unknown;
+    try {
+      await container.start();
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof NetworkDisabledConflictError, `expected NetworkDisabledConflictError, got: ${String(thrown)}`);
+    assert.equal(backend.calls.filter((c) => c.op === "create").length, 0);
+  });
 });
 
 describe("GenericContainer — U9 async-dispose", () => {

@@ -383,13 +383,15 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       tmpfsRootMb: this.tmpfsRootMb,
       networkDisabled: this.networkDisabled,
     };
-    return this.customizeSpec(spec, (guest) => {
-      const p = ports.get(guest);
-      if (p === undefined) {
-        throw new Error(`no allocated host port for guest port ${guest}`);
-      }
-      return p;
-    });
+    return GenericContainer.validateSpecConflicts(
+      this.customizeSpec(spec, (guest) => {
+        const p = ports.get(guest);
+        if (p === undefined) {
+          throw new Error(`no allocated host port for guest port ${guest}`);
+        }
+        return p;
+      }),
+    );
   }
 
   /** The reuse-active counterpart of `buildSpec`: always `keepAlive: true`, named `rz-reuse-<hash12>` rather than the run-scoped `rz-<runId>-<seq>`, and never joined to a `Network` (rejected earlier in `start()`). */
@@ -419,13 +421,35 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       tmpfsRootMb: this.tmpfsRootMb,
       networkDisabled: this.networkDisabled,
     };
-    return this.customizeSpec(spec, (guest) => {
-      const p = ports.get(guest);
-      if (p === undefined) {
-        throw new Error(`no allocated host port for guest port ${guest}`);
-      }
-      return p;
-    });
+    return GenericContainer.validateSpecConflicts(
+      this.customizeSpec(spec, (guest) => {
+        const p = ports.get(guest);
+        if (p === undefined) {
+          throw new Error(`no allocated host port for guest port ${guest}`);
+        }
+        return p;
+      }),
+    );
+  }
+
+  /**
+   * Re-checks the root-disk/network conflicts on the FINAL spec, after
+   * `customizeSpec` has run: the builder-level check in
+   * `validateRootDiskAndNetworkOptions` cannot see mutations a subclass's
+   * `customizeSpec` override makes, and an invalid combination must never
+   * reach a backend regardless of where it was introduced.
+   */
+  private static validateSpecConflicts(spec: ContainerSpec): ContainerSpec {
+    if (spec.diskLimitMb !== undefined && spec.tmpfsRootMb !== undefined) {
+      throw new RootDiskConflictError();
+    }
+    if (spec.tmpfsRootMb !== undefined && spec.memoryLimitMb !== undefined && spec.tmpfsRootMb > spec.memoryLimitMb) {
+      throw new TmpfsRootExceedsMemoryError(spec.tmpfsRootMb, spec.memoryLimitMb);
+    }
+    if (spec.networkDisabled && spec.networkId !== undefined) {
+      throw new NetworkDisabledConflictError();
+    }
+    return spec;
   }
 
   /** This container's reuse identity hash — the reuse-relevant subset of its builder state, hashed per `reuseHash`'s canonical form. Reads every `withCopyFileToContainer` source file's CURRENT content, so a mutated source file between two `start()` calls changes identity. */
