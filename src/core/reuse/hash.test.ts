@@ -12,6 +12,9 @@ function baseIdentity(overrides: Partial<ReuseIdentitySpec> = {}): ReuseIdentity
     exposedPorts: [6379],
     memoryLimitMb: undefined,
     copies: [],
+    diskLimitMb: undefined,
+    tmpfsRootMb: undefined,
+    networkDisabled: false,
     ...overrides,
   };
 }
@@ -85,6 +88,29 @@ describe("reuseHash — identity rules", () => {
     const a = await reuseHash(baseIdentity({ memoryLimitMb: undefined }));
     const b = await reuseHash(baseIdentity({ memoryLimitMb: 512 }));
     assert.ok(a !== b);
+  });
+
+  it("diskLimitMb undefined vs a set value changes the hash", async () => {
+    const a = await reuseHash(baseIdentity({ diskLimitMb: undefined }));
+    const b = await reuseHash(baseIdentity({ diskLimitMb: 2048 }));
+    assert.ok(a !== b);
+  });
+
+  it("tmpfsRootMb undefined vs a set value changes the hash", async () => {
+    const a = await reuseHash(baseIdentity({ tmpfsRootMb: undefined }));
+    const b = await reuseHash(baseIdentity({ tmpfsRootMb: 256 }));
+    assert.ok(a !== b);
+  });
+
+  it("networkDisabled false vs true changes the hash", async () => {
+    const a = await reuseHash(baseIdentity({ networkDisabled: false }));
+    const b = await reuseHash(baseIdentity({ networkDisabled: true }));
+    assert.ok(a !== b);
+  });
+
+  it("leaving diskLimitMb/tmpfsRootMb/networkDisabled at their unset defaults does not disturb the pinned vector", async () => {
+    const hash = await reuseHash(baseIdentity());
+    assert.equal(hash, PINNED_VECTOR_HASH);
   });
 });
 

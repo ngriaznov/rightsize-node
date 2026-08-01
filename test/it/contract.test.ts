@@ -425,6 +425,9 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
       memoryLimitMb: undefined,
       keepAlive: false,
       checkpointRef: undefined,
+      diskLimitMb: undefined,
+      tmpfsRootMb: undefined,
+      networkDisabled: false,
     };
     const handle = await backend.create(spec);
     await backend.start(handle);
@@ -479,6 +482,9 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
         memoryLimitMb: undefined,
         keepAlive: false,
         checkpointRef: undefined,
+        diskLimitMb: undefined,
+        tmpfsRootMb: undefined,
+        networkDisabled: false,
       };
       const handle = await scratchBackend.create(spec);
       await scratchBackend.start(handle);
@@ -547,6 +553,9 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
         exposedPorts: [6379],
         memoryLimitMb: undefined,
         copies: [],
+        diskLimitMb: undefined,
+        tmpfsRootMb: undefined,
+        networkDisabled: false,
       });
       assert.equal(hash, "799aad5a3338ce3d36999c7ff2733d4673c0592d417563f334544693ec1907a5");
       assert.equal(reuseName(hash), "rz-reuse-799aad5a3338");
@@ -566,6 +575,9 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
         exposedPorts: [],
         memoryLimitMb: undefined,
         copies: [],
+        diskLimitMb: undefined,
+        tmpfsRootMb: undefined,
+        networkDisabled: false,
       });
       try {
         const container = new GenericContainer("alpine:3.19")
@@ -612,6 +624,9 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
         exposedPorts: [8000],
         memoryLimitMb: undefined,
         copies: [],
+        diskLimitMb: undefined,
+        tmpfsRootMb: undefined,
+        networkDisabled: false,
       });
       const name = reuseName(hash);
 
@@ -665,6 +680,9 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
           memoryLimitMb: undefined,
           keepAlive: true,
           checkpointRef: undefined,
+          diskLimitMb: undefined,
+          tmpfsRootMb: undefined,
+          networkDisabled: false,
         });
         assert.ok(stillRunning !== undefined, "expected the reuse sandbox to be running under its deterministic name");
       } finally {
@@ -706,6 +724,9 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
         exposedPorts: [],
         memoryLimitMb: undefined,
         copies: [],
+        diskLimitMb: undefined,
+        tmpfsRootMb: undefined,
+        networkDisabled: false,
       });
       const name = reuseName(hash);
 
@@ -735,6 +756,9 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
           memoryLimitMb: undefined,
           keepAlive: true,
           checkpointRef: undefined,
+          diskLimitMb: undefined,
+          tmpfsRootMb: undefined,
+          networkDisabled: false,
         });
         assert.ok(stillRunning !== undefined, "expected the backend-native sandbox to still be running after stop()");
       } finally {

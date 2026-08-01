@@ -271,3 +271,71 @@ export class MalformedCheckpointArchiveError extends Error {
     this.name = "MalformedCheckpointArchiveError";
   }
 }
+
+/**
+ * Thrown at `start()` when a container is both marked `withDiskLimit()` and
+ * `withTmpfsRoot()` — the root disk is either size-capped or RAM-backed, not
+ * both. Thrown before any backend call.
+ */
+export class RootDiskConflictError extends Error {
+  constructor() {
+    super(
+      "withDiskLimit() cannot be combined with withTmpfsRoot() — the root disk is either size-capped or " +
+        "RAM-backed, not both. Drop one.",
+    );
+    this.name = "RootDiskConflictError";
+  }
+}
+
+/**
+ * Thrown at `start()` when `withTmpfsRoot(tmpfsMb)` exceeds an explicit
+ * `withMemoryLimit(memoryMb)` — a tmpfs root lives in guest memory and must
+ * fit inside it. Not checked when no memory limit was set: the backend's own
+ * error against its default guest memory is precise enough on its own.
+ * Thrown before any backend call.
+ */
+export class TmpfsRootExceedsMemoryError extends Error {
+  constructor(
+    /** The requested tmpfs root size, in MB. */
+    readonly tmpfsMb: number,
+    /** The explicit memory limit it exceeds, in MB. */
+    readonly memoryMb: number,
+  ) {
+    super(
+      `withTmpfsRoot(${tmpfsMb}) exceeds withMemoryLimit(${memoryMb}) — a tmpfs root lives in guest memory and ` +
+        "must fit inside it.",
+    );
+    this.name = "TmpfsRootExceedsMemoryError";
+  }
+}
+
+/**
+ * Thrown at `start()` when a container is both marked `withNetworkDisabled()`
+ * and joined to a `Network` via `withNetwork()` — a network-disabled
+ * container cannot join a network. Thrown before any backend call.
+ */
+export class NetworkDisabledConflictError extends Error {
+  constructor() {
+    super(
+      "withNetworkDisabled() cannot be combined with withNetwork() — a network-disabled container cannot join " +
+        "a network. Drop one.",
+    );
+    this.name = "NetworkDisabledConflictError";
+  }
+}
+
+/**
+ * Thrown by the microsandbox backend's `createCheckpoint` when the container
+ * uses `withTmpfsRoot()` — a tmpfs root is ephemeral, so there is nothing on
+ * disk for a snapshot to capture. Thrown first, before the backend stops the
+ * sandbox for the snapshot attempt.
+ */
+export class TmpfsRootCheckpointError extends Error {
+  constructor() {
+    super(
+      "this container uses a tmpfs root (withTmpfsRoot), which is ephemeral and cannot be checkpointed — use " +
+        "withDiskLimit or the default root disk for checkpointable containers.",
+    );
+    this.name = "TmpfsRootCheckpointError";
+  }
+}

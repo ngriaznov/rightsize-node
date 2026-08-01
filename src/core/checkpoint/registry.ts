@@ -216,7 +216,9 @@ export function toCheckpointRegistrySpec(spec: ContainerSpec): CheckpointRegistr
  * `memoryLimitMb` — carry real information; every other field is a stable
  * placeholder, since the registry never persists it. `checkpointRef` mirrors
  * what a live backend hands back after its own reboot-from-snapshot cycle:
- * pointing at itself.
+ * pointing at itself. `diskLimitMb`/`tmpfsRootMb`/`networkDisabled` are
+ * placeholders too — the registry's pinned `CheckpointRegistrySpec` shape
+ * doesn't carry them, same as it never carried `keepAlive`.
  */
 export function fromCheckpointRegistryEntry(entry: CheckpointRegistryEntry): ContainerSpec {
   return {
@@ -232,5 +234,8 @@ export function fromCheckpointRegistryEntry(entry: CheckpointRegistryEntry): Con
     memoryLimitMb: entry.spec.memoryLimitMb ?? undefined,
     keepAlive: false,
     checkpointRef: entry.ref,
+    diskLimitMb: undefined,
+    tmpfsRootMb: undefined,
+    networkDisabled: false,
   };
 }

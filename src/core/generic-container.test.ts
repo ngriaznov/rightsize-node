@@ -6,7 +6,7 @@ import { describe, it, assert, beforeEach, afterEach, after } from "../../test/h
 import { GenericContainer } from "./generic-container.js";
 import { Network } from "./network.js";
 import type { WaitStrategy } from "./wait.js";
-import { PortBindConflictError } from "./errors.js";
+import { PortBindConflictError, RootDiskConflictError, TmpfsRootExceedsMemoryError, NetworkDisabledConflictError } from "./errors.js";
 import { FreePorts } from "./free-ports.js";
 import type { SandboxBackend, SandboxHandle, NetworkLink, ReaperKillCommand, BackendProvider } from "./backend.js";
 import type { ContainerSpec, ExecResult } from "./model.js";
@@ -471,6 +471,127 @@ describe("GenericContainer — U8 mapped-port cause disambiguation + memory limi
     await container.start();
     assert.equal(backend.createdHandles[0]?.spec.memoryLimitMb, undefined);
     await container.stop();
+  });
+});
+
+describe("GenericContainer — disk limit, tmpfs root, and network-disabled builders", () => {
+  it("withDiskLimit reaches spec.diskLimitMb", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).withDiskLimit(2048).waitingFor(instantReady());
+    await container.start();
+    assert.equal(backend.createdHandles[0]?.spec.diskLimitMb, 2048);
+    await container.stop();
+  });
+
+  it("diskLimitMb defaults to undefined", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).waitingFor(instantReady());
+    await container.start();
+    assert.equal(backend.createdHandles[0]?.spec.diskLimitMb, undefined);
+    await container.stop();
+  });
+
+  it("withTmpfsRoot reaches spec.tmpfsRootMb", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).withTmpfsRoot(256).waitingFor(instantReady());
+    await container.start();
+    assert.equal(backend.createdHandles[0]?.spec.tmpfsRootMb, 256);
+    await container.stop();
+  });
+
+  it("tmpfsRootMb defaults to undefined", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).waitingFor(instantReady());
+    await container.start();
+    assert.equal(backend.createdHandles[0]?.spec.tmpfsRootMb, undefined);
+    await container.stop();
+  });
+
+  it("withNetworkDisabled reaches spec.networkDisabled", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).withNetworkDisabled().waitingFor(instantReady());
+    await container.start();
+    assert.equal(backend.createdHandles[0]?.spec.networkDisabled, true);
+    await container.stop();
+  });
+
+  it("networkDisabled defaults to false", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).waitingFor(instantReady());
+    await container.start();
+    assert.equal(backend.createdHandles[0]?.spec.networkDisabled, false);
+    await container.stop();
+  });
+});
+
+describe("GenericContainer — root-disk/tmpfs/network-disabled pre-start validation", () => {
+  it("withDiskLimit + withTmpfsRoot: rejects with RootDiskConflictError before any backend call", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).withDiskLimit(1024).withTmpfsRoot(256).waitingFor(instantReady());
+
+    let thrown: unknown;
+    try {
+      await container.start();
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof RootDiskConflictError, `expected RootDiskConflictError, got: ${String(thrown)}`);
+    assert.equal(backend.calls.length, 0);
+  });
+
+  it("withTmpfsRoot alone, no withMemoryLimit: no validation error even with a huge tmpfs value", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).withTmpfsRoot(999_999).waitingFor(instantReady());
+    await container.start();
+    assert.equal(container.isRunning, true);
+    await container.stop();
+  });
+
+  it("withTmpfsRoot exceeding withMemoryLimit: rejects with TmpfsRootExceedsMemoryError before any backend call", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19")
+      .withBackend(backend)
+      .withMemoryLimit(512)
+      .withTmpfsRoot(1024)
+      .waitingFor(instantReady());
+
+    let thrown: unknown;
+    try {
+      await container.start();
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof TmpfsRootExceedsMemoryError, `expected TmpfsRootExceedsMemoryError, got: ${String(thrown)}`);
+    assert.equal((thrown as TmpfsRootExceedsMemoryError).tmpfsMb, 1024);
+    assert.equal((thrown as TmpfsRootExceedsMemoryError).memoryMb, 512);
+    assert.equal(backend.calls.length, 0);
+  });
+
+  it("withTmpfsRoot at or under withMemoryLimit: no validation error", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19")
+      .withBackend(backend)
+      .withMemoryLimit(512)
+      .withTmpfsRoot(512)
+      .waitingFor(instantReady());
+    await container.start();
+    assert.equal(container.isRunning, true);
+    await container.stop();
+  });
+
+  it("withNetworkDisabled + withNetwork: rejects with NetworkDisabledConflictError before any backend call", async () => {
+    const backend = new FakeBackend();
+    const net = Network.newNetwork();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).withNetworkDisabled().withNetwork(net).waitingFor(instantReady());
+
+    let thrown: unknown;
+    try {
+      await container.start();
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof NetworkDisabledConflictError, `expected NetworkDisabledConflictError, got: ${String(thrown)}`);
+    assert.equal(backend.calls.length, 0);
   });
 });
 

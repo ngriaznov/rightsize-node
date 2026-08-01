@@ -14,6 +14,9 @@ import {
   ReuseFromCheckpointError,
   RelativeContainerPathError,
   BackendError,
+  RootDiskConflictError,
+  TmpfsRootExceedsMemoryError,
+  NetworkDisabledConflictError,
 } from "./errors.js";
 import { requireValidCheckpointName } from "./checkpoint/name.js";
 import { checkpointRef } from "./checkpoint/ref.js";
@@ -124,6 +127,9 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
   private mounts: FileMount[] = [];
   private waitStrategy: WaitStrategy = Wait.forListeningPort();
   private memoryLimitMb: number | undefined;
+  private diskLimitMb: number | undefined;
+  private tmpfsRootMb: number | undefined;
+  private networkDisabled = false;
   private backendOverride: SandboxBackend | undefined;
   private reuseRequested = false;
   private requireIsolationRequested = false;
@@ -239,6 +245,43 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     return this;
   }
 
+  /**
+   * Caps the writable root disk at `megabytes` — msb-only (`--root-disk`);
+   * docker runs without a ceiling. On an msb reboot the ceiling can only
+   * grow, never shrink. Mutually exclusive with `withTmpfsRoot()`: `start()`
+   * throws `RootDiskConflictError` before any backend call if both are set.
+   */
+  withDiskLimit(megabytes: number): this {
+    this.diskLimitMb = megabytes;
+    return this;
+  }
+
+  /**
+   * Backs the writable root with RAM instead of disk, capped at `megabytes`
+   * — msb-only; must fit inside the guest memory (msb's own default is
+   * 512M when `withMemoryLimit` is unset — `start()` throws
+   * `TmpfsRootExceedsMemoryError` when it's set and exceeded). A tmpfs root
+   * is ephemeral and cannot be checkpointed. Mutually exclusive with
+   * `withDiskLimit()`. docker runs with its normal disk-backed rootfs and
+   * ignores this.
+   */
+  withTmpfsRoot(megabytes: number): this {
+    this.tmpfsRootMb = megabytes;
+    return this;
+  }
+
+  /**
+   * Blocks the guest's public-internet access on msb (`--net private` — its
+   * published ports and private-range links keep working); docker ignores
+   * it and runs with normal networking. Cannot be combined with
+   * `withNetwork()`: `start()` throws `NetworkDisabledConflictError` before
+   * any backend call if both are set.
+   */
+  withNetworkDisabled(): this {
+    this.networkDisabled = true;
+    return this;
+  }
+
   /** Test/advanced seam: pin the backend instead of resolving `Backends.active()`. */
   withBackend(backend: SandboxBackend): this {
     this.backendOverride = backend;
@@ -335,6 +378,9 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       // deliberately (Testcontainers semantics), so it must stay false.
       keepAlive: false,
       checkpointRef: this.checkpointRef,
+      diskLimitMb: this.diskLimitMb,
+      tmpfsRootMb: this.tmpfsRootMb,
+      networkDisabled: this.networkDisabled,
     };
     return this.customizeSpec(spec, (guest) => {
       const p = ports.get(guest);
@@ -368,6 +414,9 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       // built (see ReuseFromCheckpointError) — always undefined in
       // practice, present only to satisfy ContainerSpec's shape.
       checkpointRef: this.checkpointRef,
+      diskLimitMb: this.diskLimitMb,
+      tmpfsRootMb: this.tmpfsRootMb,
+      networkDisabled: this.networkDisabled,
     };
     return this.customizeSpec(spec, (guest) => {
       const p = ports.get(guest);
@@ -387,6 +436,9 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       exposedPorts: this.exposedPorts,
       memoryLimitMb: this.memoryLimitMb,
       copies: this.mounts.map((m) => ({ guestPath: m.guestPath, hostPath: m.hostPath })),
+      diskLimitMb: this.diskLimitMb,
+      tmpfsRootMb: this.tmpfsRootMb,
+      networkDisabled: this.networkDisabled,
     });
   }
 
@@ -401,6 +453,25 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
   private releasePorts(ports: Map<number, number>): void {
     for (const hostPort of ports.values()) {
       FreePorts.release(hostPort);
+    }
+  }
+
+  /**
+   * Fails fast — before any backend call — on the combinations
+   * `withDiskLimit`, `withTmpfsRoot`, and `withNetworkDisabled` make
+   * impossible: a size-capped root disk and a RAM-backed one can't both
+   * apply, a RAM-backed root can't outgrow an explicit memory ceiling, and a
+   * network-disabled container can't join a `Network`.
+   */
+  private validateRootDiskAndNetworkOptions(): void {
+    if (this.diskLimitMb !== undefined && this.tmpfsRootMb !== undefined) {
+      throw new RootDiskConflictError();
+    }
+    if (this.tmpfsRootMb !== undefined && this.memoryLimitMb !== undefined && this.tmpfsRootMb > this.memoryLimitMb) {
+      throw new TmpfsRootExceedsMemoryError(this.tmpfsRootMb, this.memoryLimitMb);
+    }
+    if (this.networkDisabled && this.network !== undefined) {
+      throw new NetworkDisabledConflictError();
     }
   }
 
@@ -420,6 +491,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    */
   async start(): Promise<this> {
     const backend = this.resolveBackend();
+    this.validateRootDiskAndNetworkOptions();
     // Before any backend work at all: a checkpoint ref is only meaningful
     // to the backend that minted it (a docker image tag means nothing to
     // msb, a msb snapshot name means nothing to docker).

@@ -579,6 +579,9 @@ describe("GenericContainer.fromCheckpoint()", () => {
         memoryLimitMb: undefined,
         keepAlive: false,
         checkpointRef: "rightsize/checkpoint:abcdef012345",
+        diskLimitMb: undefined,
+        tmpfsRootMb: undefined,
+        networkDisabled: false,
       },
     };
 

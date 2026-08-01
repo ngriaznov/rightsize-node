@@ -21,6 +21,12 @@ export interface ReuseIdentitySpec {
   readonly memoryLimitMb: number | undefined;
   /** Order does not affect the hash (canonicalized by sorting on `guestPath`); content is hashed from `hostPath` at call time. */
   readonly copies: ReadonlyArray<{ readonly guestPath: string; readonly hostPath: string }>;
+  /** Treated exactly like `memoryLimitMb`: unset never affects the hash, a value always does. */
+  readonly diskLimitMb: number | undefined;
+  /** Treated exactly like `memoryLimitMb`: unset never affects the hash, a value always does. */
+  readonly tmpfsRootMb: number | undefined;
+  /** Treated exactly like `memoryLimitMb`: `false` never affects the hash, `true` always does. */
+  readonly networkDisabled: boolean;
 }
 
 interface CanonicalCopy {
@@ -35,6 +41,12 @@ interface CanonicalForm {
   readonly exposedPorts: ReadonlyArray<number>;
   readonly memoryLimitMb: number | null;
   readonly copies: ReadonlyArray<CanonicalCopy>;
+  // Omitted entirely (not present as null/false) when unset, so a spec that
+  // never touches these three keeps hashing exactly as it did before they
+  // existed — see the pinned cross-language vector in hash.test.ts.
+  readonly diskLimitMb?: number;
+  readonly tmpfsRootMb?: number;
+  readonly networkDisabled?: true;
 }
 
 function compareStrings(a: string, b: string): number {
@@ -52,8 +64,10 @@ async function hashFileContent(hostPath: string): Promise<string> {
  * object with keys inserted in sorted order, `command` normalized to `[]`
  * when unset, ports sorted ascending, `memoryLimitMb` normalized to `null`
  * when unset, and copies sorted by `guestPath` with each entry's content
- * read from `hostPath` and hashed. No whitespace — plain `JSON.stringify`
- * already produces none.
+ * read from `hostPath` and hashed. `diskLimitMb`/`tmpfsRootMb`/
+ * `networkDisabled` are appended only when set — a spec that never touches
+ * them serializes identically to one from before these fields existed. No
+ * whitespace — plain `JSON.stringify` already produces none.
  */
 async function canonicalize(spec: ReuseIdentitySpec): Promise<CanonicalForm> {
   const env: Record<string, string> = {};
@@ -76,6 +90,9 @@ async function canonicalize(spec: ReuseIdentitySpec): Promise<CanonicalForm> {
     exposedPorts: [...spec.exposedPorts].sort((a, b) => a - b),
     memoryLimitMb: spec.memoryLimitMb ?? null,
     copies,
+    ...(spec.diskLimitMb !== undefined ? { diskLimitMb: spec.diskLimitMb } : {}),
+    ...(spec.tmpfsRootMb !== undefined ? { tmpfsRootMb: spec.tmpfsRootMb } : {}),
+    ...(spec.networkDisabled ? { networkDisabled: true as const } : {}),
   };
 }
 

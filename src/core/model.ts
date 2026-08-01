@@ -83,6 +83,35 @@ export interface ContainerSpec {
    * its normal image boot when this is set.
    */
   readonly checkpointRef: string | undefined;
+  /**
+   * A writable-root-disk ceiling in MB, set via `withDiskLimit` — msb-only
+   * (`--root-disk`); docker runs without a ceiling. On an msb reboot the
+   * ceiling can only grow, never shrink. Mutually exclusive with
+   * `tmpfsRootMb` (`start()` throws `RootDiskConflictError` before either
+   * builder call reaches a backend). Part of the reuse identity hash, the
+   * same as `memoryLimitMb`.
+   */
+  readonly diskLimitMb: number | undefined;
+  /**
+   * A RAM-backed writable root, capped at this many MB, set via
+   * `withTmpfsRoot` — msb-only; must fit inside the guest memory (msb's own
+   * default is 512M when `memoryLimitMb` is unset — `start()` throws
+   * `TmpfsRootExceedsMemoryError` when it's set and exceeded). A tmpfs root
+   * is ephemeral and cannot be checkpointed. Mutually exclusive with
+   * `diskLimitMb`. docker runs with its normal disk-backed rootfs and
+   * ignores this field. Part of the reuse identity hash, the same as
+   * `memoryLimitMb`.
+   */
+  readonly tmpfsRootMb: number | undefined;
+  /**
+   * `true` when `withNetworkDisabled()` was called: blocks the guest's
+   * public-internet access on msb (`--net private` — its published ports
+   * and private-range links keep working); docker ignores it and runs with
+   * normal networking. Cannot be combined with `networkId` (`start()`
+   * throws `NetworkDisabledConflictError`). Part of the reuse identity
+   * hash, the same as `memoryLimitMb`.
+   */
+  readonly networkDisabled: boolean;
 }
 
 /**

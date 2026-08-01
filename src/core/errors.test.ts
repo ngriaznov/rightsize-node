@@ -8,6 +8,10 @@ import {
   ReuseWithNetworkError,
   IsolationRequiredError,
   IncompatibleImageError,
+  RootDiskConflictError,
+  TmpfsRootExceedsMemoryError,
+  NetworkDisabledConflictError,
+  TmpfsRootCheckpointError,
 } from "./errors.js";
 import type { ContainerSpec, FileMount } from "./model.js";
 
@@ -28,6 +32,9 @@ function makeSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     memoryLimitMb: undefined,
     keepAlive: false,
     checkpointRef: undefined,
+    diskLimitMb: undefined,
+    tmpfsRootMb: undefined,
+    networkDisabled: false,
     ...overrides,
   };
 }
@@ -132,6 +139,47 @@ describe("IncompatibleImageError", () => {
   });
 });
 
+describe("RootDiskConflictError", () => {
+  it("is an Error with the right name and names both builder calls in its message", () => {
+    const err = new RootDiskConflictError();
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "RootDiskConflictError");
+    assert.match(err.message, /withDiskLimit\(\)/);
+    assert.match(err.message, /withTmpfsRoot\(\)/);
+  });
+});
+
+describe("TmpfsRootExceedsMemoryError", () => {
+  it("is an Error with the right name, carries both values, and names both builder calls in its message", () => {
+    const err = new TmpfsRootExceedsMemoryError(1024, 512);
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "TmpfsRootExceedsMemoryError");
+    assert.equal(err.tmpfsMb, 1024);
+    assert.equal(err.memoryMb, 512);
+    assert.match(err.message, /withTmpfsRoot\(1024\)/);
+    assert.match(err.message, /withMemoryLimit\(512\)/);
+  });
+});
+
+describe("NetworkDisabledConflictError", () => {
+  it("is an Error with the right name and names both builder calls in its message", () => {
+    const err = new NetworkDisabledConflictError();
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "NetworkDisabledConflictError");
+    assert.match(err.message, /withNetworkDisabled\(\)/);
+    assert.match(err.message, /withNetwork\(\)/);
+  });
+});
+
+describe("TmpfsRootCheckpointError", () => {
+  it("is an Error with the right name and names withTmpfsRoot in its message", () => {
+    const err = new TmpfsRootCheckpointError();
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "TmpfsRootCheckpointError");
+    assert.match(err.message, /withTmpfsRoot/);
+  });
+});
+
 describe("ContainerSpec test-builder defaults", () => {
   it("defaults memoryLimitMb to undefined", () => {
     const spec = makeSpec();
@@ -141,6 +189,13 @@ describe("ContainerSpec test-builder defaults", () => {
   it("defaults command to undefined (image default runs)", () => {
     const spec = makeSpec();
     assert.equal(spec.command, undefined);
+  });
+
+  it("defaults diskLimitMb, tmpfsRootMb, and networkDisabled to their unset values", () => {
+    const spec = makeSpec();
+    assert.equal(spec.diskLimitMb, undefined);
+    assert.equal(spec.tmpfsRootMb, undefined);
+    assert.equal(spec.networkDisabled, false);
   });
 
   it("allows overriding individual fields", () => {

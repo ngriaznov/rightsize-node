@@ -53,6 +53,9 @@ function baseSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     memoryLimitMb: undefined,
     keepAlive: false,
     checkpointRef: undefined,
+    diskLimitMb: undefined,
+    tmpfsRootMb: undefined,
+    networkDisabled: false,
     ...overrides,
   };
 }
@@ -229,6 +232,9 @@ describe("MsbCliBackend integration (real msb 0.6.8 binary)", () => {
         exposedPorts: [8000],
         memoryLimitMb: undefined,
         copies: [],
+        diskLimitMb: undefined,
+        tmpfsRootMb: undefined,
+        networkDisabled: false,
       });
       const name = reuseName(hash);
 

@@ -146,6 +146,9 @@ async function expectedReuseName(overrides: {
     exposedPorts: overrides.exposedPorts ?? [6379],
     memoryLimitMb: overrides.memoryLimitMb,
     copies: [],
+    diskLimitMb: undefined,
+    tmpfsRootMb: undefined,
+    networkDisabled: false,
   });
   return reuseName(hash);
 }
@@ -247,6 +250,9 @@ describe("GenericContainer — reuse double opt-in gating", () => {
       exposedPorts: [6379],
       memoryLimitMb: undefined,
       copies: [],
+      diskLimitMb: undefined,
+      tmpfsRootMb: undefined,
+      networkDisabled: false,
     });
     const found = await readRegistry(cacheDir, hash);
     assert.equal(found.kind, "found");
@@ -288,6 +294,9 @@ describe("GenericContainer — reuse adopt path", () => {
       exposedPorts: [6379],
       memoryLimitMb: undefined,
       copies: [],
+      diskLimitMb: undefined,
+      tmpfsRootMb: undefined,
+      networkDisabled: false,
     });
     const name = reuseName(hash);
     const entry: ReuseRegistryEntry = {
@@ -392,6 +401,9 @@ describe("GenericContainer — reuse adopt path", () => {
       exposedPorts: [6379],
       memoryLimitMb: undefined,
       copies: [],
+      diskLimitMb: undefined,
+      tmpfsRootMb: undefined,
+      networkDisabled: false,
     });
     const name = reuseName(hash);
     const dir = path.join(cacheDir, "reuse");
@@ -444,6 +456,9 @@ describe("GenericContainer — reuse fresh-create orphan recovery", () => {
       exposedPorts: [6379],
       memoryLimitMb: undefined,
       copies: [],
+      diskLimitMb: undefined,
+      tmpfsRootMb: undefined,
+      networkDisabled: false,
     });
     const name = reuseName(hash);
     const entry: ReuseRegistryEntry = {
@@ -709,6 +724,9 @@ describe("GenericContainer — reuse name-collision retry", () => {
           exposedPorts: spec.ports.map((p) => p.guestPort),
           memoryLimitMb: spec.memoryLimitMb,
           copies: [],
+          diskLimitMb: spec.diskLimitMb,
+          tmpfsRootMb: spec.tmpfsRootMb,
+          networkDisabled: spec.networkDisabled,
         });
         await writeRegistryAtomic(cacheDir, hash, {
           name: spec.name,
@@ -804,6 +822,9 @@ describe("GenericContainer — reuse fresh-create port-bind-conflict retry", () 
       exposedPorts: [6379],
       memoryLimitMb: undefined,
       copies: [],
+      diskLimitMb: undefined,
+      tmpfsRootMb: undefined,
+      networkDisabled: false,
     });
     const found = await readRegistry(cacheDir, hash);
     assert.equal(found.kind, "found");

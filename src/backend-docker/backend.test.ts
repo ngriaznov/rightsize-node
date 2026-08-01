@@ -24,6 +24,9 @@ function baseSpec(overrides: Partial<ContainerSpec> = {}): ContainerSpec {
     memoryLimitMb: undefined,
     keepAlive: false,
     checkpointRef: undefined,
+    diskLimitMb: undefined,
+    tmpfsRootMb: undefined,
+    networkDisabled: false,
     ...overrides,
   };
 }
