@@ -76,7 +76,7 @@ describe("Pinot module", () => {
     // linux/arm64 manifest, which no amd64 lane can pull; 1.3.0 carries both
     // architectures. The module default keeps floating per its own docs — this pin is
     // the IT's determinism, not a product change.
-    const pinot = await PinotContainer.start("apachepinot/pinot:1.3.0");
+    const pinot = await PinotContainer.start("apachepinot/pinot:1.5.0");
     try {
       const schema = {
         schemaName: "rightsizeTest",
