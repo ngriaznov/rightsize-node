@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.0] - 2026-08-04
+
 ### Added
 
 - **`GenericContainer.withDiskLimit(megabytes)`** caps the writable root disk
