@@ -72,7 +72,11 @@ async function retryUntil(fn: () => Promise<boolean>, attempts: number, delayMs:
 
 describe("Pinot module", () => {
   itIntegration("QuickStart cluster: schema POST/GET on the controller, health on both controller and broker", async () => {
-    const pinot = await PinotContainer.start();
+    // Pinned, not the floating default: upstream's :latest currently publishes only a
+    // linux/arm64 manifest, which no amd64 lane can pull; 1.3.0 carries both
+    // architectures. The module default keeps floating per its own docs — this pin is
+    // the IT's determinism, not a product change.
+    const pinot = await PinotContainer.start("apachepinot/pinot:1.3.0");
     try {
       const schema = {
         schemaName: "rightsizeTest",
