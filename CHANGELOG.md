@@ -7,6 +7,18 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.7.1] - 2026-08-16
+
+### Changed
+
+- **The pinned microsandbox release is now 0.6.9** (was 0.6.8). No CLI surface this
+  library drives changed, so no action is needed — the provisioner downloads and
+  checksum-verifies the new release automatically, and `MSB_PATH` setups validated
+  against 0.6.8 keep working. 0.6.9 also fixes two upstream issues this library
+  carried defenses for: the Windows snapshot-save flush failure (the salvage path
+  stays in place and now simply never fires) and the concurrent-pull image-cache
+  race (the heal path likewise remains as a safety net).
+
 ## [0.7.0] - 2026-08-04
 
 ### Added
