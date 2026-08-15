@@ -16,7 +16,10 @@ describe("Cassandra module", () => {
         "SELECT x FROM rightsize_it.t WHERE id = 1;",
       ].join(" ");
 
-      const result = await cassandra.exec("cqlsh", "-e", cql);
+      // --request-timeout=60: cqlsh's ~10s per-request default is too tight for
+      // the FIRST statement on a cold Cassandra JVM on a loaded CI runner — the
+      // same first-request warmup the Elasticsearch IT budgets for.
+      const result = await cassandra.exec("cqlsh", "--request-timeout=60", "-e", cql);
       assert.equal(result.exitCode, 0, result.stderr);
       assert.match(result.stdout, /hello/);
     } finally {
