@@ -9,9 +9,31 @@ import { cacheDir as defaultCacheDir } from "../core/cache-dir.js";
 import { PlatformInfo } from "./platform.js";
 import type { Platform } from "./platform.js";
 
-export const MSB_VERSION = "0.6.10";
+const MSB_VERSION_UNIX = "0.6.10";
+const MSB_VERSION_WINDOWS = "0.6.9";
 
-const DEFAULT_BASE = `https://github.com/superradcompany/microsandbox/releases/download/v${MSB_VERSION}`;
+/**
+ * 0.6.10 has a Windows-only regression: the runtime's pre-boot guest
+ * bootstrap frame never reaches agentd on Windows hosts, so every sandbox
+ * dies agentless about 70 seconds after spawn ("sandbox process exited
+ * (exit code: 0) before agent relay became available"). macOS and Linux
+ * hosts are unaffected. Windows therefore stays pinned to the last-good
+ * 0.6.9 release until upstream fixes the regression. 0.6.9 and 0.6.10 are
+ * otherwise identical across every CLI surface this library drives, so
+ * pinning per platform does not change behavior for callers of this
+ * library — it only routes Windows around the broken release.
+ */
+function selectMsbVersion(hostPlatform: NodeJS.Platform): string {
+  return hostPlatform === "win32" ? MSB_VERSION_WINDOWS : MSB_VERSION_UNIX;
+}
+
+export const MSB_VERSION: string = selectMsbVersion(process.platform);
+
+function releaseBaseUrl(version: string): string {
+  return `https://github.com/superradcompany/microsandbox/releases/download/v${version}`;
+}
+
+const DEFAULT_BASE = releaseBaseUrl(MSB_VERSION);
 const CONNECT_READ_TIMEOUT_MS = 300_000;
 const STALE_LOCK_AGE_MS = 5 * 60 * 1000;
 const LOCK_POLL_MS = 200;
@@ -339,6 +361,16 @@ export function ensureInstalled(): Promise<string> {
 /** Test-only access to the pure checksum-line parser, exercised against real-shape and malformed input. */
 export function _parseChecksumsForTests(text: string): Map<string, string> {
   return parseChecksums(text);
+}
+
+/** Test-only seam: the per-host version selector parameterized over an injected platform, rather than the real `process.platform`. */
+export function _selectMsbVersionForTests(hostPlatform: NodeJS.Platform): string {
+  return selectMsbVersion(hostPlatform);
+}
+
+/** Test-only access to the release base-URL builder used to derive `DEFAULT_BASE` from the selected version. */
+export function _releaseBaseUrlForTests(version: string): string {
+  return releaseBaseUrl(version);
 }
 
 /**

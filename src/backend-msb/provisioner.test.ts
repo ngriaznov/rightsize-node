@@ -9,6 +9,8 @@ import {
   ensureInstalledAt,
   _parseChecksumsForTests,
   _downloadAndInstallForTests,
+  _selectMsbVersionForTests,
+  _releaseBaseUrlForTests,
   MSB_VERSION,
 } from "./provisioner.js";
 import { PlatformInfo } from "./platform.js";
@@ -239,6 +241,39 @@ describe("MsbProvisioner", () => {
     const parsed = _parseChecksumsForTests(`  abc123   file-one\ndef456  file-two  \n\n`);
     assert.equal(parsed.get("file-one"), "abc123");
     assert.equal(parsed.get("file-two"), "def456");
+  });
+
+  describe("per-platform version pin (0.6.10 unix / 0.6.9 Windows, see MSB_VERSION's doc comment)", () => {
+    it("selects a different version for Windows than for unix hosts", () => {
+      const winVersion = _selectMsbVersionForTests("win32");
+      const macVersion = _selectMsbVersionForTests("darwin");
+      const linuxVersion = _selectMsbVersionForTests("linux");
+      assert.equal(winVersion, "0.6.9");
+      assert.equal(macVersion, "0.6.10");
+      assert.equal(linuxVersion, "0.6.10");
+      assert.equal(winVersion === macVersion, false);
+    });
+
+    it("each platform's selected version is the one used in the download base URL", () => {
+      const winVersion = _selectMsbVersionForTests("win32");
+      const unixVersion = _selectMsbVersionForTests("darwin");
+      const winBaseUrl = _releaseBaseUrlForTests(winVersion);
+      const unixBaseUrl = _releaseBaseUrlForTests(unixVersion);
+      assert.equal(winBaseUrl.endsWith(`/v${winVersion}`), true);
+      assert.equal(unixBaseUrl.endsWith(`/v${unixVersion}`), true);
+      assert.equal(winBaseUrl === unixBaseUrl, false);
+    });
+
+    it("each platform's selected version is the one used in the install dir", () => {
+      const cacheDir = "/fake/cache";
+      const winVersion = _selectMsbVersionForTests("win32");
+      const unixVersion = _selectMsbVersionForTests("darwin");
+      const winInstallDir = path.join(cacheDir, "msb", winVersion);
+      const unixInstallDir = path.join(cacheDir, "msb", unixVersion);
+      assert.equal(winInstallDir.endsWith(path.join("msb", winVersion)), true);
+      assert.equal(unixInstallDir.endsWith(path.join("msb", unixVersion)), true);
+      assert.equal(winInstallDir === unixInstallDir, false);
+    });
   });
 
   describe("Windows asset shapes (via the injected-platform test seam)", () => {
