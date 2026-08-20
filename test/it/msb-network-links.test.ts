@@ -16,7 +16,7 @@ import { ensureInstalled } from "../../src/backend-msb/provisioner.js";
  * "FETCH-OK" once the fetch through the tunnel actually succeeds.
  */
 
-describe("msb exec-tunnel network-link reachability (real msb 0.6.8 binary)", () => {
+describe("msb exec-tunnel network-link reachability (the provisioner's pinned msb binary)", () => {
   itIntegration("a consumer sandbox reaches a sibling by alias over the exec-tunnel", async () => {
     await using network = Network.newNetwork();
 

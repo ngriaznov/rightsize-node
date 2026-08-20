@@ -26,7 +26,7 @@ import { Backends } from "../../src/core/backends.js";
 import "../../src/backend-msb/index.js";
 
 /**
- * Live gates against the real `msb 0.6.8` binary at `~/.cache/rightsize`
+ * Live gates against the provisioner's pinned msb release at `~/.cache/rightsize`
  * (`RIGHTSIZE_IT=1`). Every sandbox this file creates carries the
  * `rz-<RunId.value>-*` naming convention the reaper filters on, and every
  * test cleans up its own sandbox before returning so `msb ls` is empty both
@@ -75,7 +75,7 @@ async function withSandbox<T>(
   }
 }
 
-describe("MsbCliBackend integration (real msb 0.6.8 binary)", () => {
+describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () => {
   itIntegration("attached-mode boot reaches Running; exec and logs work against it", async () => {
     const backend = new MsbCliBackend(ensureInstalled());
     const spec = baseSpec({ env: [["FOO", "bar"]] });
