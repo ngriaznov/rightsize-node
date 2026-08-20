@@ -361,7 +361,19 @@ export class MsbCliBackend implements SandboxBackend {
     if (state === undefined) {
       throw new BackendError(`no handle state for sandbox '${handle.id}' — create() was never called for it`);
     }
+    await this.bootClassified(msbPath, handle, state);
+  }
 
+  /**
+   * A boot attempt wrapped in every classified-transient retry this backend
+   * knows: the install-lock poll, the one-shot state-database retry, and the
+   * one-shot image-cache heal. Both the ordinary `start()` path and the
+   * checkpoint cycle's post-snapshot reboot come through here — a reboot
+   * from a snapshot is as exposed to msb's transients as any other boot,
+   * and skipping the classification there turned a passing install-lock
+   * poll into an immediate checkpoint failure on a live Windows run.
+   */
+  private async bootClassified(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
     let firstOutput: string;
     try {
       await this.bootOnce(msbPath, handle, state);
@@ -655,7 +667,7 @@ export class MsbCliBackend implements SandboxBackend {
     }
     const rebootHandle: SandboxHandle = { id: handle.id, spec: { ...handle.spec, checkpointRef: ref } };
     try {
-      await this.bootOnce(msbPath, rebootHandle, state);
+      await this.bootClassified(msbPath, rebootHandle, state);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       throw new BackendError(

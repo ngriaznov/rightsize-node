@@ -65,6 +65,18 @@ if (cmd === "run") {
     );
     process.exit(1);
   }
+  // Reproduces the real msb binary's install-lock refusal on demand (message
+  // shape captured verbatim from msb 0.6.9 on Windows), so tests can drive
+  // the backend's install-lock poll without a real concurrent msb install.
+  if ((state.failRunsWithInstallLock ?? 0) > 0) {
+    state.failRunsWithInstallLock -= 1;
+    writeState(state);
+    process.stderr.write(
+      "error: runtime error: microsandbox install operation in progress until " +
+        "2026-08-20 15:51:16.869758300; retry after it completes\n",
+    );
+    process.exit(1);
+  }
   // Reproduces the real msb binary's state-database failure on demand (error
   // shape captured verbatim from msb 0.6.3 on Windows — the startup-migration
   // race), so tests can drive the backend's classify-retry path without real

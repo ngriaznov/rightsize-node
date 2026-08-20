@@ -495,6 +495,42 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     }
   });
 
+  it("createCheckpoint's reboot polls past an install-lock refusal instead of failing the checkpoint", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-ckpt-lock-test-"));
+    try {
+      const ref = path.join(dir, "checkpoints", "rz-ckpt-lockretry1");
+      const spec = baseSpec("rz-testrun1-ckpt-lock");
+      const handle = await backend.create(spec);
+      await backend.start(handle);
+
+      // Refuse exactly the NEXT `run` — which is the checkpoint cycle's
+      // post-snapshot reboot — with msb's install-lock message. The reboot
+      // must go through the same classified poll the ordinary boot path
+      // uses and succeed on its retry, not fail the whole checkpoint.
+      const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+      seeded.failRunsWithInstallLock = 1;
+      await fs.writeFile(statePath, JSON.stringify(seeded));
+
+      await backend.createCheckpoint(handle, ref);
+
+      const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+        sandboxes: Record<string, { status: string }>;
+        callLog: Array<{ cmd: string; args: string[] }>;
+      };
+      assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the reboot retry to bring the sandbox back up");
+      const rebootRuns = state.callLog.filter((c) => c.cmd === "run" && c.args.includes("--from-snapshot"));
+      assert.equal(rebootRuns.length, 2, "expected the refused reboot plus one retried reboot");
+
+      await backend.stop(handle);
+      await backend.remove(handle);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("createCheckpoint on a path ref mkdirs the parent, emits --dest-dir, and reboots from the same path", async () => {
     if (skipOnWindows()) {
       return;
@@ -637,7 +673,11 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.start(handle);
 
     const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
-    seeded.failRunsWithStateDbError = 1;
+    // Two consecutive failures, not one: the reboot goes through the same
+    // classified-transient retries as any boot, so a single state-db error
+    // is absorbed by design — the typed reboot failure only surfaces once
+    // the retry is exhausted too.
+    seeded.failRunsWithStateDbError = 2;
     await fs.writeFile(statePath, JSON.stringify(seeded));
 
     let thrown: unknown;
