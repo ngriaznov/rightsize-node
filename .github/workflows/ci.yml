@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, msb-0610]
+    branches: [main]
   pull_request:
   workflow_dispatch:
   # Weekly run: integration tests pin real upstream artifacts (the msb release,

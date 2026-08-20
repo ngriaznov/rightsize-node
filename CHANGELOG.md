@@ -7,6 +7,21 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.7.2] - 2026-08-19
+
+### Changed
+
+- **The pinned microsandbox release is now 0.6.10 on macOS and Linux; Windows stays
+  on 0.6.9.** msb 0.6.10 has a Windows-only regression: its pre-boot guest bootstrap
+  message never reaches the guest agent on Windows hosts, so every sandbox exits
+  about 70 seconds after spawn without the agent ever coming up. macOS and Linux are
+  unaffected. The two releases are identical across every CLI surface this library
+  drives, so the per-platform pin does not change behavior — the provisioner simply
+  routes Windows around the broken release until upstream fixes it.
+
+  **If you point `MSB_PATH` at your own msb binary on Windows, keep it at 0.6.9** —
+  a 0.6.10 binary there will hit the regression on every container start.
+
 ## [0.7.1] - 2026-08-16
 
 ### Changed
