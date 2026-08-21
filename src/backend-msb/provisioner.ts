@@ -9,19 +9,26 @@ import { cacheDir as defaultCacheDir } from "../core/cache-dir.js";
 import { PlatformInfo } from "./platform.js";
 import type { Platform } from "./platform.js";
 
-const MSB_VERSION_UNIX = "0.6.10";
+const MSB_VERSION_UNIX = "0.6.12";
 const MSB_VERSION_WINDOWS = "0.6.9";
 
 /**
- * 0.6.10 has a Windows-only regression: the runtime's pre-boot guest
- * bootstrap frame never reaches agentd on Windows hosts, so every sandbox
- * dies agentless about 70 seconds after spawn ("sandbox process exited
- * (exit code: 0) before agent relay became available"). macOS and Linux
- * hosts are unaffected. Windows therefore stays pinned to the last-good
- * 0.6.9 release until upstream fixes the regression. 0.6.9 and 0.6.10 are
- * otherwise identical across every CLI surface this library drives, so
- * pinning per platform does not change behavior for callers of this
- * library — it only routes Windows around the broken release.
+ * 0.6.10, 0.6.11, and 0.6.12 all share a Windows-only regression: since
+ * 0.6.10, guest bootstrap moved off the kernel command line onto a one-shot
+ * pre-boot console frame, and on Windows hosts that frame never reaches
+ * agentd (the guest's PID 1). agentd times out after 60 seconds and the
+ * guest dies. The sandbox can briefly report Running (its heartbeat is
+ * file-based), but the agent relay endpoint is never created — the relay's
+ * accept loop is gated on the guest's core.ready, which never arrives — so
+ * exec/logs/ping can never connect. Windows therefore stays pinned to the
+ * last-good 0.6.9 release until upstream fixes the regression; there is no
+ * client-side lever (env var, flag, retry, alternate transport) that works
+ * around it. The 0.6.10 -> 0.6.12 upstream diff carries no core source
+ * changes, only release packaging, so the CLI surface this library drives
+ * is identical from 0.6.9 through 0.6.12 — pinning per platform does not
+ * change behavior for callers of this library, it only routes Windows
+ * around the broken releases. Bump Windows back in step with unix once
+ * upstream fixes bootstrap delivery.
  */
 function selectMsbVersion(hostPlatform: NodeJS.Platform): string {
   return hostPlatform === "win32" ? MSB_VERSION_WINDOWS : MSB_VERSION_UNIX;

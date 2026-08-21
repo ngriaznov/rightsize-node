@@ -243,14 +243,14 @@ describe("MsbProvisioner", () => {
     assert.equal(parsed.get("file-two"), "def456");
   });
 
-  describe("per-platform version pin (0.6.10 unix / 0.6.9 Windows, see MSB_VERSION's doc comment)", () => {
+  describe("per-platform version pin (0.6.12 unix / 0.6.9 Windows, see MSB_VERSION's doc comment)", () => {
     it("selects a different version for Windows than for unix hosts", () => {
       const winVersion = _selectMsbVersionForTests("win32");
       const macVersion = _selectMsbVersionForTests("darwin");
       const linuxVersion = _selectMsbVersionForTests("linux");
       assert.equal(winVersion, "0.6.9");
-      assert.equal(macVersion, "0.6.10");
-      assert.equal(linuxVersion, "0.6.10");
+      assert.equal(macVersion, "0.6.12");
+      assert.equal(linuxVersion, "0.6.12");
       assert.equal(winVersion === macVersion, false);
     });
 
