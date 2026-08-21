@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.3] - 2026-08-21
+
 ### Changed
 
 - **The pinned microsandbox release is now 0.6.12 on macOS and Linux; Windows stays
