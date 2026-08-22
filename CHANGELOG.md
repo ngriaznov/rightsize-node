@@ -5,7 +5,19 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **The pinned microsandbox release is now 0.6.14 on every platform.** Upstream
+  fixed the Windows bootstrap regression in the msb_krun_devices 0.1.32 bump
+  (upstream issue #1426): console ports now start delivery at PORT_OPEN instead
+  of PORT_READY, matching unix, so the guest driver no longer discards the
+  pre-boot bootstrap frame before a guest process has the port open. 0.6.12 ->
+  0.6.14 changes nothing else of substance for the CLI surface this library
+  drives, so unifying both platforms on 0.6.14 does not change behavior on any
+  platform. The per-platform split pin introduced in 0.7.2 is retired.
+
+  **If you point `MSB_PATH` at your own msb binary on Windows, avoid 0.6.10
+  through 0.6.13** — those releases carry the regression; use 0.6.9 or 0.6.14+.
 
 ## [0.7.3] - 2026-08-21
 

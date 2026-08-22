@@ -9,32 +9,12 @@ import { cacheDir as defaultCacheDir } from "../core/cache-dir.js";
 import { PlatformInfo } from "./platform.js";
 import type { Platform } from "./platform.js";
 
-const MSB_VERSION_UNIX = "0.6.12";
-const MSB_VERSION_WINDOWS = "0.6.9";
-
 /**
- * 0.6.10, 0.6.11, and 0.6.12 all share a Windows-only regression: since
- * 0.6.10, guest bootstrap moved off the kernel command line onto a one-shot
- * pre-boot console frame, and on Windows hosts that frame never reaches
- * agentd (the guest's PID 1). agentd times out after 60 seconds and the
- * guest dies. The sandbox can briefly report Running (its heartbeat is
- * file-based), but the agent relay endpoint is never created — the relay's
- * accept loop is gated on the guest's core.ready, which never arrives — so
- * exec/logs/ping can never connect. Windows therefore stays pinned to the
- * last-good 0.6.9 release until upstream fixes the regression; there is no
- * client-side lever (env var, flag, retry, alternate transport) that works
- * around it. The 0.6.10 -> 0.6.12 upstream diff carries no core source
- * changes, only release packaging, so the CLI surface this library drives
- * is identical from 0.6.9 through 0.6.12 — pinning per platform does not
- * change behavior for callers of this library, it only routes Windows
- * around the broken releases. Bump Windows back in step with unix once
- * upstream fixes bootstrap delivery.
+ * Pinned microsandbox release, all platforms. The pin was split per-platform
+ * while msb 0.6.10-0.6.13 were broken on Windows (fixed upstream in 0.6.14).
+ * MSB_PATH users on Windows must avoid 0.6.10-0.6.13.
  */
-function selectMsbVersion(hostPlatform: NodeJS.Platform): string {
-  return hostPlatform === "win32" ? MSB_VERSION_WINDOWS : MSB_VERSION_UNIX;
-}
-
-export const MSB_VERSION: string = selectMsbVersion(process.platform);
+export const MSB_VERSION = "0.6.14";
 
 function releaseBaseUrl(version: string): string {
   return `https://github.com/superradcompany/microsandbox/releases/download/v${version}`;
@@ -368,11 +348,6 @@ export function ensureInstalled(): Promise<string> {
 /** Test-only access to the pure checksum-line parser, exercised against real-shape and malformed input. */
 export function _parseChecksumsForTests(text: string): Map<string, string> {
   return parseChecksums(text);
-}
-
-/** Test-only seam: the per-host version selector parameterized over an injected platform, rather than the real `process.platform`. */
-export function _selectMsbVersionForTests(hostPlatform: NodeJS.Platform): string {
-  return selectMsbVersion(hostPlatform);
 }
 
 /** Test-only access to the release base-URL builder used to derive `DEFAULT_BASE` from the selected version. */
