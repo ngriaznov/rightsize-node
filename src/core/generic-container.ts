@@ -572,7 +572,14 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     let handle: SandboxHandle | undefined;
     let allocatedPorts: Map<number, number> | undefined;
     let lastConflict: unknown;
+    // Ports that hit a bind conflict stay quarantined (held in FreePorts' issued
+    // set) until the retry loop exits: releasing them immediately would let the
+    // next attempt legally re-pick the very port that just conflicted — the OS
+    // frequently reissues a just-freed ephemeral port — wasting an attempt on a
+    // proven-contended port.
+    const conflictedPorts: number[] = [];
 
+    try {
     for (let attempt = 0; attempt < MAX_START_ATTEMPTS; attempt++) {
       const ports = await this.allocatePorts();
       const name = `rz-${RunId.value}-${nextSequence()}`;
@@ -603,12 +610,19 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
         if (!spec.keepAlive) {
           await untrackSandbox(name);
         }
-        this.releasePorts(ports);
         if (isPortBindConflict(err)) {
+          // Quarantined, not released: see conflictedPorts above.
+          conflictedPorts.push(...ports.values());
           lastConflict = err;
           continue;
         }
+        this.releasePorts(ports);
         throw err;
+      }
+    }
+    } finally {
+      for (const hostPort of conflictedPorts) {
+        FreePorts.release(hostPort);
       }
     }
 
@@ -742,7 +756,12 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     let handle: SandboxHandle | undefined;
     let allocatedPorts: Map<number, number> | undefined;
     let lastConflict: unknown;
+    // Same conflicted-port quarantine as the ordinary start path: a port that
+    // just failed to bind stays out of the allocator until this retry loop
+    // exits, so no later attempt can re-pick it.
+    const conflictedPorts: number[] = [];
 
+    try {
     for (let attempt = 0; attempt < MAX_START_ATTEMPTS; attempt++) {
       const ports = await this.allocatePorts();
       const spec = this.buildReuseSpec(name, ports);
@@ -759,11 +778,13 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
           await swallow(() => backend.stop(createdHandle as SandboxHandle));
           await swallow(() => backend.remove(createdHandle as SandboxHandle));
         }
-        this.releasePorts(ports);
         if (isPortBindConflict(err)) {
+          // Quarantined, not released: see conflictedPorts above.
+          conflictedPorts.push(...ports.values());
           lastConflict = err;
           continue;
         }
+        this.releasePorts(ports);
         if (!isRetry) {
           // "Another process won the race": if the name is running NOW,
           // this failure was very likely that collision rather than a
@@ -777,6 +798,11 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
           }
         }
         throw err;
+      }
+    }
+    } finally {
+      for (const hostPort of conflictedPorts) {
+        FreePorts.release(hostPort);
       }
     }
 
