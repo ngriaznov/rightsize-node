@@ -413,6 +413,107 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
+  it("start classifies a clean fast exit as success when ls reports Stopped and the system log carries the started marker", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Reproduces msb 0.6.16's fast-exit shape: the attached `run` process
+    // exits 0 before this backend's poll loop ever observes "Running" —
+    // 0.6.16's convergent-lifecycle rework means a fast-completing workload
+    // is only ever seen "Starting" first. Both required signals are present
+    // here (the fixture's default fast-exit shape): the sandbox settles on
+    // "Stopped" and the system log carries the boot-completion marker.
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.fastExitRuns = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const spec = baseSpec("rz-testrun1-fastexit-ok");
+    const handle = await backend.create(spec);
+    await backend.start(handle); // must not throw
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+    };
+    assert.equal(
+      state.sandboxes[handle.id]?.status,
+      "Stopped",
+      "expected the completed sandbox to remain Stopped, not be revived",
+    );
+
+    const running = await backend.findRunning(spec);
+    assert.equal(running, undefined, "a completed fast-exit sandbox must report as not running");
+
+    // stop() must remain safe on an already-finished sandbox.
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("start still fails the ordinary way when the fast exit's system log never carries the started marker", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Same clean exit and Stopped state as the success case, but the guest
+    // agent never came up to write the marker — the agentless-death shape
+    // (msb 0.6.10-0.6.13 on Windows also exited 0 before Running). This must
+    // NOT be classified as success: a clean exit plus Stopped alone is not
+    // enough.
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.fastExitRuns = 1;
+    seeded.fastExitWriteMarker = false;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const spec = baseSpec("rz-testrun1-fastexit-nomarker");
+    const handle = await backend.create(spec);
+    let thrown: Error | undefined;
+    try {
+      await backend.start(handle);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    if (thrown === undefined) {
+      throw new Error("start must reject when the started marker is absent, even with a clean exit and Stopped state");
+    }
+    assert.match(
+      thrown.message,
+      /exited \(code 0\) before reaching/,
+      "expected the existing boot-failure message, unchanged",
+    );
+    await backend.remove(handle);
+  });
+
+  it("start still fails the ordinary way when ls does not report the fast-exited sandbox as Stopped", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Clean exit and the started marker present, but the sandbox's own state
+    // never settled on "Stopped". The marker alone must not be enough to
+    // classify this as success.
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.fastExitRuns = 1;
+    seeded.fastExitFinalStatus = "Starting";
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const spec = baseSpec("rz-testrun1-fastexit-notstopped");
+    const handle = await backend.create(spec);
+    let thrown: Error | undefined;
+    try {
+      await backend.start(handle);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    if (thrown === undefined) {
+      throw new Error(
+        "start must reject when the sandbox never settled on Stopped, even with a clean exit and the marker present",
+      );
+    }
+    assert.match(
+      thrown.message,
+      /exited \(code 0\) before reaching/,
+      "expected the existing boot-failure message, unchanged",
+    );
+    await backend.remove(handle);
+  });
+
   it("createCheckpoint refuses a tmpfs-root sandbox with TmpfsRootCheckpointError before stopping it", async () => {
     if (skipOnWindows()) {
       return;

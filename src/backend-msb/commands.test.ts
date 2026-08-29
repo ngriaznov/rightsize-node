@@ -164,6 +164,10 @@ describe("MsbCommands", () => {
     assert.deepEqual(MsbCommands.followLogs("box-1"), ["logs", "box-1", "-f"]);
   });
 
+  it("systemLog: --source system --tail 1000, distinct from the workload logs() shape", () => {
+    assert.deepEqual(MsbCommands.systemLog("box-1"), ["logs", "box-1", "--source", "system", "--tail", "1000"]);
+  });
+
   it("stop and rm", () => {
     assert.deepEqual(MsbCommands.stop("box-1"), ["stop", "box-1"]);
     assert.deepEqual(MsbCommands.rm("box-1"), ["rm", "box-1"]);

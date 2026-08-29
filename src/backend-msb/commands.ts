@@ -127,6 +127,17 @@ export const MsbCommands = {
     return ["logs", name, "--tail", "1000"];
   },
 
+  /**
+   * `msb logs <name> --source system --tail 1000` — msb's own boot
+   * diagnostics channel, distinct from the workload log `logs()` above
+   * fetches. This is where the boot-completion marker line lives (see
+   * `hasSandboxStartedMarker`); the fast-exit post-mortem classification in
+   * `MsbCliBackend.bootOnce` is this builder's only caller.
+   */
+  systemLog(name: string): string[] {
+    return ["logs", name, "--source", "system", "--tail", "1000"];
+  },
+
   followLogs(name: string): string[] {
     return ["logs", name, "-f"];
   },

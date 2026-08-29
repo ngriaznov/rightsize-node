@@ -90,6 +90,31 @@ if (cmd === "run") {
     );
     process.exit(1);
   }
+  // Reproduces msb 0.6.16's fast-exit workload shape on demand: the attached
+  // `run` process exits 0 immediately, without ever entering the watch loop
+  // below (so state never shows "Running" to a poller, mirroring 0.6.16's
+  // convergent-lifecycle rework where a fast-completing workload is only
+  // ever observed "Starting"). `fastExitFinalStatus` and `fastExitWriteMarker`
+  // are independently steerable so a test can drive both the success
+  // classification and each of its negative gates from the same knob:
+  // the default (status "Stopped", marker written) is the success case;
+  // setting fastExitWriteMarker: false reproduces the agentless-death shape
+  // (clean exit, Stopped, but the guest agent never came up to write the
+  // marker); setting fastExitFinalStatus to anything other than "Stopped"
+  // reproduces a settle that never completed cleanly.
+  if ((state.fastExitRuns ?? 0) > 0) {
+    state.fastExitRuns -= 1;
+    const finalStatus = state.fastExitFinalStatus ?? "Stopped";
+    const writeMarker = state.fastExitWriteMarker !== false;
+    const systemLog = ["boot diagnostics for " + name];
+    if (writeMarker) {
+      systemLog.push("--- sandbox started ---");
+    }
+    state.sandboxes[name] = { status: finalStatus, logs: [`booting ${name}`], systemLog };
+    writeState(state);
+    process.stdout.write(`booting ${name}\n`);
+    process.exit(0);
+  }
   state.sandboxes[name] = { status: "Running", logs: [`booting ${name}`, "ready"] };
   writeState(state);
   process.stdout.write(`booting ${name}\nready\n`);
@@ -359,7 +384,13 @@ if (cmd === "run") {
   const name = args[1];
   const state = readState();
   const sandbox = state.sandboxes[name];
-  const lines = sandbox?.logs ?? [];
+  // --source system reads the boot-diagnostics channel `systemLog` populates
+  // (currently only the fast-exit scenario above writes to it) rather than
+  // the workload's own `logs` array; no --source flag (or any other value)
+  // keeps today's default of the workload log, unchanged.
+  const sourceIdx = args.indexOf("--source");
+  const source = sourceIdx !== -1 ? args[sourceIdx + 1] : "workload";
+  const lines = source === "system" ? (sandbox?.systemLog ?? []) : (sandbox?.logs ?? []);
   if (args.includes("-f")) {
     for (const l of lines) {
       process.stdout.write(l + "\n");

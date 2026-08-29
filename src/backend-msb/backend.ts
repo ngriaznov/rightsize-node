@@ -7,7 +7,8 @@ import { BackendError, PortBindConflictError, UnsupportedByBackendError, TmpfsRo
 import type { SandboxBackend, SandboxHandle, FollowHandle, NetworkLink, ReaperKillCommand, BackendCapabilities } from "../core/backend.js";
 import type { ContainerSpec, ExecResult } from "../core/model.js";
 import { MsbCommands } from "./commands.js";
-import { runningNames } from "./ls-json.js";
+import { runningNames, statusOf } from "./ls-json.js";
+import { hasSandboxStartedMarker } from "./fast-exit.js";
 import { invoke, CLOSED_STDIN } from "./invoke.js";
 import { isPortBindConflictOutput } from "./port-conflict.js";
 import { isImageCacheCorruption } from "./image-cache.js";
@@ -462,11 +463,17 @@ export class MsbCliBackend implements SandboxBackend {
    * the classified early-exit failures it has already exited; a readiness
    * timeout leaves it alive and it is hard-killed) so a failed attempt leaves
    * no live process or registered cleanup state behind — the caller owns
-   * retry policy, never cleanup. An early exit is classified from the child's
-   * combined output: the image-cache-corruption signature throws
+   * retry policy, never cleanup (an exit-0 fast-exit success is the one
+   * exception: it IS success, so `state.attached`/`startedNames` ARE
+   * populated for it — see below). An early exit is classified from the
+   * child's combined output: the image-cache-corruption signature throws
    * `ImageCacheCorruptionError` (the one failure `start()` heals and
    * retries), a host-port bind conflict throws `PortBindConflictError`, and
-   * anything else surfaces the raw output.
+   * otherwise — if the exit code was 0 — `isCompletedFastExit` gets a chance
+   * to reclassify the exit as a workload that ran to completion before this
+   * poll loop could ever observe Running (msb 0.6.16's convergent-lifecycle
+   * rework; see that method's own doc); anything else surfaces the raw
+   * output as an ordinary boot failure, unchanged.
    */
   private async bootOnce(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
     // Fresh per-attempt diagnostics: a retried boot must not blend its tail
@@ -509,6 +516,20 @@ export class MsbCliBackend implements SandboxBackend {
             `msb run for sandbox ${handle.id} could not bind a host port: ${output}`,
           );
         }
+        if (exited.code === 0 && (await this.isCompletedFastExit(msbPath, handle.id))) {
+          // The workload ran to completion before this poll loop ever
+          // observed Running — see isCompletedFastExit's own doc. Started-
+          // and-already-finished: register it exactly like an ordinary
+          // successful boot. state.attachedExited is already true (the
+          // "exit" listener above set it) and state.attached is left
+          // undefined, since there is no live process left to reference —
+          // stop() checks attachedExited before it would ever touch
+          // state.attached, so it is already safe to call on this handle.
+          if (!handle.spec.keepAlive) {
+            this.startedNames.add(handle.id);
+          }
+          return;
+        }
         throw new BackendError(
           `msb run for sandbox ${handle.id} exited (code ${exited.code ?? "unknown"}) before reaching ` +
             `Running — check the image entrypoint and 'msb run' output below:\n${output}`,
@@ -534,6 +555,38 @@ export class MsbCliBackend implements SandboxBackend {
       }
       await sleep(READINESS_POLL_MS);
     }
+  }
+
+  /**
+   * The fast-exit post-mortem classification: only ever consulted from
+   * `bootOnce` above, and only once the attached `msb run` child has already
+   * exited with code 0 before Running was observed. msb 0.6.16's
+   * convergent-lifecycle rework means a workload that finishes quickly is
+   * never observed `"Running"` at all — only `"Starting"`, then the attached
+   * process exits 0 as the microVM's own natural completion — which by
+   * itself is indistinguishable from a genuinely dead boot (the msb
+   * 0.6.10-0.6.13 Windows agentless-death failures also exited 0 before
+   * Running). Two signals, BOTH required, tell the two apart: `msb ls`
+   * reports the sandbox's own state as exactly `"Stopped"` (a settled entry —
+   * missing or some other status does not count), AND its system log carries
+   * the boot-completion marker msb's guest agent writes only once it has
+   * actually come up (see `hasSandboxStartedMarker`) — the agentless-death
+   * failures never produced it, since the agent never came up in them.
+   *
+   * Either probe failing to even run (spawn error, timeout — `invoke` only
+   * rejects on those, never on exit code) is treated the same as a missing
+   * signal, never as a reason to throw a different error from this method:
+   * a probe failure must never be upgraded into a false "it completed
+   * successfully", and the caller's own fallback error already covers "this
+   * could not be classified as success."
+   */
+  private async isCompletedFastExit(msbPath: string, id: string): Promise<boolean> {
+    const ls = await invoke(msbPath, MsbCommands.ls(), LOGS_TIMEOUT_MS).catch(() => undefined);
+    if (ls === undefined || statusOf(ls.stdout, id) !== "Stopped") {
+      return false;
+    }
+    const systemLog = await invoke(msbPath, MsbCommands.systemLog(id), LOGS_TIMEOUT_MS).catch(() => undefined);
+    return systemLog !== undefined && hasSandboxStartedMarker(systemLog.stdout);
   }
 
   async stop(handle: SandboxHandle): Promise<void> {

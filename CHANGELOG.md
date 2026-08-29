@@ -10,8 +10,30 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The pinned microsandbox release is now 0.6.16** (from 0.6.15). Upstream changes
   relevant here: network address slots are recycled instead of exhausting after many
   sandbox creations, single-file mounts are properly isolated, and a failed boot now
-  renders a structured boot error in `msb logs`. No CLI surface this library drives
-  changed.
+  renders a structured boot error in `msb logs`. One change IS behavior-relevant here:
+  0.6.16's convergent-lifecycle rework means a workload that finishes quickly is only
+  ever observed `Starting`, never `Running`, before its attached `msb run` process exits
+  on its own — see the Fixed entry below for how the boot path adapts.
+
+  **Downgrading `MSB_PATH` below 0.6.16 is not safe once anything has run against a
+  0.6.16 `MSB_HOME`.** 0.6.16 migrates the shared state database, and an older msb
+  binary pointed at an already-migrated `MSB_HOME` refuses outright with "database
+  schema is newer than this msb binary".
+
+### Fixed
+
+- **A container whose command finishes quickly no longer fails `start()` on msb 0.6.16.**
+  The boot path polls `msb ls` for `Running` while supervising the attached `msb run`
+  child; on 0.6.16 a fast-completing workload's sandbox never surfaces as `Running` at
+  all, so the child just exits 0 once the microVM has already run to completion — which
+  used to be indistinguishable from a genuinely failed boot. It no longer is: when the
+  attached child exits 0, `msb ls` reports the sandbox `Stopped`, AND `msb logs --source
+  system` carries the boot-completion marker msb's guest agent writes once it comes up,
+  the exit is now classified as a workload that completed before the poll could ever
+  observe it running, not a boot failure. `stop()` on it remains a safe no-op, and it
+  reports as not running like any other stopped sandbox. Any other combination — a
+  non-zero exit, a state other than `Stopped`, or a missing marker — still fails exactly
+  as before.
 
 ## [0.7.5] - 2026-08-26
 

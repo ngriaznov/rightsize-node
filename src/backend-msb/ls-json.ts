@@ -84,28 +84,50 @@ function scanEntries(json: string): RawEntry[] {
 }
 
 /**
- * Names of sandboxes whose `status` is exactly `"Running"` (capitalized —
- * msb never lowercases it). An entry missing `name` or `status` is skipped
- * outright, never counted as a name-less running sandbox. Tries `JSON.parse`
- * first for the common case and falls back to the tolerant brace scanner
- * only if that throws, so well-formed output pays no scanning cost while
- * malformed output still degrades gracefully instead of losing everything.
+ * Shared by `runningNames` and `statusOf`: tries `JSON.parse` first for the
+ * common case and falls back to the tolerant brace scanner only if that
+ * throws, so well-formed output pays no scanning cost while malformed output
+ * still degrades gracefully instead of losing everything.
  */
-export function runningNames(json: string): Set<string> {
-  let entries: RawEntry[];
+function parseEntries(json: string): RawEntry[] {
   try {
     const parsed: unknown = JSON.parse(json);
-    entries = Array.isArray(parsed) ? (parsed as RawEntry[]) : [];
+    return Array.isArray(parsed) ? (parsed as RawEntry[]) : [];
   } catch {
-    entries = scanEntries(json);
+    return scanEntries(json);
   }
+}
+
+/**
+ * Names of sandboxes whose `status` is exactly `"Running"` (capitalized —
+ * msb never lowercases it). An entry missing `name` or `status` is skipped
+ * outright, never counted as a name-less running sandbox.
+ */
+export function runningNames(json: string): Set<string> {
   const names = new Set<string>();
-  for (const entry of entries) {
+  for (const entry of parseEntries(json)) {
     if (entry.status === "Running" && typeof entry.name === "string") {
       names.add(entry.name);
     }
   }
   return names;
+}
+
+/**
+ * The raw `status` field of the single entry named `name`, or `undefined` if
+ * `name` does not appear at all. Unlike `runningNames`, this reports every
+ * status verbatim (not just `"Running"`) — the fast-exit post-mortem
+ * classification in `MsbCliBackend.bootOnce` needs to confirm a sandbox
+ * settled on exactly `"Stopped"`, which is a different question from "is it
+ * currently running".
+ */
+export function statusOf(json: string, name: string): string | undefined {
+  for (const entry of parseEntries(json)) {
+    if (entry.name === name) {
+      return entry.status;
+    }
+  }
+  return undefined;
 }
 
 /** Test-only: forces the tolerant scanner path regardless of whether JSON.parse would succeed. */

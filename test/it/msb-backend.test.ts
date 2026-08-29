@@ -92,6 +92,38 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
     });
   });
 
+  itIntegration(
+    "a command that exits quickly (msb 0.6.16's fast-exit shape) still succeeds start(), not fails it",
+    async () => {
+      // Real msb 0.6.16 (probed against the pinned binary): "msb run -- true"
+      // is only ever observed "Starting" before the attached process exits 0
+      // — "Running" never surfaces for a workload this fast, unlike 0.6.15.
+      // This proves MsbCliBackend.bootOnce's fast-exit post-mortem
+      // classification against the real binary, not just the fake-msb
+      // fixture backend.test.ts otherwise exercises this through.
+      const backend = new MsbCliBackend(ensureInstalled());
+      const msbPath = await ensureInstalled();
+      const spec = baseSpec({ command: ["true"] });
+      const handle = await backend.create(spec);
+      try {
+        await backend.start(handle); // must not throw
+
+        const ls = await invoke(msbPath, MsbCommands.ls(), 30_000);
+        assert.ok(
+          !runningNames(ls.stdout).has(handle.id),
+          "a completed fast-exit sandbox must not show as Running",
+        );
+
+        // stop()/remove() must remain safe on an already-finished sandbox.
+        await backend.stop(handle);
+        await backend.remove(handle);
+      } finally {
+        await backend.stop(handle).catch(() => {});
+        await backend.remove(handle).catch(() => {});
+      }
+    },
+  );
+
   itIntegration("removeByName stops and removes a sandbox identified only by its name, and is a silent no-op on a name that never existed", async () => {
     const msbPath = await ensureInstalled();
     const backend = new MsbCliBackend(Promise.resolve(msbPath));

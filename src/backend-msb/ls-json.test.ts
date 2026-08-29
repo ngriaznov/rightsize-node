@@ -1,5 +1,5 @@
 import { describe, it, assert } from "../../test/harness.js";
-import { runningNames, _scanRunningNamesForTests } from "./ls-json.js";
+import { runningNames, statusOf, _scanRunningNamesForTests } from "./ls-json.js";
 
 const REAL_SHAPE = JSON.stringify([
   { created_at: "2026-01-01T00:00:00Z", image: "redis:8.6-alpine", name: "rz-abc-1", status: "Running" },
@@ -39,6 +39,21 @@ describe("runningNames", () => {
   it("malformed / non-array JSON degrades to an empty set rather than throwing", () => {
     assert.equal(runningNames("not json at all").size, 0);
     assert.equal(runningNames('{"not":"an array"}').size, 0);
+  });
+
+  describe("statusOf", () => {
+    it("returns the named entry's raw status, not just whether it's Running", () => {
+      assert.equal(statusOf(REAL_SHAPE, "rz-abc-1"), "Running");
+      assert.equal(statusOf(REAL_SHAPE, "rz-abc-2"), "Stopped");
+    });
+
+    it("returns undefined for a name that does not appear at all", () => {
+      assert.equal(statusOf(REAL_SHAPE, "rz-never-existed"), undefined);
+    });
+
+    it("degrades to undefined on malformed JSON, same as the runningNames fallback", () => {
+      assert.equal(statusOf("not json at all", "rz-abc-1"), undefined);
+    });
   });
 
   describe("the tolerant brace-scan fallback directly", () => {
