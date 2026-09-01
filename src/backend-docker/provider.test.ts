@@ -32,11 +32,21 @@ describe("DockerBackendProvider", () => {
     assert.match(provider.unsupportedReason(), /pipe/i);
   });
 
-  it("isSupported is synchronous — never returns a Promise", () => {
-    const provider = new DockerBackendProvider();
-    const result = provider.isSupported();
-    assert.equal(typeof result, "boolean");
-  });
+  // There used to be an "isSupported is synchronous — never returns a
+  // Promise" test here that called `new DockerBackendProvider().isSupported()`
+  // directly. That was a harmless `fs.statSync` check when it was written,
+  // but `isSupported()` now delegates to `isLinuxDaemonReachable`, which
+  // defaults to the real `spawnSync` and shells out to `curl`/`docker`
+  // against whatever daemon this machine's `DOCKER_HOST` resolves to — a
+  // real, live-infrastructure touch on every plain `npm test` run, not a
+  // pure unit test. `isSupported()` has no injectable seam of its own (it
+  // isn't one — see its doc in provider.ts), so it can't be called here
+  // without that side effect. The synchronous-boolean contract it must
+  // satisfy is enforced at compile time by the `BackendProvider` interface
+  // (`isSupported(): boolean`, not `Promise<boolean>` — see
+  // `../core/backend.ts`), and the decision logic it delegates to is
+  // covered hermetically, via the injected-runner seam, by the
+  // "isLinuxDaemonReachable — the linux-daemon gate" tests below.
 });
 
 /**
