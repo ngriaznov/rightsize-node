@@ -16,6 +16,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `is_supported=false` and a named `unsupportedReason()` rather than a hang or a
   cryptic connection error. No change on unix: same default socket path, same
   fallback behavior for an unparseable `DOCKER_HOST`, same errors.
+  The process-exit synchronous teardown (`cleanupSync`) also now works on Windows:
+  it no longer shells out to `curl --unix-socket` there — curl's `--unix-socket`
+  dials an AF_UNIX domain socket, which cannot reach a Windows named pipe — and
+  instead runs `docker rm -f`, the same command this backend's reaper watchdog
+  already relies on, so a container is torn down promptly on an ordinary graceful
+  exit instead of leaking until the next startup sweep.
 
 ## [0.7.6] - 2026-08-29
 

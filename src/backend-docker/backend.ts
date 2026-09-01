@@ -570,29 +570,60 @@ export class DockerBackend implements SandboxBackend {
 
   /**
    * Synchronous, blocking teardown for the process-exit path. Node has no
-   * synchronous HTTP client, so this shells out to `curl --unix-socket` via
-   * `child_process.spawnSync` — curl ships on macOS and virtually every
-   * Linux CI image, and `spawnSync` genuinely blocks the exiting process the
-   * way the `"exit"` handler requires. If curl is unavailable, this is a
+   * synchronous HTTP client, so this shells out via `child_process.spawnSync`
+   * — which genuinely blocks the exiting process the way the `"exit"`
+   * handler requires — to whichever command `cleanupSyncCommand` resolves
+   * for the current platform. If that command is unavailable, this is a
    * silent no-op: the label-scoped orphan reaper each backend runs at
    * startup (`close()`'s own reaping plus the next run's sweep) is the real
    * safety net for that case, not this best-effort fast path.
    */
   cleanupSync(id: string): void {
-    const socketPath = this.client.getSocketPath();
+    const { command, args } = cleanupSyncCommand(process.platform, this.client.getSocketPath(), id);
     try {
-      spawnSync("curl", [
-        "--silent",
-        "--max-time",
-        "5",
-        "--unix-socket",
-        socketPath,
-        "-X",
-        "DELETE",
-        `http://localhost/containers/${id}?force=true`,
-      ]);
+      spawnSync(command, args);
     } catch {
       // Best-effort — see the doc above.
     }
   }
+}
+
+/**
+ * The `spawnSync` invocation `cleanupSync` runs for one container id, given
+ * the resolved platform and the client's own socket path — kept pure and
+ * separate from `cleanupSync` so the platform split can be exercised
+ * without actually spawning a process (mirrors the `DockerCli` object's own
+ * pure-argv-vs-`runDockerCli`-executor split in `cli.ts`).
+ *
+ * POSIX dials the daemon's unix socket directly over `curl --unix-socket` —
+ * unchanged from before this function existed. Windows cannot reuse that:
+ * curl's `--unix-socket` dials an AF_UNIX domain socket, a fundamentally
+ * different IPC mechanism from a Windows named pipe, so that invocation can
+ * never reach the daemon there, daemon up or not. Windows instead shells out
+ * to the `docker` CLI itself, which already resolves the daemon's endpoint
+ * (the named pipe by default, or `DOCKER_HOST`) on its own; `docker rm -f`
+ * is already a hard dependency of this backend's reaper watchdog (see
+ * `reaperKillCommand`), so this introduces no new precondition on Windows.
+ */
+export function cleanupSyncCommand(
+  processPlatform: string,
+  socketPath: string,
+  id: string,
+): { readonly command: string; readonly args: readonly string[] } {
+  if (processPlatform === "win32") {
+    return { command: "docker", args: ["rm", "-f", id] };
+  }
+  return {
+    command: "curl",
+    args: [
+      "--silent",
+      "--max-time",
+      "5",
+      "--unix-socket",
+      socketPath,
+      "-X",
+      "DELETE",
+      `http://localhost/containers/${id}?force=true`,
+    ],
+  };
 }

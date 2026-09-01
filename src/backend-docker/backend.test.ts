@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, assert } from "../../test/harness.js";
-import { DockerBackend, buildCreateBody } from "./backend.js";
+import { DockerBackend, buildCreateBody, cleanupSyncCommand } from "./backend.js";
 import { DockerClient } from "./client.js";
 import { BackendError } from "../core/errors.js";
 import { isPortBindConflictMessage } from "./port-conflict.js";
@@ -266,6 +266,37 @@ describe("DockerBackend transport regression — must dial a unix socket or name
     const backend = new DockerBackend(client);
     const path = backend.socketPathForTest();
     assert.equal(path.includes("2375"), false);
+  });
+});
+
+describe("cleanupSyncCommand — the process-exit sync teardown's platform split", () => {
+  it("on POSIX platforms, dials curl --unix-socket at the client's own socket path, unchanged", () => {
+    for (const platform of ["linux", "darwin"]) {
+      const { command, args } = cleanupSyncCommand(platform, "/var/run/docker.sock", "container-id-1");
+      assert.equal(command, "curl");
+      assert.deepEqual(args, [
+        "--silent",
+        "--max-time",
+        "5",
+        "--unix-socket",
+        "/var/run/docker.sock",
+        "-X",
+        "DELETE",
+        "http://localhost/containers/container-id-1?force=true",
+      ]);
+    }
+  });
+
+  it("on win32, never invokes curl with the named pipe path — shells out to `docker rm -f` instead", () => {
+    const { command, args } = cleanupSyncCommand("win32", "\\\\.\\pipe\\docker_engine", "container-id-1");
+    assert.equal(command, "docker");
+    assert.deepEqual(args, ["rm", "-f", "container-id-1"]);
+    assert.equal(args.includes("--unix-socket"), false, "must never pass a named pipe path to curl's --unix-socket");
+  });
+
+  it("the win32 command is independent of the socket path — docker CLI resolves DOCKER_HOST/the pipe itself", () => {
+    const withCustomPipe = cleanupSyncCommand("win32", "\\\\.\\pipe\\some_custom_pipe", "container-id-2");
+    assert.deepEqual(withCustomPipe, { command: "docker", args: ["rm", "-f", "container-id-2"] });
   });
 });
 
