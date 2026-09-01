@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.7] - 2026-09-01
+
 ### Added
 
 - **The docker backend now works on Windows, against Docker Desktop's named pipe.**
