@@ -15,7 +15,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so a Windows machine without Docker Desktop running still gets a clean
   `is_supported=false` and a named `unsupportedReason()` rather than a hang or a
   cryptic connection error. No change on unix: same default socket path, same
-  fallback behavior for an unparseable `DOCKER_HOST`, same errors.
+  fallback behavior for an unparseable `DOCKER_HOST`, same errors. Detection is
+  further tightened to require the daemon itself report `"Os":"linux"` via a
+  time-bounded probe, so a reachable-but-Windows-containers daemon (or, in
+  principle, any non-Linux daemon) now correctly reads as unsupported instead of
+  a false positive.
   The process-exit synchronous teardown (`cleanupSync`) also now works on Windows:
   it no longer shells out to `curl --unix-socket` there — curl's `--unix-socket`
   dials an AF_UNIX domain socket, which cannot reach a Windows named pipe — and

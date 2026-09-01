@@ -8,8 +8,7 @@
 // export at all — assertions go through `expect()`). This module detects the
 // engine at import time and re-exports a single shape that papers over both.
 import { PlatformInfo } from "../src/backend-msb/platform.js";
-import { socketPathFromDockerHost } from "../src/backend-docker/client.js";
-import { isEndpointReachable } from "../src/backend-docker/provider.js";
+import { DockerBackendProvider } from "../src/backend-docker/provider.js";
 //
 // Deliberately does NOT statically `import` from `"bun:test"`: the
 // `bun-types` ambient declarations for that module drag in global overrides
@@ -204,43 +203,51 @@ export function itMsbIntegration(name: string, fn: TestFn): void {
 }
 
 /**
- * A daemon endpoint existing on disk is not proof it's live, but it is the
- * same cheap, synchronous, no-spawn signal the msb gate uses for `/dev/kvm`
- * — good enough to skip cleanly on a host with no Docker installed at all,
- * which is the common case this exists for (a Windows runner with no Docker
+ * This backend only ever runs LINUX containers, so "usable" means more than
+ * "a daemon is listening": a Windows runner's own Windows-containers dockerd
+ * has a perfectly reachable named pipe, but would fail every single test in
+ * this file with connect/exec errors against containers it can't run. Goes
+ * through the exact same gate `DockerBackendProvider.isSupported()` uses
+ * (not a hand-rolled duplicate of its reachability check) so this file skips
+ * cleanly on BOTH the no-daemon-at-all case (a Windows runner with no Docker
  * Desktop/daemon service, unlike GitHub's Linux runners, which always ship
- * one). An endpoint that exists but is stale/unresponsive still surfaces as
- * a real per-test failure, same as today; this only prevents the "no daemon
- * anywhere on this host" case from producing that same connection-refused
- * failure on every single test in the file. Delegates the actual
- * POSIX-socket-vs-Windows-pipe check to `isEndpointReachable` — the same
- * seam `DockerBackendProvider.isSupported()` uses — so a Windows runner that
- * DOES have Docker Desktop running is recognized too, not just the
- * no-daemon-at-all case the doc above focuses on.
+ * one) and the wrong-OS-daemon case (a Windows runner's Windows-containers
+ * dockerd). A daemon that's reachable, reports Linux, but is otherwise
+ * stale/unresponsive still surfaces as a real per-test failure, same as
+ * today. Memoized: unlike the old `fs.statSync` check this replaces,
+ * `isSupported()` now shells out to a real, time-bounded subprocess (see its
+ * own doc in `provider.ts`), and `docker-backend.test.ts` alone calls this
+ * gate at every one of its dozen-plus `itDockerIntegration()` sites — paying
+ * that cost once per process, not once per call, matters most in exactly the
+ * case this gate exists for: a host with no reachable daemon at all, where a
+ * wedged (rather than merely absent) endpoint would otherwise multiply the
+ * probe's timeout by every call site.
  */
-function dockerSocketPresent(): boolean {
-  return isEndpointReachable(socketPathFromDockerHost(process.env["DOCKER_HOST"]));
+let dockerDaemonSupportedCache: boolean | undefined;
+function dockerDaemonSupported(): boolean {
+  if (dockerDaemonSupportedCache === undefined) {
+    dockerDaemonSupportedCache = new DockerBackendProvider().isSupported();
+  }
+  return dockerDaemonSupportedCache;
 }
 
 /**
  * Like {@link itIntegration}, but only when this machine has a Docker/
- * Podman/Colima-compatible daemon socket reachable at all. `docker-
+ * Podman/Colima-compatible LINUX-container daemon usable at all. `docker-
  * backend.test.ts` drives `DockerBackend` directly — independent of
  * whichever backend `RIGHTSIZE_BACKEND` selects for the shared contract
  * suite — so it is not gated on `RIGHTSIZE_BACKEND` the way
  * `itMsbIntegration` is gated away from `RIGHTSIZE_BACKEND=docker`: on
  * Linux CI a Docker daemon is present as an environmental given even in the
  * `microsandbox`-selected job, and this file has always run there
- * regardless of the selected backend. The one thing that differs host to
- * host is whether a daemon exists AT ALL — Windows runners, unlike GitHub's
- * Linux runners, do not ship one — and every assertion in the file would
- * otherwise fail identically with a connection-refused error in that case.
+ * regardless of the selected backend. See `dockerDaemonSupported`'s own doc
+ * for why "reachable" alone isn't the bar.
  */
 export function itDockerIntegration(name: string, fn: TestFn): void {
   if (process.env["RIGHTSIZE_IT"] !== "1") {
     return;
   }
-  if (!dockerSocketPresent()) {
+  if (!dockerDaemonSupported()) {
     return;
   }
   it(name, fn);
