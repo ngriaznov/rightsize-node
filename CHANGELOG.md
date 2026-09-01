@@ -5,7 +5,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **The docker backend now works on Windows, against Docker Desktop's named pipe.**
+  `DOCKER_HOST` unset now resolves to `\\.\pipe\docker_engine` on win32 (unchanged
+  everywhere else: `/var/run/docker.sock`), and a `DOCKER_HOST=npipe://...` value is
+  parsed the same way `unix://...` already was. Provider detection (`isSupported()`)
+  probes the named pipe's existence the same way it already probes the unix socket,
+  so a Windows machine without Docker Desktop running still gets a clean
+  `is_supported=false` and a named `unsupportedReason()` rather than a hang or a
+  cryptic connection error. No change on unix: same default socket path, same
+  fallback behavior for an unparseable `DOCKER_HOST`, same errors.
 
 ## [0.7.6] - 2026-08-29
 

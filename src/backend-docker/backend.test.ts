@@ -236,12 +236,25 @@ describe("DockerBackend.reaperKillCommand", () => {
   });
 });
 
-describe("DockerBackend transport regression — must dial a unix socket, never TCP", () => {
+describe("DockerBackend transport regression — must dial a unix socket or named pipe, never TCP", () => {
   it("targets an absolute unix socket path by default", () => {
+    if (process.platform === "win32") {
+      return; // this host's real default is the named pipe path — see the next test.
+    }
     const backend = new DockerBackend(new DockerClient());
     const path = backend.socketPathForTest();
     assert.ok(path.startsWith("/"), `expected an absolute unix socket path, got ${path}`);
     assert.equal(path.includes(":"), false, `a unix socket path must not look like host:port — got ${path}`);
+  });
+
+  it("targets the named pipe path by default on win32", () => {
+    if (process.platform !== "win32") {
+      return; // this host's real default is the unix socket path — covered by the previous test.
+    }
+    const backend = new DockerBackend(new DockerClient());
+    const path = backend.socketPathForTest();
+    assert.ok(path.startsWith("\\\\.\\pipe\\"), `expected a named pipe path, got ${path}`);
+    assert.equal(path.includes(":"), false, `a named pipe path must not look like host:port — got ${path}`);
   });
 
   it("a tcp:// DOCKER_HOST falls back to the default socket, never leaking a TCP port into the transport", () => {

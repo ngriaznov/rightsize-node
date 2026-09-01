@@ -185,9 +185,15 @@ describe("DockerClient request_stream", () => {
 
 describe("socketPathFromDockerHost", () => {
   const DEFAULT = "/var/run/docker.sock";
+  // The real per-platform default for whichever host actually runs this
+  // file — used by the tests below that call the two-arg form with no
+  // platform override, so they stay accurate whether run on POSIX or on an
+  // actual win32 CI runner (see backend.test.ts's transport regression
+  // describe block for the analogous split).
+  const REAL_DEFAULT = process.platform === "win32" ? "\\\\.\\pipe\\docker_engine" : DEFAULT;
 
-  it("falls back to the default path when unset", () => {
-    assert.equal(socketPathFromDockerHost(undefined), DEFAULT);
+  it("falls back to this host's default endpoint when unset", () => {
+    assert.equal(socketPathFromDockerHost(undefined), REAL_DEFAULT);
   });
 
   it("parses a unix:// scheme path", () => {
@@ -198,11 +204,56 @@ describe("socketPathFromDockerHost", () => {
     assert.equal(socketPathFromDockerHost("/custom/docker.sock"), "/custom/docker.sock");
   });
 
-  it("falls back to the default path for a tcp:// host — this client has no TCP transport", () => {
-    assert.equal(socketPathFromDockerHost("tcp://127.0.0.1:2375"), DEFAULT);
+  it("falls back to this host's default endpoint for a tcp:// host — this client has no TCP transport", () => {
+    assert.equal(socketPathFromDockerHost("tcp://127.0.0.1:2375"), REAL_DEFAULT);
   });
 
-  it("falls back to the default path for an http:// host", () => {
-    assert.equal(socketPathFromDockerHost("http://127.0.0.1:2375"), DEFAULT);
+  it("falls back to this host's default endpoint for an http:// host", () => {
+    assert.equal(socketPathFromDockerHost("http://127.0.0.1:2375"), REAL_DEFAULT);
+  });
+});
+
+/**
+ * The per-platform endpoint decision, exercised via the injected-platform
+ * seam (`socketPathFromDockerHost`'s second parameter) so every case runs
+ * deterministically on any host — mirrors `PlatformInfo`'s `_currentFor`
+ * tests in `backend-msb/platform.test.ts`, which exercise Windows-only
+ * branches from a non-Windows dev machine the same way.
+ */
+describe("socketPathFromDockerHost — injected-platform seam", () => {
+  const UNIX_DEFAULT = "/var/run/docker.sock";
+  const WIN32_DEFAULT = "\\\\.\\pipe\\docker_engine";
+
+  it("defaults to the unix socket path on posix platforms", () => {
+    assert.equal(socketPathFromDockerHost(undefined, "linux"), UNIX_DEFAULT);
+    assert.equal(socketPathFromDockerHost(undefined, "darwin"), UNIX_DEFAULT);
+  });
+
+  it("defaults to the named pipe path on win32", () => {
+    assert.equal(socketPathFromDockerHost(undefined, "win32"), WIN32_DEFAULT);
+  });
+
+  it("parses an npipe:// scheme path into the literal pipe path", () => {
+    assert.equal(socketPathFromDockerHost("npipe:////./pipe/docker_engine", "win32"), WIN32_DEFAULT);
+  });
+
+  it("parses an npipe:// scheme path naming a non-default pipe", () => {
+    assert.equal(socketPathFromDockerHost("npipe:////./pipe/custom_engine", "win32"), "\\\\.\\pipe\\custom_engine");
+  });
+
+  it("accepts a bare named pipe path with no scheme", () => {
+    assert.equal(socketPathFromDockerHost("\\\\.\\pipe\\docker_engine", "win32"), WIN32_DEFAULT);
+  });
+
+  it("npipe:// parsing does not depend on the injected platform — unix:// parsing is likewise platform-agnostic today", () => {
+    assert.equal(socketPathFromDockerHost("npipe:////./pipe/docker_engine", "linux"), WIN32_DEFAULT);
+  });
+
+  it("a tcp:// DOCKER_HOST falls back to the win32 default, never leaking a TCP port into the transport", () => {
+    assert.equal(socketPathFromDockerHost("tcp://127.0.0.1:2375", "win32"), WIN32_DEFAULT);
+  });
+
+  it("a unix:// DOCKER_HOST is honored verbatim regardless of the injected platform", () => {
+    assert.equal(socketPathFromDockerHost("unix:///run/user/1000/docker.sock", "win32"), "/run/user/1000/docker.sock");
   });
 });

@@ -5,6 +5,32 @@ import { BackendError } from "../core/errors.js";
 const DEFAULT_SOCKET_PATH = "/var/run/docker.sock";
 
 /**
+ * The named pipe Docker Desktop's daemon serves the same HTTP API over on
+ * Windows — `docker_engine` is the fixed pipe name Docker Desktop always
+ * creates (confirmed against Docker's own `DOCKER_HOST` convention there,
+ * `npipe:////./pipe/docker_engine`). Passed straight through to
+ * `node:http`'s `socketPath` option: `node:net`/`node:http` dial a Windows
+ * named pipe through the exact same `path`-based mechanism they use for a
+ * POSIX unix-domain socket, so no separate "pipe mode" exists to opt into.
+ */
+const DEFAULT_NAMED_PIPE_PATH = "\\\\.\\pipe\\docker_engine";
+
+/** The per-platform default endpoint when `DOCKER_HOST` names no override. */
+function defaultEndpoint(processPlatform: string): string {
+  return processPlatform === "win32" ? DEFAULT_NAMED_PIPE_PATH : DEFAULT_SOCKET_PATH;
+}
+
+/**
+ * Docker's `npipe://` convention renders the Windows UNC pipe path with
+ * forward slashes standing in for backslashes, prefixed by an empty
+ * authority (`npipe:////./pipe/docker_engine` = scheme + `//./pipe/...`) —
+ * swapping the slashes back yields the literal path this client dials.
+ */
+function npipeUrlToPath(host: string): string {
+  return host.slice("npipe://".length).replace(/\//g, "\\");
+}
+
+/**
  * Ceiling on one unary request/response cycle — connect, write, read
  * headers, read the whole body. Deliberately NOT applied to streaming reads
  * (`followLogs`): that call is meant to block for as long as the workload
@@ -59,34 +85,45 @@ export interface DockerStreamResponse {
 
 /**
  * The pure seam `DockerClient.fromEnv` delegates to: given a `DOCKER_HOST`
- * value (or `undefined`), returns the unix socket path this client should
- * dial. A `tcp://`/`http://` `DOCKER_HOST` falls back to the default socket
- * path rather than attempting a TCP connection — this client has no TCP
+ * value (or `undefined`), returns the local endpoint this client should
+ * dial — a unix socket path on POSIX, a named pipe path on Windows. A
+ * `tcp://`/`http://` `DOCKER_HOST` falls back to the platform default
+ * rather than attempting a TCP connection — this client has no TCP
  * transport at all (see the module docs on why: sharing an HTTP stack a
  * consumer can bump is exactly the failure mode being avoided).
+ *
+ * `processPlatform` defaults to `process.platform` for every real call site;
+ * it exists as a parameter purely as the injected-platform test seam
+ * (mirrors `PlatformInfo`'s `_currentFor`-style seams in
+ * `backend-msb/platform.ts`), so tests can exercise the win32 branch on any
+ * host without touching the real platform.
  */
-export function socketPathFromDockerHost(host: string | undefined): string {
+export function socketPathFromDockerHost(host: string | undefined, processPlatform: string = process.platform): string {
   if (host === undefined) {
-    return DEFAULT_SOCKET_PATH;
+    return defaultEndpoint(processPlatform);
   }
   if (host.startsWith("unix://")) {
     return host.slice("unix://".length);
   }
-  if (host.startsWith("/")) {
+  if (host.startsWith("npipe://")) {
+    return npipeUrlToPath(host);
+  }
+  if (host.startsWith("/") || host.startsWith("\\\\")) {
     return host;
   }
-  return DEFAULT_SOCKET_PATH;
+  return defaultEndpoint(processPlatform);
 }
 
 /**
- * A from-scratch HTTP client over the Docker daemon's unix socket, built on
- * `node:http`'s `socketPath` option rather than a general-purpose Docker SDK
- * (`dockerode`) — the point of hand-rolling is that this client can only
- * ever dial a unix socket path, never a TCP host. A shared HTTP stack a
- * consuming project also depends on has, on another runtime, been observed
- * to misroute a Docker client onto TCP `localhost:2375` instead of the
- * daemon's real unix socket; owning this client end-to-end makes that
- * misrouting structurally impossible; see the standing regression test in
+ * A from-scratch HTTP client over the Docker daemon's local endpoint — a
+ * unix socket on POSIX, a named pipe on Windows — built on `node:http`'s
+ * `socketPath` option rather than a general-purpose Docker SDK (`dockerode`)
+ * — the point of hand-rolling is that this client can only ever dial that
+ * local endpoint, never a TCP host. A shared HTTP stack a consuming project
+ * also depends on has, on another runtime, been observed to misroute a
+ * Docker client onto TCP `localhost:2375` instead of the daemon's real
+ * endpoint; owning this client end-to-end makes that misrouting
+ * structurally impossible; see the standing regression test in
  * `backend.test.ts`.
  *
  * Every daemon endpoint this backend calls returns either a small buffered
@@ -111,7 +148,7 @@ export class DockerClient {
     return new DockerClient(socketPathFromDockerHost(process.env["DOCKER_HOST"]));
   }
 
-  /** The unix socket path this client dials — never a TCP host. */
+  /** The local endpoint this client dials — a unix socket path on POSIX, a named pipe path on Windows; never a TCP host. */
   getSocketPath(): string {
     return this.socketPath;
   }

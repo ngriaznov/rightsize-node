@@ -17,6 +17,6 @@ import { DockerBackendProvider } from "./provider.js";
 registerBackend(new DockerBackendProvider());
 
 export { DockerBackend } from "./backend.js";
-export { DockerBackendProvider } from "./provider.js";
+export { DockerBackendProvider, isEndpointReachable } from "./provider.js";
 export { DockerClient, socketPathFromDockerHost } from "./client.js";
 export type { DockerResponse, DockerStreamResponse } from "./client.js";

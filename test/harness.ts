@@ -7,9 +7,9 @@
 // `before`/`after`; `bun:test` has `beforeAll`/`afterAll` and no `assert`
 // export at all — assertions go through `expect()`). This module detects the
 // engine at import time and re-exports a single shape that papers over both.
-import * as fs from "node:fs";
 import { PlatformInfo } from "../src/backend-msb/platform.js";
 import { socketPathFromDockerHost } from "../src/backend-docker/client.js";
+import { isEndpointReachable } from "../src/backend-docker/provider.js";
 //
 // Deliberately does NOT statically `import` from `"bun:test"`: the
 // `bun-types` ambient declarations for that module drag in global overrides
@@ -204,23 +204,22 @@ export function itMsbIntegration(name: string, fn: TestFn): void {
 }
 
 /**
- * A daemon socket existing on disk is not proof it's live, but it is the
+ * A daemon endpoint existing on disk is not proof it's live, but it is the
  * same cheap, synchronous, no-spawn signal the msb gate uses for `/dev/kvm`
  * — good enough to skip cleanly on a host with no Docker installed at all,
  * which is the common case this exists for (a Windows runner with no Docker
  * Desktop/daemon service, unlike GitHub's Linux runners, which always ship
- * one). A socket that exists but is stale/unresponsive still surfaces as a
- * real per-test failure, same as today; this only prevents the "no daemon
+ * one). An endpoint that exists but is stale/unresponsive still surfaces as
+ * a real per-test failure, same as today; this only prevents the "no daemon
  * anywhere on this host" case from producing that same connection-refused
- * failure on every single test in the file.
+ * failure on every single test in the file. Delegates the actual
+ * POSIX-socket-vs-Windows-pipe check to `isEndpointReachable` — the same
+ * seam `DockerBackendProvider.isSupported()` uses — so a Windows runner that
+ * DOES have Docker Desktop running is recognized too, not just the
+ * no-daemon-at-all case the doc above focuses on.
  */
 function dockerSocketPresent(): boolean {
-  const socketPath = socketPathFromDockerHost(process.env["DOCKER_HOST"]);
-  try {
-    return fs.statSync(socketPath).isSocket();
-  } catch {
-    return false;
-  }
+  return isEndpointReachable(socketPathFromDockerHost(process.env["DOCKER_HOST"]));
 }
 
 /**
