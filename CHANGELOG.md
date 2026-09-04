@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.8] - 2026-09-04
+
 ### Changed
 
 - **The pinned microsandbox release is now 0.6.17** (from 0.6.16). Upstream changes
