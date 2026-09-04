@@ -14,7 +14,7 @@ import type { Platform } from "./platform.js";
  * while msb 0.6.10-0.6.13 were broken on Windows (fixed upstream in 0.6.14).
  * MSB_PATH users on Windows must avoid 0.6.10-0.6.13.
  */
-export const MSB_VERSION = "0.6.16";
+export const MSB_VERSION = "0.6.17";
 
 function releaseBaseUrl(version: string): string {
   return `https://github.com/superradcompany/microsandbox/releases/download/v${version}`;
