@@ -43,7 +43,9 @@ class FakeCopyBackend implements SandboxBackend {
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
   async remove(): Promise<void> {}
-  async createCheckpoint(): Promise<void> {}
+  async createCheckpoint(): Promise<string> {
+    return "";
+  }
   async removeCheckpoint(): Promise<void> {}
   async hasCheckpoint(): Promise<boolean> {
     return false;

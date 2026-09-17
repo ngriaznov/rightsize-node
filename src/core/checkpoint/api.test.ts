@@ -39,8 +39,9 @@ class FakeArtifactBackend implements SandboxBackend {
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
   async remove(): Promise<void> {}
-  async createCheckpoint(_handle: SandboxHandle, ref: string): Promise<void> {
+  async createCheckpoint(_handle: SandboxHandle, ref: string): Promise<string> {
     this.artifacts.add(ref);
+    return ref;
   }
   async removeCheckpoint(ref: string): Promise<void> {
     this.removeCheckpointCalls.push(ref);

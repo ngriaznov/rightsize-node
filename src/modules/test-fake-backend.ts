@@ -32,7 +32,9 @@ export class FakeModuleBackend implements SandboxBackend {
   async start(_handle: SandboxHandle): Promise<void> {}
   async stop(_handle: SandboxHandle): Promise<void> {}
   async remove(_handle: SandboxHandle): Promise<void> {}
-  async createCheckpoint(_handle: SandboxHandle, _ref: string): Promise<void> {}
+  async createCheckpoint(_handle: SandboxHandle, ref: string): Promise<string> {
+    return ref;
+  }
   async removeCheckpoint(_ref: string): Promise<void> {}
   async hasCheckpoint(_ref: string): Promise<boolean> {
     return false;

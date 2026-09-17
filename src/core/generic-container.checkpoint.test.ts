@@ -81,7 +81,7 @@ class FakeCheckpointBackend implements SandboxBackend {
   /** Test seam: when set, the next `createCheckpoint` call rejects with this instead of succeeding. */
   failNextCreateCheckpoint: Error | undefined;
 
-  async createCheckpoint(_handle: SandboxHandle, ref: string): Promise<void> {
+  async createCheckpoint(_handle: SandboxHandle, ref: string): Promise<string> {
     this.calls.push(`createCheckpoint:${ref}`);
     if (this.failNextCreateCheckpoint !== undefined) {
       const err = this.failNextCreateCheckpoint;
@@ -89,6 +89,7 @@ class FakeCheckpointBackend implements SandboxBackend {
       throw err;
     }
     this.artifacts.add(ref);
+    return ref;
   }
   async removeCheckpoint(ref: string): Promise<void> {
     this.calls.push(`removeCheckpoint:${ref}`);

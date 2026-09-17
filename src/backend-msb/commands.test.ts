@@ -195,17 +195,30 @@ describe("MsbCommands", () => {
     assert.deepEqual(argv, ["run", "--name", "rz-abc12345-1", "redis:8.6-alpine"]);
   });
 
-  it("restore: minimal spec emits ref, --name, and --disk-only, nothing else", () => {
+  it("restore: minimal spec emits just ref and --name — never --disk-only", () => {
     const argv = MsbCommands.restore(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345" }));
-    assert.deepEqual(argv, ["restore", "rz-ckpt-abcdef012345", "--name", "rz-abc12345-1", "--disk-only"]);
+    assert.deepEqual(argv, ["restore", "rz-ckpt-abcdef012345", "--name", "rz-abc12345-1"]);
   });
 
-  it("restore: memory flag comes right after --name, before --disk-only", () => {
+  it("restore: never emits --disk-only — a disk-scope snapshot (the only kind this library creates) rejects it", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        memoryLimitMb: 256,
+        networkDisabled: true,
+        ports: [{ hostPort: 1111, guestPort: 22 }],
+        mounts: [{ hostPath: "/h", guestPath: "/g", readOnly: false }],
+      }),
+    );
+    assert.equal(argv.includes("--disk-only"), false);
+  });
+
+  it("restore: memory flag comes right after --name", () => {
     const argv = MsbCommands.restore(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345", memoryLimitMb: 256 }));
-    assert.deepEqual(argv, ["restore", "rz-ckpt-abcdef012345", "--name", "rz-abc12345-1", "-m", "256M", "--disk-only"]);
+    assert.deepEqual(argv, ["restore", "rz-ckpt-abcdef012345", "--name", "rz-abc12345-1", "-m", "256M"]);
   });
 
-  it("restore: ports appear after --disk-only, in spec order", () => {
+  it("restore: ports appear after --name (and memory, if any), in spec order", () => {
     const argv = MsbCommands.restore(
       baseSpec({
         checkpointRef: "rz-ckpt-abcdef012345",
@@ -220,7 +233,6 @@ describe("MsbCommands", () => {
       "rz-ckpt-abcdef012345",
       "--name",
       "rz-abc12345-1",
-      "--disk-only",
       "-p",
       "1111:22",
       "-p",
@@ -241,7 +253,7 @@ describe("MsbCommands", () => {
     }
   });
 
-  it("restore: networkDisabled emits --no-net right after --disk-only, before ports", () => {
+  it("restore: networkDisabled emits --no-net right after --name, before ports", () => {
     const argv = MsbCommands.restore(
       baseSpec({
         checkpointRef: "rz-ckpt-abcdef012345",
@@ -254,7 +266,6 @@ describe("MsbCommands", () => {
       "rz-ckpt-abcdef012345",
       "--name",
       "rz-abc12345-1",
-      "--disk-only",
       "--no-net",
       "-p",
       "1111:22",
@@ -283,7 +294,6 @@ describe("MsbCommands", () => {
       "rz-ckpt-abcdef012345",
       "--name",
       "rz-abc12345-1",
-      "--disk-only",
       "-p",
       "1111:22",
       "--volume",
@@ -304,7 +314,7 @@ describe("MsbCommands", () => {
     assert.equal(argv.includes("--volume"), true);
   });
 
-  it("restore: memory, network, ports, and mounts all appear together in that fixed order after --disk-only", () => {
+  it("restore: memory, network, ports, and mounts all appear together in that fixed order, never --disk-only", () => {
     const argv = MsbCommands.restore(
       baseSpec({
         checkpointRef: "rz-ckpt-abcdef012345",
@@ -321,7 +331,6 @@ describe("MsbCommands", () => {
       "rz-abc12345-1",
       "-m",
       "1024M",
-      "--disk-only",
       "--no-net",
       "-p",
       "1111:22",
@@ -363,8 +372,13 @@ describe("MsbCommands", () => {
     ]);
   });
 
-  it("snapshotRemove", () => {
-    assert.deepEqual(MsbCommands.snapshotRemove("rz-ckpt-abcdef012345"), ["snapshot", "rm", "rz-ckpt-abcdef012345"]);
+  it("snapshotRemove: appends -f (force) after the ref", () => {
+    assert.deepEqual(MsbCommands.snapshotRemove("/cache/checkpoints/box-1/snap_abcdef012345"), [
+      "snapshot",
+      "rm",
+      "/cache/checkpoints/box-1/snap_abcdef012345",
+      "-f",
+    ]);
   });
 
   it("snapshotInspect", () => {

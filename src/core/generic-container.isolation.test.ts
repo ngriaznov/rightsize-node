@@ -41,7 +41,9 @@ class FakeIsolationBackend implements SandboxBackend {
   async remove(): Promise<void> {
     this.calls.push("remove");
   }
-  async createCheckpoint(): Promise<void> {}
+  async createCheckpoint(): Promise<string> {
+    return "";
+  }
   async removeCheckpoint(): Promise<void> {}
   async hasCheckpoint(): Promise<boolean> {
     return false;

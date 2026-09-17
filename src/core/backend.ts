@@ -106,19 +106,28 @@ export interface SandboxBackend {
   /** Best-effort removal of the backend-native resource; callers swallow failures during teardown. */
   remove(handle: SandboxHandle): Promise<void>;
   /**
-   * Captures `handle`'s current state under `ref` —
-   * `GenericContainer.checkpoint()`'s backend call, gated on
+   * Captures `handle`'s current state and returns the EFFECTIVE ref to use
+   * from here on — `GenericContainer.checkpoint()`'s backend call, gated on
    * `capabilities.checkpoint` BEFORE this is ever reached, so an
    * unsupported backend never has to implement this for real (it may throw
-   * defensively). Docker: commits the running container to image `ref`,
-   * undisturbed. Microsandbox: stop the sandbox, `msb snapshot create` a
-   * disk snapshot under `ref` (an absolute `<cacheDir>/checkpoints/rz-ckpt-*`
-   * path — via `--dest-dir`, not msb's own default snapshot store), then
-   * start the sandbox back up — the workload restarts, which is why
-   * `capabilities.checkpointRestartsWorkload` exists. Never called on a
-   * backend whose `capabilities.checkpoint` is `false`.
+   * defensively). `ref` is the WORKING ref the caller asks this to
+   * checkpoint under; the returned value is not necessarily `ref` itself —
+   * the same asymmetry `importCheckpoint` already has, for the same reason.
+   * Docker: commits the running container to image `ref`, undisturbed, and
+   * returns `ref` unchanged (docker's tag round-trips exactly). Microsandbox:
+   * stop the sandbox, `msb snapshot create` a disk snapshot (via `--dest-dir`,
+   * not msb's own default snapshot store), then start the sandbox back up —
+   * the workload restarts, which is why `capabilities.checkpointRestartsWorkload`
+   * exists. Since msb 0.7.1, `snapshot create`'s own artifact placement is
+   * content-addressed and `ref` never determines it (see `MsbCliBackend`'s
+   * own doc), so the microsandbox backend parses the real artifact path back
+   * out of that command's stdout and returns THAT as the effective ref — the
+   * caller (`GenericContainer.checkpoint()`) stores whatever this returns in
+   * the named-checkpoint registry and on the `Checkpoint` it hands back,
+   * never `ref` itself. Never called on a backend whose
+   * `capabilities.checkpoint` is `false`.
    */
-  createCheckpoint(handle: SandboxHandle, ref: string): Promise<void>;
+  createCheckpoint(handle: SandboxHandle, ref: string): Promise<string>;
   /**
    * Best-effort removal of a checkpoint identified by `ref` (docker: `rmi`;
    * microsandbox: `msb snapshot rm`) — "not found" is success, the same

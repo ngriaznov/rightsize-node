@@ -137,9 +137,10 @@ if (cmd === "run") {
     }
   }, 50);
 } else if (cmd === "restore") {
-  // restore <SNAPSHOT-OR-ARCHIVE-PATH> --name <NAME> [-m SIZE] --disk-only
-  // [-p HOST:GUEST]... — msb 0.7.1's replacement for `run --from-snapshot`,
-  // the checkpoint cycle's reboot command (see MsbCommands.restore and
+  // restore <SNAPSHOT-OR-ARCHIVE-PATH> --name <NAME> [-m SIZE] [--no-net]
+  // [-p HOST:GUEST]... [--volume SRC:GUEST:OPTS]... — msb 0.7.1's
+  // replacement for `run --from-snapshot`, the checkpoint cycle's reboot
+  // command (see MsbCommands.restore and
   // MsbCliBackend.bootOnce). Reproduces the real binary's actual shape,
   // confirmed against its source (crates/cli/lib/commands/restore.rs):
   // unlike `run`, this NEVER stays open as a supervisor — `restore`'s own
@@ -218,7 +219,15 @@ if (cmd === "run") {
   process.stdout.write(`exec-ok:${rest.join(" ")}\n`);
   process.exit(0);
 } else if (cmd === "snapshot" && args[1] === "create") {
-  // snapshot create --from <sandbox> <name> [--dest-dir <dir>]
+  // snapshot create --from-sandbox <sandbox> <name> [--dest-dir <dir>] — msb
+  // 0.7.1's own snapshot-store layout (EMPIRICALLY VERIFIED against a real
+  // 0.7.1 binary): the artifact ALWAYS lands nested under
+  // <destDir-or-default>/<sandbox>/snap_<32-hex-digest>, never at
+  // <destDir>/<name> — `name` never determines the path (it only ends up in
+  // msb's own index, keyed by `<sandbox>:<name>`, which this fixture doesn't
+  // bother modeling since nothing here reads it back that way). The
+  // artifact path is printed as the LAST stdout line, after a snapshot-id
+  // line — the exact shape `parseSnapshotCreateArtifactPath` parses.
   const fromIdx = args.indexOf("--from-sandbox");
   const from = args[fromIdx + 1];
   const name = args[fromIdx + 2];
@@ -231,17 +240,34 @@ if (cmd === "run") {
     process.stderr.write(`error: snapshot create failed: sandbox '${from}' is not stopped\n`);
     process.exit(1);
   }
-  state.snapshots = { ...(state.snapshots ?? {}), [name]: { from } };
+  // No --dest-dir: msb's own default snapshot store. Rooted under the fake
+  // state file's own directory (a real, writable per-test tmp dir) rather
+  // than a literal fake path, so this fixture can actually mkdirSync it —
+  // unlike the fake paths `snapshot load`'s digest-dir naming below uses,
+  // which nothing here ever creates on disk.
+  const destDir =
+    destDirIdx !== -1 ? args[destDirIdx + 1] : path.join(path.dirname(statePath ?? "."), "msb-default-snapshots");
+  const digest = crypto.randomBytes(16).toString("hex");
+  const snapId = `snap_${digest}`;
+  const artifactPath = path.join(destDir, from, snapId);
+  fs.mkdirSync(artifactPath, { recursive: true });
+  fs.writeFileSync(path.join(artifactPath, "snapshot.json"), JSON.stringify({ from, name }));
+  state.snapshots = { ...(state.snapshots ?? {}), [artifactPath]: { from, name } };
   writeState(state);
-  if (destDirIdx !== -1) {
-    // --dest-dir <dir> writes the artifact directly under <dir>/<name>,
-    // matching the real binary's dest-dir behavior — the whole point of
-    // rightsize's path-ref checkpoints is that this directory IS the ref.
-    const destDir = args[destDirIdx + 1];
-    const artifactDir = path.join(destDir, name);
-    fs.mkdirSync(artifactDir, { recursive: true });
-    fs.writeFileSync(path.join(artifactDir, "snapshot.json"), JSON.stringify({ from, name }));
+  if ((state.failSnapshotCreateBadOutput ?? 0) > 0) {
+    // Reproduces an msb output this backend cannot parse — a last stdout
+    // line that is not an absolute path — so a test can drive
+    // MsbCliBackend.createCheckpoint's defensive parse-failure path without
+    // a real msb binary ever actually misbehaving this way. The artifact is
+    // still created (msb itself succeeded; this is purely about the stdout
+    // this fixture chooses to print), matching the fact that a real such
+    // failure would be a parsing bug in this library, not an msb failure.
+    state.failSnapshotCreateBadOutput -= 1;
+    writeState(state);
+    process.stdout.write(`Created snapshot ${snapId}\nnot-an-absolute-path\n`);
+    process.exit(0);
   }
+  process.stdout.write(`Created snapshot ${snapId}\n${artifactPath}\n`);
   process.exit(0);
 } else if (cmd === "snapshot" && args[1] === "inspect") {
   // snapshot inspect <name> — exit 0 if the snapshot exists, exit 1
@@ -277,13 +303,32 @@ if (cmd === "run") {
   process.stderr.write(`error: snapshot not found: ${name}\n`);
   process.exit(1);
 } else if (cmd === "snapshot" && args[1] === "rm") {
-  // Best-effort: a missing snapshot name is still a clean exit, matching the
-  // real command's "not found" contract removeCheckpoint relies on.
-  const name = args[2];
+  // snapshot rm <ref> -f — best-effort: a missing ref is still a clean exit,
+  // matching the real command's "not found" contract removeCheckpoint
+  // relies on. `ref` is the FULL artifact path since msb 0.7.1 (name-based
+  // removal does not resolve for real — see MsbCommands.snapshotRemove's
+  // own doc), and this fixture's `state.snapshots` is keyed the same way
+  // (see the "create" branch above).
+  const ref = args[2];
   const state = readState();
   logCall(state, "snapshotRemove", args);
+  if ((state.failSnapshotRmWithHeadRefusal ?? 0) > 0) {
+    // Reproduces msb's own "this is still the current head of older
+    // siblings from the same source sandbox" refusal on demand — captured
+    // verbatim (see isSnapshotHeadRemovalRefused) — so a test can drive
+    // removeCheckpoint's must-propagate path without needing a real second,
+    // older sibling snapshot underneath.
+    state.failSnapshotRmWithHeadRefusal -= 1;
+    writeState(state);
+    const from = (state.snapshots ?? {})[ref]?.from ?? "unknown-sandbox";
+    process.stderr.write(
+      `error: invalid config: cannot remove current head ${path.basename(ref)}; first select another ` +
+        `snapshot with 'msb snapshot head ${from}:${path.basename(ref)}'\n`,
+    );
+    process.exit(1);
+  }
   if (state.snapshots) {
-    delete state.snapshots[name];
+    delete state.snapshots[ref];
   }
   writeState(state);
   process.exit(0);

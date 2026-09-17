@@ -69,25 +69,31 @@ export const MsbCommands = {
   },
 
   /**
-   * `msb restore <ref> --name <name> [-m SIZE] --disk-only [--no-net]
-   * [--volume SOURCE:GUEST:OPTS]... [-p HOST:GUEST]...` — the
-   * checkpoint-reboot argv, replacing the removed `run --from-snapshot` (msb
-   * 0.7.1 moved restore to this dedicated subcommand). `--disk-only`
-   * cold-boots just the captured disk without resuming processes/RAM — the
-   * same semantics the old `run --from-snapshot` boot had (a fresh workload
-   * started from captured filesystem state), and the only restore mode this
-   * library's checkpoint contract documents; always emitted, unconditionally.
+   * `msb restore <ref> --name <name> [-m SIZE] [--no-net] [--volume
+   * SOURCE:GUEST:OPTS]... [-p HOST:GUEST]...` — the checkpoint-reboot argv,
+   * replacing the removed `run --from-snapshot` (msb 0.7.1 moved restore to
+   * this dedicated subcommand). NEVER emits `--disk-only`: EMPIRICALLY
+   * VERIFIED against a real msb 0.7.1 binary, a disk-scope snapshot — the
+   * only kind `msb snapshot create --from-sandbox` produces, and therefore
+   * the only kind this library's checkpoints ever restore — REJECTS that
+   * flag outright (`invalid config: disk_only requires a full snapshot with
+   * checkpoint state`). Restoring a disk-scope snapshot is inherently a cold
+   * boot of the captured disk with no processes/RAM resumed — the same
+   * semantics the old `run --from-snapshot` boot and the removed
+   * `--disk-only` flag both had, and the only restore mode this library's
+   * checkpoint contract documents — so nothing observable changes for
+   * callers; only the argv shrinks by one flag msb no longer accepts here.
    *
    * Deliberately narrower than `run()` in one respect only: `msb restore`
    * has no `-e`/`--env` flag at all, so env is never threaded through here —
-   * a disk-only restore replays the sandbox's own captured configuration,
-   * which makes re-passing env redundant (see
-   * `GenericContainer.fromCheckpoint`'s own doc on why an env the caller has
-   * actually changed beyond the checkpoint's own is refused before this is
-   * ever reached, rather than silently dropped here). There is likewise no
-   * `--root-disk` equivalent — the snapshot pins the root disk, and
-   * `withDiskLimit()` on a `fromCheckpoint()` container is rejected at
-   * `start()` before any backend call.
+   * a restore replays the sandbox's own captured configuration, which makes
+   * re-passing env redundant (see `GenericContainer.fromCheckpoint`'s own
+   * doc on why an env the caller has actually changed beyond the
+   * checkpoint's own is refused before this is ever reached, rather than
+   * silently dropped here). There is likewise no `--root-disk` equivalent —
+   * the snapshot pins the root disk, and `withDiskLimit()` on a
+   * `fromCheckpoint()` container is rejected at `start()` before any backend
+   * call.
    *
    * Mounts and network are NOT in that category — they thread through here,
    * mirroring `run()`'s own `--mount-file`/`--net private`. Per msb's own
@@ -141,7 +147,6 @@ export const MsbCommands = {
     if (spec.memoryLimitMb !== undefined) {
       argv.push("-m", `${spec.memoryLimitMb}M`);
     }
-    argv.push("--disk-only");
     if (spec.networkDisabled) {
       argv.push("--no-net");
     }
@@ -157,9 +162,21 @@ export const MsbCommands = {
   },
 
   /**
-   * `msb snapshot create --from <sandbox> <name>` — requires `sandbox`
-   * STOPPED; writes a sparse disk snapshot under `~/.microsandbox/snapshots/<name>`,
-   * or under `<destDir>/<name>` when `destDir` is given (path-ref checkpoints).
+   * `msb snapshot create --from-sandbox <sandbox> <name>` — requires
+   * `sandbox` STOPPED. `name` is a caller-supplied label, EMPIRICALLY
+   * VERIFIED against a real msb 0.7.1 binary to no longer determine where
+   * the artifact lands: it only appears in msb's own index (as
+   * `<sandbox>:<name>`, visible in `msb snapshot list`) and in `snapshot
+   * inspect` output. The artifact itself always lands under
+   * `<destDir-or-default>/<sandbox>/snap_<32-hex-digest>` — a
+   * content-addressed path `name` has no say over — which is why
+   * `MsbCliBackend.createCheckpoint` parses it back out of this command's
+   * own stdout (see `parseSnapshotCreateArtifactPath`) instead of
+   * constructing it. `destDir` (this library's own `--dest-dir`, when the
+   * ref is a path ref) still controls the artifact's PARENT directory —
+   * `<destDir>/<sandbox>/snap_<digest>` when given, msb's own default
+   * snapshot store (`~/.microsandbox/snapshots/<sandbox>/snap_<digest>`)
+   * otherwise.
    */
   snapshotCreate(sandbox: string, name: string, destDir?: string): string[] {
     const argv = ["snapshot", "create", "--from-sandbox", sandbox, name];
@@ -169,14 +186,33 @@ export const MsbCommands = {
     return argv;
   },
 
-  /** `msb snapshot rm <name>` — best-effort per `removeCheckpoint`'s own contract; "not found" is fine. */
-  snapshotRemove(name: string): string[] {
-    return ["snapshot", "rm", name];
+  /**
+   * `msb snapshot rm <ref> -f` — best-effort per `removeCheckpoint`'s own
+   * contract; "not found" is fine. `ref` must be the snapshot's own artifact
+   * PATH, never a bare name or `group:member` form: EMPIRICALLY VERIFIED
+   * against a real msb 0.7.1 binary, name-based removal does not resolve —
+   * the artifact path is the only address that reliably works. `-f` forces
+   * the removal; without it a plain `msb snapshot rm` prompts for
+   * confirmation, which would hang a non-interactive CLI invocation forever.
+   * A non-zero exit can ALSO mean msb refused because `ref` is the current
+   * head of older siblings from the same source sandbox — see
+   * `isSnapshotHeadRemovalRefused`, which `removeCheckpoint` propagates
+   * rather than swallowing alongside an ordinary "not found."
+   */
+  snapshotRemove(ref: string): string[] {
+    return ["snapshot", "rm", ref, "-f"];
   },
 
-  /** `msb snapshot inspect <name>` — exit 0 means the snapshot exists, non-zero means it doesn't; `hasCheckpoint`'s backend call. */
-  snapshotInspect(name: string): string[] {
-    return ["snapshot", "inspect", name];
+  /**
+   * `msb snapshot inspect <ref>` — exit 0 means the snapshot exists,
+   * non-zero means it doesn't (or the probe itself failed); `hasCheckpoint`'s
+   * backend call for a bare-name ref. `ref` should be the snapshot's own
+   * artifact PATH for the same reason `snapshotRemove` requires one —
+   * EMPIRICALLY VERIFIED against a real msb 0.7.1 binary, name-based inspect
+   * does not resolve either.
+   */
+  snapshotInspect(ref: string): string[] {
+    return ["snapshot", "inspect", ref];
   },
 
   /** `msb snapshot save <ref> <dest>` — writes a `.tar.zst` artifact archive; deliberately never `--with-image` (its import fails an integrity check in 0.6.6, see the checkpoints guide). `exportCheckpoint`'s backend call. */

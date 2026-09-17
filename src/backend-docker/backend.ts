@@ -263,8 +263,11 @@ export class DockerBackend implements SandboxBackend {
    * `ref` is always `rightsize/checkpoint:<12-hex>` (minted by
    * `GenericContainer.checkpoint()`), split into repo/tag the same way
    * `pullIfMissing`'s image argument is. The container itself is undisturbed.
+   * Returns `ref` unchanged — docker's tag round-trips exactly, unlike
+   * microsandbox's content-addressed snapshot placement (see
+   * `SandboxBackend.createCheckpoint`'s own doc).
    */
-  async createCheckpoint(handle: SandboxHandle, ref: string): Promise<void> {
+  async createCheckpoint(handle: SandboxHandle, ref: string): Promise<string> {
     const [repo, tag] = splitRepoTag(ref);
     const path = `/commit?container=${encodeQueryValue(handle.id)}&repo=${encodeQueryValue(repo)}&tag=${encodeQueryValue(tag)}`;
     const resp = await this.client.request("POST", path);
@@ -273,6 +276,7 @@ export class DockerBackend implements SandboxBackend {
         `docker could not commit container ${handle.id} to image '${ref}' (HTTP ${resp.status}): ${resp.body.toString()}`,
       );
     }
+    return ref;
   }
 
   /** Best-effort `DELETE /images/{ref}` — "not found" is success, the same contract as `removeByName`. */

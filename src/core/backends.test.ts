@@ -63,7 +63,7 @@ function fakeBackend(name: string): SandboxBackend {
     start: (): Promise<void> => notImplemented(),
     stop: (): Promise<void> => notImplemented(),
     remove: (): Promise<void> => notImplemented(),
-    createCheckpoint: (): Promise<void> => notImplemented(),
+    createCheckpoint: (): Promise<string> => notImplemented(),
     removeCheckpoint: (): Promise<void> => notImplemented(),
     hasCheckpoint: (): Promise<boolean> => notImplemented(),
     exportCheckpoint: (): Promise<void> => notImplemented(),

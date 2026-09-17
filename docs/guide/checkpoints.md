@@ -31,23 +31,30 @@ mechanisms:
 
 | | docker | microsandbox |
 |---|---|---|
-| Mechanism | Commit the running container to a new image | Stops the sandbox, snapshots its disk, and boots it back from that snapshot (`msb restore --disk-only`) under the same name, ports, mounts, and network setting |
+| Mechanism | Commit the running container to a new image | Stops the sandbox, snapshots its disk, and boots it back from that snapshot (`msb restore`) under the same name, ports, mounts, and network setting |
 | `capabilities.checkpoint` | `true` | `true` |
 | `capabilities.checkpointRestartsWorkload` | `false` — the container is undisturbed | `true` — the workload restarts |
-| Ref format | `rightsize/checkpoint:<12-hex>` (an image tag) | an absolute path, `<cacheDir>/checkpoints/rz-ckpt-<12-hex>` |
-| Cleanup one-liner | `docker rmi rightsize/checkpoint:<ref>` | `msb snapshot rm rz-ckpt-<ref>` |
+| Ref format | `rightsize/checkpoint:<12-hex>` (an image tag) | an absolute path, `<cacheDir>/checkpoints/<sourceSandbox>/snap_<hex-digest>` |
+| Cleanup one-liner | `docker rmi rightsize/checkpoint:<ref>` | `msb snapshot rm <ref> -f` |
 
 On microsandbox, the artifact lands under `<cacheDir>/checkpoints/`
 (`~/.cache/rightsize` on macOS/Linux, `%LOCALAPPDATA%\rightsize` on
 Windows — see [Configuration](/guide/configuration)), via msb's own
-`--dest-dir` flag rather than its default snapshot store — `Checkpoint.ref`
-there is that absolute path. It's still an opaque string as far as this
-library's public API goes; nothing about `fromCheckpoint()` or
-`Checkpoints.find`/`remove` changes. msb also keeps its own global index
-entry for the snapshot alongside the dest-dir artifact — it still shows up
-in `msb snapshot list` — and `removeCheckpoint`/`Checkpoints.remove` clean
-up both together. A bare-name ref from a checkpoint created before this
-still restores fine.
+`--dest-dir` flag rather than its default snapshot store. Since msb 0.7.1,
+the exact placement WITHIN that directory is msb's own choice, not this
+library's: `msb snapshot create` writes its artifact nested at
+`<cacheDir>/checkpoints/<sourceSandbox>/snap_<hex-digest>` — a
+content-addressed path this library cannot predict ahead of time — so
+`checkpoint()` reads it back out of the `snapshot create` command's own
+output and that becomes `Checkpoint.ref`. It's still an opaque string as
+far as this library's public API goes; nothing about `fromCheckpoint()` or
+`Checkpoints.find`/`remove` changes — they store and restore whatever ref
+the backend actually returned. msb also keeps its own global index entry
+for the snapshot (keyed by `<sourceSandbox>:<name>`) alongside the
+dest-dir artifact — it still shows up in `msb snapshot list` — but that
+index entry does not itself resolve for inspect/rm/restore: the artifact
+PATH is the only reliable address for those, which is exactly what
+`Checkpoint.ref` carries.
 
 A microsandbox container using `withTmpfsRoot()` can't be checkpointed at
 all: its writable root lives in RAM, so there's nothing on disk for a
@@ -93,7 +100,7 @@ const source = await new GenericContainer("postgres:16-alpine")
 
 const checkpoint = await source.checkpoint();
 // { ref: "rightsize/checkpoint:<12-hex>" (docker) or an absolute
-//   "<cacheDir>/checkpoints/rz-ckpt-<12-hex>" path (msb),
+//   "<cacheDir>/checkpoints/<sourceSandbox>/snap_<hex-digest>" path (msb),
 //   backend: "docker" | "microsandbox", spec: <source's ContainerSpec> }
 await source.stop();
 
@@ -144,7 +151,7 @@ async function restore(checkpoint: Checkpoint): Promise<GenericContainer> {
 **On microsandbox, `withEnv()` after `fromCheckpoint()` can only repeat the
 checkpoint's own captured env, never change it.** `msb restore` (the command
 this backend's restore goes through) has no `-e`/`--env` flag at all — a
-disk-only restore replays the sandbox's own captured configuration instead.
+restore replays the sandbox's own captured configuration instead.
 Calling `withEnv()` with the checkpoint's captured values, unchanged, is
 fine; calling it with a new key or a different value for an existing one
 throws `CheckpointRestoreEnvOverrideError` at `start()`, before any backend
@@ -240,17 +247,30 @@ name; every later run — same process or not — finds it instantly via
 A checkpoint name must match `^[a-z0-9][a-z0-9-]{0,40}$` — lowercase
 letters, digits, and hyphens, starting with a letter or digit, at most 41
 characters — checked before any backend call; an invalid name throws
-`InvalidCheckpointNameError`. The name also makes the ref deterministic:
-`rightsize/checkpoint:<name>` on docker, the absolute path
-`<cacheDir>/checkpoints/rz-ckpt-<name>` on microsandbox, instead of a random
-12-hex suffix.
+`InvalidCheckpointNameError`. On docker, the name also makes the ref
+deterministic: `rightsize/checkpoint:<name>` instead of a random 12-hex
+suffix. **On microsandbox this is no longer true since msb 0.7.1**: the
+name is still what `checkpoint()` asks `msb snapshot create` to label the
+snapshot as in msb's own index, but the artifact's actual path
+(`Checkpoint.ref`) is a content-addressed `snap_<hex-digest>` msb itself
+chooses — the name has no say over it, so two checkpoints under the same
+name do NOT get the same ref.
 
-Checkpointing under a name that's already taken REPLACES it: the same
-deterministic ref means the old artifact under that name is best-effort
-cleared before the new one is created, and the registry entry is overwritten
-— the latest checkpoint under a name always wins. Omitting `name` keeps
-`checkpoint()`'s original behavior exactly: a random ref, no registry entry,
-purely ephemeral.
+Checkpointing under a name that's already taken REPLACES the REGISTRY
+entry either way: the new checkpoint's ref overwrites the old one, so
+`Checkpoints.find(name)` and `fromCheckpoint()` always see the latest
+checkpoint under that name. On docker, the deterministic ref also means
+the OLD artifact under that same name is reliably best-effort cleared
+before the new one lands. On microsandbox, `checkpoint(name)` best-effort
+attempts to clear whatever sat under the previous NOMINAL ref before
+creating the new one, but since that nominal ref no longer corresponds to
+a real artifact on disk (see above), this does not reliably remove a prior
+msb checkpoint's artifact — it can be left as an orphan. To remove a prior
+named msb checkpoint reliably, call `Checkpoints.remove(name)` first (it
+reads the registry's own recorded ref, not a recomputed one) before
+checkpointing again under the same name. Omitting `name` keeps
+`checkpoint()`'s original behavior exactly: an ephemeral checkpoint with no
+registry entry.
 
 ### The registry
 
@@ -361,8 +381,9 @@ ordinary `start()` against that image. Make sure the image is reachable
 **microsandbox refs change shape after import.** `importFrom`'s effective
 ref on microsandbox is a digest-derived directory name (`sha256-<16 hex
 chars>`, e.g. `sha256-b9c0448ee9d54e33`), never the absolute
-`rz-ckpt-<name>` path the archive itself carried — `msb snapshot load`
-writes under that directory name and doesn't let you choose it. This is
+`snap_<hex-digest>` artifact path the archive itself carried — `msb
+snapshot load` writes under that directory name and doesn't let you choose
+it. This is
 deliberately NOT the full `sha256:<64 hex chars>` digest `msb snapshot list`
 also reports: that full digest does not resolve as a snapshot ref at all
 (msb treats it as a literal path), while the directory name does, for
@@ -389,17 +410,32 @@ entirely, the CLI one-liners still work:
 
 ```bash
 docker rmi rightsize/checkpoint:<ref>       # docker
-msb snapshot rm rz-ckpt-<ref>               # microsandbox
+msb snapshot rm <ref> -f                    # microsandbox — <ref> is the FULL artifact path
 ```
 
-`msb snapshot rm` takes the snapshot by name — its own index tracks a
-dest-dir artifact by name regardless of where the artifact itself lives on
-disk — so the one-liner above still works even though a library-minted
-`Checkpoint.ref` on microsandbox is the full `<cacheDir>/checkpoints/`
-path; drop everything before the trailing `rz-ckpt-<ref>` segment.
+Unlike before 0.7.1, `msb snapshot rm` no longer resolves a bare snapshot
+name or a `group:member` form — since msb 0.7.1, the artifact PATH is the
+only address that reliably works for `rm`/`inspect`/`restore` alike, which
+is exactly what a library-minted `Checkpoint.ref` on microsandbox already
+is: pass it to `msb snapshot rm` in full, `-f` to force (skip the
+interactive confirmation prompt).
+
+**Removing a checkpoint that is still the newest of several snapshots from
+the same source sandbox is refused by msb**, both via this CLI one-liner
+and via `removeCheckpoint(ref)`/`Checkpoints.remove(name)`:
+
+```
+error: invalid config: cannot remove current head snap_<digest>; first
+select another snapshot with 'msb snapshot head <sandbox>:<snapshot>'
+```
+
+This library does not attempt automatic head rotation on your behalf — that
+error propagates as-is. Select another snapshot as head with msb's own CLI
+first, or remove the older siblings before the newest one.
 
 Both backends' SPI also expose `removeCheckpoint(ref)` (best-effort, "not
-found" is success) for tests that want to clean up programmatically without
+found" is success — but this one refusal above is NOT swallowed alongside
+it, see above) for tests that want to clean up programmatically without
 going through the named registry — it has no public `GenericContainer`
 method of its own, since normal usage is expected to go through
 `Checkpoints.remove` (named) or the CLI one-liners above (unnamed).

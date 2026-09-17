@@ -18,6 +18,8 @@ import { isSnapshotNotFoundError } from "./snapshot-not-found.js";
 import { isSnapshotAlreadyExistsError, parseImportedDigestDirName } from "./snapshot-import.js";
 import { isSnapshotSaveAccessDeniedFailure, salvageStagedArchive } from "./snapshot-save-fsync.js";
 import { parseSnapshotList, confirmDigestDirNamePresent } from "./snapshot-list.js";
+import { parseSnapshotCreateArtifactPath } from "./snapshot-create.js";
+import { isSnapshotHeadRemovalRefused } from "./snapshot-rm.js";
 import { undeliveredLines } from "./follow-replay.js";
 import { requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript } from "./network-links.js";
 import { ExecTunnel } from "./exec-tunnel.js";
@@ -202,16 +204,17 @@ function describeHeal(heal: ExecResult | unknown): string {
 
 /**
  * True when `ref` (an absolute path ref) looks like a checkpoint artifact
- * this backend itself would have written — a directory named `rz-ckpt-*`
- * (`checkpointRef`'s own prefix) containing a `snapshot.json` file, the same
- * shape `hasCheckpoint` checks for. `removeCheckpoint`'s recursive delete is
- * gated on this: `ref` is caller-supplied (a corrupt or hand-edited registry
- * entry), and skipping the shape check would let an arbitrary path get
- * `fs.rm(..., { recursive: true })`'d just because it happened to be passed
- * in as a "ref".
+ * this backend itself would have written — a directory named `snap_<hex>`
+ * (msb's own snapshot-store naming since 0.7.1 — see
+ * `parseSnapshotCreateArtifactPath`) containing a `snapshot.json` file, the
+ * same shape `hasCheckpoint` checks for. `removeCheckpoint`'s recursive
+ * delete is gated on this: `ref` is caller-supplied (a corrupt or
+ * hand-edited registry entry), and skipping the shape check would let an
+ * arbitrary path get `fs.rm(..., { recursive: true })`'d just because it
+ * happened to be passed in as a "ref".
  */
 async function looksLikeCheckpointArtifactDir(ref: string): Promise<boolean> {
-  if (!path.basename(ref).startsWith("rz-ckpt-")) {
+  if (!/^snap_[0-9a-f]+$/i.test(path.basename(ref))) {
     return false;
   }
   const stat = await fs.stat(ref).catch(() => undefined);
@@ -370,7 +373,7 @@ export class MsbCliBackend implements SandboxBackend {
    * knows: the install-lock poll, the one-shot state-database retry, and the
    * one-shot image-cache heal. Both the ordinary `start()` path and the
    * checkpoint cycle's post-snapshot reboot come through here — a reboot
-   * from a snapshot (now `msb restore ... --disk-only`, see `bootOnce`) is
+   * from a snapshot (now `msb restore ...`, see `bootOnce`) is
    * as exposed to msb's transients as any other boot, and skipping the
    * classification there turned a passing install-lock poll into an
    * immediate checkpoint failure on a live Windows run. The image-cache heal
@@ -467,7 +470,7 @@ export class MsbCliBackend implements SandboxBackend {
    * reaches Running. For an ordinary spec (no `checkpointRef`) this spawns
    * ATTACHED `msb run`, which stays alive as the sandbox's own supervisor for
    * its whole lifetime. For a checkpoint-restore spec, this spawns
-   * `msb restore ... --disk-only` instead — see `MsbCommands.restore`'s own
+   * `msb restore ...` instead — see `MsbCommands.restore`'s own
    * doc for the argv, and below for why its process shape is handled
    * differently: unlike `run`, `restore` always detaches and exits once the
    * sandbox is confirmed up, so its clean exit is a SUCCESS signal, not
@@ -689,10 +692,14 @@ export class MsbCliBackend implements SandboxBackend {
   /**
    * The stop/snapshot/reboot cycle: `msb stop <name>` (reusing this
    * backend's own `stop()`, which also quiesces the attached child and any
-   * network-link tunnels), `msb snapshot create --from-sandbox <name> <ref>`,
-   * then `msb rm <name>` followed by `msb restore <ref> --name <name>
-   * --disk-only` of the SAME name from that snapshot (via `bootOnce`, see
-   * `MsbCommands.restore`'s own doc) — never `msb start`. Upstream's
+   * network-link tunnels), `msb snapshot create --from-sandbox <name> <ref>`
+   * (whose printed artifact path — never `ref` itself — becomes the
+   * EFFECTIVE checkpoint ref this method returns; see
+   * `parseSnapshotCreateArtifactPath`), then `msb rm <name>` followed by
+   * `msb restore <effective-ref> --name <name>` of the SAME name from that
+   * snapshot (via `bootOnce`, see `MsbCommands.restore`'s own doc — no
+   * `--disk-only`, which a disk-scope snapshot rejects) — never `msb start`.
+   * Upstream's
    * detached-start path (`Sandbox::start_detached`) passes
    * `CREATE_BREAKAWAY_FROM_JOB` on Windows, which `ERROR_ACCESS_DENIED`s
    * outright whenever the msb CLI runs inside a job object that doesn't
@@ -715,13 +722,14 @@ export class MsbCliBackend implements SandboxBackend {
    * genuine breakaway denial always took.
    * `rm`-ing the sandbox first and restoring a fresh one under the same
    * name/ports/memory (via a spec identical to `handle.spec` except
-   * `checkpointRef` set to the new `ref` — env is no longer threaded through
-   * at all, see `MsbCommands.restore`) reproduces the exact same observable
-   * contract. `bootOnce` swaps `state.attached` to the freshly spawned child
-   * itself (or leaves it `undefined`, since restore's own child exits on
-   * success — see `bootOnce`); nothing about `this.handles`/`startedNames`
-   * or the reaping ledger changes, since the name never changed. Its
-   * workload restarts from scratch (the VM reboots), which is why
+   * `checkpointRef` set to the EFFECTIVE ref this method discovers, below —
+   * env is no longer threaded through at all, see `MsbCommands.restore`)
+   * reproduces the exact same observable contract. `bootOnce` swaps
+   * `state.attached` to the freshly spawned child itself (or leaves it
+   * `undefined`, since restore's own child exits on success — see
+   * `bootOnce`); nothing about `this.handles`/`startedNames` or the reaping
+   * ledger changes, since the name never changed. Its workload restarts
+   * from scratch (the VM reboots), which is why
    * `capabilities.checkpointRestartsWorkload` is `true` here and the generic
    * layer re-runs the wait strategy after this returns.
    *
@@ -735,8 +743,24 @@ export class MsbCliBackend implements SandboxBackend {
    *
    * Refuses outright, before any of the above, when `handle.spec.tmpfsRootMb`
    * is set: a tmpfs root has nothing on disk for a snapshot to capture.
+   *
+   * `ref` is the WORKING ref this method is asked to checkpoint under — its
+   * basename becomes the snapshot create call's `<name>` argument (still
+   * meaningful: it lands in msb's own index, see `MsbCommands.snapshotCreate`'s
+   * own doc) and, for a path ref, its dirname becomes `--dest-dir`. It is
+   * NOT necessarily where the artifact ends up: EMPIRICALLY VERIFIED against
+   * a real msb 0.7.1 binary, `snapshot create` always writes under
+   * `<destDir-or-default>/<sandbox>/snap_<32-hex-digest>`, a path `name`
+   * never determines. This method therefore parses that real artifact path
+   * back out of the command's own stdout (last non-empty line, required to
+   * be absolute — see `parseSnapshotCreateArtifactPath`) and returns THAT as
+   * the EFFECTIVE ref — the one used for the reboot below and the one the
+   * caller (`GenericContainer.checkpoint()`) stores in the registry and
+   * hands back on the `Checkpoint` it returns. Malformed or unrecognizable
+   * output (empty, no absolute last line) throws a `BackendError` quoting
+   * the raw, unparsed output verbatim rather than guessing a ref.
    */
-  async createCheckpoint(handle: SandboxHandle, ref: string): Promise<void> {
+  async createCheckpoint(handle: SandboxHandle, ref: string): Promise<string> {
     if (handle.spec.tmpfsRootMb !== undefined) {
       // Checked before touching the sandbox at all: a tmpfs root is
       // ephemeral, so stopping it first would gain nothing worth throwing
@@ -746,12 +770,13 @@ export class MsbCliBackend implements SandboxBackend {
     const msbPath = await this.msbPath();
     await this.stop(handle);
 
-    // A path ref (see checkpoint/ref.ts) stores its artifact under the ref
-    // itself: mkdirs the parent, then hands msb the ref's own basename as
-    // the snapshot name and the parent as --dest-dir, so the artifact msb
-    // writes lands at exactly <parent>/<basename> === ref. A bare-name ref
-    // (pre-dest-dir checkpoints, still restorable) keeps going through
-    // msb's own default snapshot store, unchanged.
+    // A path ref (see checkpoint/ref.ts) hands msb the ref's own basename as
+    // the snapshot NAME and the parent as --dest-dir — the parent directory
+    // is honored, but (since msb 0.7.1) the artifact itself lands nested
+    // under <parent>/<sandbox>/snap_<digest>, never literally at `ref`; see
+    // this method's own doc. A bare-name ref (pre-dest-dir checkpoints,
+    // still restorable) keeps going through msb's own default snapshot
+    // store, unchanged.
     const isPathRef = path.isAbsolute(ref);
     if (isPathRef) {
       await fs.mkdir(path.dirname(ref), { recursive: true });
@@ -766,6 +791,14 @@ export class MsbCliBackend implements SandboxBackend {
           `the sandbox is left stopped; run 'msb start ${handle.id}' by hand to bring it back up.`,
       );
     }
+    const effectiveRef = parseSnapshotCreateArtifactPath(snap.stdout);
+    if (effectiveRef === undefined) {
+      throw new BackendError(
+        `msb snapshot create --from ${handle.id} ${ref} did not print a recognizable artifact path as its ` +
+          `last line — the sandbox is left stopped; run 'msb start ${handle.id}' by hand to bring it back up. ` +
+          `Raw output:\n${snap.stdout}${snap.stderr}`,
+      );
+    }
 
     await invoke(msbPath, MsbCommands.rm(handle.id), STOP_TIMEOUT_MS).catch(() => {});
 
@@ -773,7 +806,7 @@ export class MsbCliBackend implements SandboxBackend {
     if (state === undefined) {
       throw new BackendError(`no handle state for sandbox '${handle.id}' — create() was never called for it`);
     }
-    const rebootHandle: SandboxHandle = { id: handle.id, spec: { ...handle.spec, checkpointRef: ref } };
+    const rebootHandle: SandboxHandle = { id: handle.id, spec: { ...handle.spec, checkpointRef: effectiveRef } };
     try {
       await this.bootClassified(msbPath, rebootHandle, state);
     } catch (err) {
@@ -781,28 +814,53 @@ export class MsbCliBackend implements SandboxBackend {
       throw new BackendError(
         `sandbox '${handle.id}' was removed after a successful checkpoint snapshot, but booting a fresh ` +
           `sandbox back up from that snapshot failed: ${detail} — the sandbox's disk state is preserved in ` +
-          `checkpoint '${ref}', restorable via GenericContainer.fromCheckpoint().`,
+          `checkpoint '${effectiveRef}', restorable via GenericContainer.fromCheckpoint().`,
       );
     }
+    return effectiveRef;
   }
 
   /**
-   * Best-effort `msb snapshot rm <basename(ref)>` — "not found" is success,
-   * the same contract as `removeByName`. msb's own removal deletes both its
-   * index entry and the dest-dir artifact for a path ref, but afterwards this
-   * also best-effort recursively deletes the ref path itself: if msb's index
-   * ever loses track of an artifact without deleting it, the directory would
-   * otherwise linger under the cache dir forever. That recursive delete is
-   * gated on `looksLikeCheckpointArtifactDir` first — a `ref` is caller-
-   * supplied (a corrupt registry entry, a hand-edited env var, …), and a
-   * `fs.rm(ref, { recursive: true })` on an unverified path would happily
-   * wipe out an arbitrary directory that merely happens to share its name.
+   * Best-effort `msb snapshot rm <ref> -f` — "not found" is success, the
+   * same contract as `removeByName`. `ref` is passed FULL, never reduced to
+   * `path.basename(ref)`: EMPIRICALLY VERIFIED against a real msb 0.7.1
+   * binary, name-based removal does not resolve at all — the artifact PATH
+   * is the only address that reliably works (see `MsbCommands.snapshotRemove`'s
+   * own doc). Every real caller already hands this the EFFECTIVE ref
+   * `createCheckpoint` returned (an absolute path since 0.7.1), so this is
+   * also simply correct for the common case, not just a defensive choice.
+   *
+   * One failure shape is deliberately NOT swallowed alongside "not found":
+   * msb refuses to remove a snapshot that is still the current HEAD of
+   * older siblings from the same source sandbox (see
+   * `isSnapshotHeadRemovalRefused`) — that refusal propagates as a
+   * `BackendError` naming msb's own remedy, rather than silently doing
+   * nothing, since automatic head rotation is out of scope for this method
+   * (see the checkpoints guide's cleanup section for the documented
+   * limitation).
+   *
+   * msb's own removal deletes both its index entry and the dest-dir
+   * artifact for a path ref, but afterwards this also best-effort
+   * recursively deletes the ref path itself: if msb's index ever loses
+   * track of an artifact without deleting it, the directory would otherwise
+   * linger under the cache dir forever. That recursive delete is gated on
+   * `looksLikeCheckpointArtifactDir` first — a `ref` is caller-supplied (a
+   * corrupt registry entry, a hand-edited env var, …), and a `fs.rm(ref, {
+   * recursive: true })` on an unverified path would happily wipe out an
+   * arbitrary directory that merely happens to share its name.
    */
   async removeCheckpoint(ref: string): Promise<void> {
     const msbPath = await this.msbPath();
     const isPathRef = path.isAbsolute(ref);
-    const name = isPathRef ? path.basename(ref) : ref;
-    await invoke(msbPath, MsbCommands.snapshotRemove(name), CHECKPOINT_TIMEOUT_MS).catch(() => {});
+    const result = await invoke(msbPath, MsbCommands.snapshotRemove(ref), CHECKPOINT_TIMEOUT_MS).catch(() => undefined);
+    if (result !== undefined && result.exitCode !== 0 && isSnapshotHeadRemovalRefused(result.stderr)) {
+      throw new BackendError(
+        `msb snapshot rm ${ref} -f was refused (exit ${result.exitCode}): ${result.stderr.trim()} — this ` +
+          `checkpoint is still the newest snapshot of other, older ones from the same source sandbox; ` +
+          `select another snapshot as head first ('msb snapshot head ...', see msb's own message above), ` +
+          `or remove the older siblings first.`,
+      );
+    }
     if (isPathRef && (await looksLikeCheckpointArtifactDir(ref))) {
       await fs.rm(ref, { recursive: true, force: true }).catch(() => {});
     }

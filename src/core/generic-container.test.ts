@@ -69,7 +69,9 @@ class FakeBackend implements SandboxBackend {
     this.calls.push({ op: "remove", handleId: handle.id });
   }
 
-  async createCheckpoint(_handle: SandboxHandle, _ref: string): Promise<void> {}
+  async createCheckpoint(_handle: SandboxHandle, ref: string): Promise<string> {
+    return ref;
+  }
   async removeCheckpoint(): Promise<void> {}
   async hasCheckpoint(): Promise<boolean> {
     return false;

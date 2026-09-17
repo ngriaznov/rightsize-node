@@ -1082,21 +1082,29 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * state error (same shape as `exec`/`logs`) if this container isn't
    * currently running.
    *
-   * Passing `name` makes this checkpoint NAMED and durable: the ref becomes
-   * deterministic (an absolute `<cacheDir>/checkpoints/rz-ckpt-<name>` path
-   * on microsandbox, `rightsize/checkpoint:<name>` on docker — see
+   * Passing `name` makes this checkpoint NAMED and durable: on docker the ref
+   * becomes deterministic (`rightsize/checkpoint:<name>` — see
    * `checkpointRef` — instead of a random 12-hex suffix), and — only once
    * the backend call below has actually succeeded — a registry entry is written under
    * `<cacheDir>/checkpoints/<name>.json` that `Checkpoints.find`/`list`/
    * `remove` can rediscover later, in this process or a different one. `name`
    * must match `^[a-z0-9][a-z0-9-]{0,40}$`; an invalid name throws
    * `InvalidCheckpointNameError` before any backend call. Checkpointing under
-   * a name that already has a registry entry REPLACES it: the ref is the
-   * same deterministic value either way, so this best-effort clears the old
-   * artifact under that ref before creating the new one, then overwrites the
-   * registry entry — the latest checkpoint under a name always wins.
-   * Omitting `name` keeps the original behavior byte-for-byte: a random ref,
-   * no registry entry, ephemeral.
+   * a name that already has a registry entry REPLACES it: this best-effort
+   * clears whatever artifact currently sits under `name`'s nominal ref before
+   * creating the new one, then overwrites the registry entry with the
+   * BACKEND'S OWN EFFECTIVE ref for the fresh checkpoint — the latest
+   * checkpoint under a name always wins. On docker the nominal and effective
+   * refs are the same deterministic value, so this is a straightforward
+   * replace; on microsandbox (since 0.7.1) the effective ref is a
+   * content-addressed artifact path the nominal one never predicts (see
+   * `SandboxBackend.createCheckpoint`'s own doc), so the best-effort clear
+   * above targets the nominal ref only — a genuinely reliable removal of a
+   * PRIOR msb checkpoint under this name goes through `Checkpoints.remove(name)`
+   * instead, which reads the registry's own recorded ref rather than
+   * recomputing one. Omitting `name` keeps the original behavior byte-for-byte:
+   * an ephemeral checkpoint with no registry entry, whose `Checkpoint.ref` is
+   * always the backend's own effective ref.
    *
    * On a backend whose `capabilities.checkpointRestartsWorkload` is `true`
    * (microsandbox: the stop/snapshot/reboot cycle boots a fresh microVM),
@@ -1139,12 +1147,27 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     }
     const ref = checkpointRef(backend.name, name);
     if (name !== undefined) {
-      // Replace semantics: the ref is deterministic from `name`, so a prior
-      // checkpoint under this same name — if any — sits under this exact
-      // ref. Best-effort clear it before creating the new one.
+      // Replace semantics: on a backend whose ref is deterministic from
+      // `name` (docker), a prior checkpoint under this same name — if any —
+      // sits under this exact `ref`, so this best-effort clears it before
+      // creating the new one. On microsandbox this is no longer guaranteed:
+      // since 0.7.1 the EFFECTIVE ref createCheckpoint returns is a
+      // content-addressed artifact path `ref` never determines (see
+      // `SandboxBackend.createCheckpoint`'s own doc), so a prior checkpoint
+      // under this name — if any — actually sits under whatever ref THAT
+      // call returned, not this freshly-minted nominal one. This call still
+      // runs (harmlessly best-effort either way), but on microsandbox it can
+      // no longer be relied on to clear a genuinely prior artifact under
+      // this name; only `Checkpoints.remove(name)` (which reads the
+      // registry's own recorded ref) does that reliably.
       await swallow(() => backend.removeCheckpoint(ref));
     }
-    await backend.createCheckpoint(handle, ref);
+    // The EFFECTIVE ref: on docker this is always `ref` itself; on
+    // microsandbox (since 0.7.1) it is whatever real artifact path
+    // `createCheckpoint` discovered from `msb snapshot create`'s own stdout
+    // — never necessarily `ref`. Everything downstream (the registry entry,
+    // the returned `Checkpoint`) uses this, not the working `ref`.
+    const effectiveRef = await backend.createCheckpoint(handle, ref);
     if (backend.capabilities.checkpointRestartsWorkload) {
       if (this.installedNetworkLinks.length > 0) {
         await backend.installNetworkLinks(handle, this.installedNetworkLinks);
@@ -1157,14 +1180,14 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       // never written for a checkpoint that doesn't exist.
       const entry: CheckpointRegistryEntry = {
         name,
-        ref,
+        ref: effectiveRef,
         backend: backend.name,
         createdIso: new Date().toISOString(),
         spec: toCheckpointRegistrySpec(handle.spec),
       };
       await writeCheckpointRegistryAtomic(cacheDir(), name, entry);
     }
-    return { ref, backend: backend.name, spec: handle.spec };
+    return { ref: effectiveRef, backend: backend.name, spec: handle.spec };
   }
 
   /**

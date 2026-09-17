@@ -343,11 +343,19 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
         assert.equal(marker.exitCode, 0);
 
         cp = await source.checkpoint();
-        // The msb ref is an absolute artifact path under <cacheDir>/checkpoints —
-        // the artifact is created there via --dest-dir and restored by path.
+        // The msb ref is an absolute artifact path msb 0.7.1's own snapshot
+        // store chose — EMPIRICALLY VERIFIED against a real msb 0.7.1
+        // binary: it is NEVER <cacheDir>/checkpoints/rz-ckpt-<name>, it is
+        // <cacheDir>/checkpoints/<sourceSandbox>/snap_<digest> (the
+        // checkpoints dir is an ANCESTOR, not necessarily the direct
+        // parent, and the basename is msb's own snap_<hex> naming, not this
+        // library's rz-ckpt- prefix — see MsbCliBackend.createCheckpoint).
         assert.ok(path.isAbsolute(cp.ref), `expected an absolute path ref, got ${cp.ref}`);
-        assert.equal(path.basename(path.dirname(cp.ref)), "checkpoints");
-        assert.match(path.basename(cp.ref), /^rz-ckpt-[0-9a-f]{12}$/);
+        assert.ok(
+          cp.ref.split(path.sep).includes("checkpoints"),
+          `expected 'checkpoints' to be an ancestor of ${cp.ref}`,
+        );
+        assert.match(path.basename(cp.ref), /^snap_[0-9a-f]+$/i);
         assert.equal(cp.backend, "microsandbox");
 
         // Same container, still usable: proves the msb stop/snapshot/reboot
@@ -422,8 +430,14 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
           assert.equal(marker.exitCode, 0);
 
           const cp = await source.checkpoint(name);
+          // The NAME no longer determines the artifact's path at all since
+          // msb 0.7.1 (EMPIRICALLY VERIFIED: only the checkpoints dir is an
+          // ancestor, and the basename is msb's own snap_<hex> naming) — the
+          // registry is what makes this checkpoint findable by `name` again,
+          // not the ref's own shape.
           assert.ok(path.isAbsolute(cp.ref), `expected an absolute path ref, got ${cp.ref}`);
-          assert.equal(path.basename(cp.ref), `rz-ckpt-${name}`);
+          assert.ok(cp.ref.split(path.sep).includes("checkpoints"), `expected 'checkpoints' to be an ancestor of ${cp.ref}`);
+          assert.match(path.basename(cp.ref), /^snap_[0-9a-f]+$/i);
         } finally {
           await source.stop();
         }
@@ -435,7 +449,7 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
         if (found === undefined) {
           throw new Error("expected find() to rediscover the named checkpoint");
         }
-        assert.equal(path.basename(found.ref), `rz-ckpt-${name}`);
+        assert.match(path.basename(found.ref), /^snap_[0-9a-f]+$/i);
         assert.equal(found.backend, "microsandbox");
 
         const restored = GenericContainer.fromCheckpoint(found)
@@ -498,7 +512,8 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
           const cp = await source.checkpoint(name);
           originalRef = cp.ref;
           assert.ok(path.isAbsolute(cp.ref), `expected an absolute path ref, got ${cp.ref}`);
-          assert.equal(path.basename(cp.ref), `rz-ckpt-${name}`);
+          assert.ok(cp.ref.split(path.sep).includes("checkpoints"), `expected 'checkpoints' to be an ancestor of ${cp.ref}`);
+          assert.match(path.basename(cp.ref), /^snap_[0-9a-f]+$/i);
 
           await Checkpoints.exportTo(cp, archivePath);
           const archiveStat = await fs.stat(archivePath);
@@ -516,7 +531,7 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
 
         const imported = await Checkpoints.importFrom(archivePath);
         assert.equal(imported.backend, "microsandbox");
-        assert.ok(imported.ref !== originalRef, "expected the imported ref to be a digest, distinct from the original rz-ckpt-<name> ref");
+        assert.ok(imported.ref !== originalRef, "expected the imported ref to be a digest, distinct from the original snap_<hex> artifact path");
         // Digest-shaped: msb has published both `sha256-<16hex>` (0.6.6) and a bare
         // 64-hex digest (0.6.8) for a loaded snapshot, so the prefix is optional — what
         // must hold is that the ref is a content digest and not the original name.
