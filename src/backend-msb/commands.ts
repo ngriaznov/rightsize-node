@@ -6,9 +6,10 @@ import type { ContainerSpec } from "../core/model.js";
  * `-d`) is the whole ballgame for `run()`: `msb run -d` boots the microVM but
  * never runs the image's own ENTRYPOINT/CMD, only attached mode does — see
  * `MsbCliBackend.start` for the supervision this forces. `restore()` is a
- * different shape entirely — see its own doc and `MsbCliBackend.bootOnce`'s
- * for why: `msb restore` always detaches and exits once the sandbox is
- * confirmed up, it is never held open as a supervisor the way `run` is.
+ * different shape entirely — see its own doc and `MsbCliBackend.bootRestoreOnce`'s
+ * for why: `msb restore` always detaches and exits once activation is
+ * confirmed, well before the sandbox itself finishes booting, and it is
+ * never held open as a supervisor the way `run` is.
  */
 export const MsbCommands = {
   run(spec: ContainerSpec): string[] {
@@ -257,7 +258,9 @@ export const MsbCommands = {
    * diagnostics channel, distinct from the workload log `logs()` above
    * fetches. This is where the boot-completion marker line lives (see
    * `hasSandboxStartedMarker`); the fast-exit post-mortem classification in
-   * `MsbCliBackend.bootOnce` is this builder's only caller.
+   * `MsbCliBackend.bootRunOnce` and the restore poll's own failure
+   * diagnostics in `MsbCliBackend.bootRestoreOnce` are this builder's only
+   * callers.
    */
   systemLog(name: string): string[] {
     return ["logs", name, "--source", "system", "--tail", "1000"];

@@ -785,6 +785,127 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
+  // The three tests below exercise MsbCliBackend.bootRestoreOnce directly at
+  // the start() level, on a handle whose spec already carries checkpointRef
+  // — the exact same code path BOTH the internal checkpoint()
+  // stop/snapshot/reboot cycle above and GenericContainer.fromCheckpoint()
+  // .start() drive (fromCheckpoint() only ever sets spec.checkpointRef the
+  // same way baseSpec's override does here), so covering it here covers
+  // both callers without standing up the full checkpoint registry machinery.
+
+  it("start() on a checkpointRef spec supervises msb restore as the detached boot it is: waits for restore's own exit, then polls ls to Running, with no attached child", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // The fake's "restore" branch never sets Running itself — by default it
+    // takes two subsequent 'ls' polls (see fake-msb.mjs) before the
+    // sandbox is reported Running, reproducing a real detached restore
+    // whose own CLI process has already exited before the background boot
+    // catches up. A one-shot check right after that exit must not be
+    // mistaken for either success or failure.
+    const spec = baseSpec("rz-testrun1-restore-detached", { checkpointRef: "/fake/checkpoints/snap_deadbeef" });
+    const handle = await backend.create(spec);
+
+    await backend.start(handle);
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+    };
+    assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the restored sandbox to reach Running");
+
+    const internal = (backend as unknown as { handles: Map<string, { attached: unknown }> }).handles.get(handle.id);
+    assert.equal(
+      internal?.attached,
+      undefined,
+      "expected a restored sandbox's handle to carry no attached child process — msb itself supervises it, " +
+        "out of process",
+    );
+
+    // Teardown must be a clean no-op over the childless handle — no hang,
+    // no throw, despite there never having been a live process to reap.
+    const startedAt = Date.now();
+    await backend.stop(handle);
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs < 3000, `stop() on a childless restored handle took ${elapsedMs}ms — expected no hang`);
+    await backend.remove(handle);
+  });
+
+  it("start() on a checkpointRef spec classifies a nonzero msb restore exit as a boot failure carrying the output", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-restore-failexit", { checkpointRef: "/fake/checkpoints/snap_baadf00d" });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithGenericError = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: unknown;
+    try {
+      await backend.start(handle);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /exited \(code 1\)/);
+    assert.match(
+      (thrown as Error).message,
+      /destination disk is full/,
+      "expected the failed restore process's own output to be surfaced verbatim",
+    );
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { sandboxes: Record<string, unknown> };
+    assert.equal(
+      handle.id in state.sandboxes,
+      false,
+      "expected a failed restore activation to never have registered a sandbox",
+    );
+
+    await backend.remove(handle);
+  });
+
+  it("start() on a checkpointRef spec fails fast — not a hang — when the sandbox settles as Stopped instead of ever reaching Running", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-restore-neverrunning", { checkpointRef: "/fake/checkpoints/snap_c0ffee" });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.restoreSettlesAsStopped = true;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const startedAt = Date.now();
+    let thrown: unknown;
+    try {
+      await backend.start(handle);
+    } catch (err) {
+      thrown = err;
+    }
+    const elapsedMs = Date.now() - startedAt;
+
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match(
+      (thrown as Error).message,
+      /settled as 'Stopped'/,
+      "expected the Stopped fast-fail message, not a generic timeout — a settled Stopped state must never " +
+        "be waited out for the rest of the readiness budget",
+    );
+    assert.match(
+      (thrown as Error).message,
+      /background boot never completed/,
+      "expected the 'msb logs --source system' diagnostics to be surfaced",
+    );
+    assert.ok(
+      elapsedMs < 5000,
+      `expected the Stopped fast-fail to short-circuit well under the full readiness budget, took ${elapsedMs}ms — this is the "not a hang" guarantee`,
+    );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
   it("createCheckpoint leaves the sandbox stopped when the snapshot step fails, without removing or rebooting it", async () => {
     if (skipOnWindows()) {
       return;

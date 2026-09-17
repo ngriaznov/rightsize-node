@@ -140,13 +140,16 @@ if (cmd === "run") {
   // restore <SNAPSHOT-OR-ARCHIVE-PATH> --name <NAME> [-m SIZE] [--no-net]
   // [-p HOST:GUEST]... [--volume SRC:GUEST:OPTS]... — msb 0.7.1's
   // replacement for `run --from-snapshot`, the checkpoint cycle's reboot
-  // command (see MsbCommands.restore and
-  // MsbCliBackend.bootOnce). Reproduces the real binary's actual shape,
-  // confirmed against its source (crates/cli/lib/commands/restore.rs):
-  // unlike `run`, this NEVER stays open as a supervisor — `restore`'s own
-  // CLI process always detaches once the sandbox is confirmed booted and
-  // exits on its own, success or failure, which is why this fixture never
-  // runs a watch-interval the way "run" above does.
+  // command (see MsbCommands.restore and MsbCliBackend.bootRestoreOnce).
+  // Reproduces the real binary's actual shape, confirmed against its own
+  // source and doc (crates/cli/lib/commands/restore.rs — "Restore a
+  // snapshot into a new detached sandbox"): the restore CLI process exits
+  // the INSTANT activation succeeds, success or failure, and NEVER itself
+  // sets the sandbox's status to "Running" — that only happens later, once
+  // a caller's own SUBSEQUENT `msb ls` observes the background boot having
+  // caught up (see the "ls" branch below). Unlike `run`, this never runs a
+  // watch-interval — `restore`'s own CLI process is never the sandbox's
+  // supervisor, msb itself is (out of process, invisible to this fixture).
   const ref = args[1];
   const nameIdx = args.indexOf("--name");
   const name = args[nameIdx + 1];
@@ -156,7 +159,40 @@ if (cmd === "run") {
   // state-db failures on demand — see maybeFailBoot's own doc; a checkpoint
   // reboot is exposed to the same transients as any other boot.
   maybeFailBoot(state);
-  state.sandboxes[name] = { status: "Running", logs: [`restoring ${name} from ${ref}`, "ready"] };
+  // Reproduces an ordinary, UNCLASSIFIED restore failure on demand — msb's
+  // own detached activation itself refusing, distinct from the three
+  // named-transient shapes maybeFailBoot covers above. Never touches
+  // sandbox state, matching a real activation failure that never created
+  // anything.
+  if ((state.failRestoreWithGenericError ?? 0) > 0) {
+    state.failRestoreWithGenericError -= 1;
+    writeState(state);
+    process.stderr.write(`error: failed to restore snapshot '${ref}': destination disk is full\n`);
+    process.exit(1);
+  }
+  if (state.restoreSettlesAsStopped) {
+    // Drives MsbCliBackend.bootRestoreOnce's Stopped/disappearance fast-fail
+    // path on demand: the sandbox never progresses past a settled "Stopped"
+    // — the exact shape a genuinely failed background boot (as opposed to
+    // one still in flight) leaves behind, so a poller must fail fast on it
+    // rather than wait out the rest of the readiness budget.
+    state.sandboxes[name] = {
+      status: "Stopped",
+      logs: [`restoring ${name} from ${ref}`],
+      systemLog: [`boot diagnostics for ${name}`, "background boot never completed"],
+    };
+  } else {
+    // The realistic shape: not yet Running when this process exits — only
+    // `msb ls` (below) advances it, after `restoreLsPollsBeforeRunning`
+    // (default 2, so the success path genuinely exercises more than one
+    // poll iteration) subsequent polls, reproducing the background boot
+    // that continues after this CLI process has already gone away.
+    state.sandboxes[name] = {
+      status: "Starting",
+      logs: [`restoring ${name} from ${ref}`],
+      restorePollsUntilRunning: state.restoreLsPollsBeforeRunning ?? 2,
+    };
+  }
   writeState(state);
   process.stdout.write(`restoring ${name} from ${ref}\nready\n`);
   process.exit(0);
@@ -200,6 +236,24 @@ if (cmd === "run") {
   process.exit(0);
 } else if (cmd === "ls") {
   const state = readState();
+  // Advances every sandbox left mid-restore by the "restore" branch above:
+  // each `ls` poll is one tick of the background boot MsbCliBackend's own
+  // subsequent polling observes, reproducing a detached restore reaching
+  // Running only some time after its own CLI process already exited.
+  let advanced = false;
+  for (const sandbox of Object.values(state.sandboxes)) {
+    if (typeof sandbox.restorePollsUntilRunning === "number") {
+      sandbox.restorePollsUntilRunning -= 1;
+      if (sandbox.restorePollsUntilRunning <= 0) {
+        sandbox.status = "Running";
+        delete sandbox.restorePollsUntilRunning;
+      }
+      advanced = true;
+    }
+  }
+  if (advanced) {
+    writeState(state);
+  }
   const entries = Object.entries(state.sandboxes).map(([name, s]) => ({
     name,
     status: s.status,
