@@ -33,7 +33,7 @@ import { RedisContainer } from "rightsize/modules";
 | [`Neo4jContainer`](/modules/neo4j) | `neo4j:latest` | `httpUrl`, `boltUrl`, `username`, `password`, `withPassword(...)` |
 | [`FlociContainer`](/modules/floci) | `floci/floci:latest` / `floci/floci-az:latest` / `floci/floci-gcp:latest` | `FlociContainer.aws()`/`.azure()`/`.gcp()`, `endpointUrl` |
 | [`FlinkContainer`](/modules/flink) | `flink:latest` | `restUrl`, `withTaskManager()` — **Docker only¹** |
-| [`MinIOContainer`](/modules/minio) | `minio/minio:latest` | `endpointUrl`, `rootUser`, `rootPassword`, `withRootUser`/`withRootPassword(...)` |
+| [`MinIOContainer`](/modules/minio) | `quay.io/minio/minio:latest` | `endpointUrl`, `rootUser`, `rootPassword`, `withRootUser`/`withRootPassword(...)` |
 | [`CassandraContainer`](/modules/cassandra) | `cassandra:latest` | `contactPoint`, `cqlPort`, `localDatacenter` |
 | [`ElasticsearchContainer`](/modules/elasticsearch) | none — an explicit image is required² | `restUrl` |
 | [`QdrantContainer`](/modules/qdrant) | `qdrant/qdrant:latest` | `restUrl` |

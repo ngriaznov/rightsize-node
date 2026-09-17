@@ -5,7 +5,15 @@ import { DockerImageName } from "../core/docker-image-name.js";
 const API_PORT = 9000;
 const CONSOLE_PORT = 9001;
 const EXPECTED_REPOSITORY = "minio/minio";
-const DEFAULT_IMAGE = "minio/minio:latest";
+// Docker Hub's `minio/minio` repository has been removed upstream (`docker
+// pull minio/minio` now fails with "repository does not exist") — the
+// default floats to `quay.io/minio/minio:latest`, MinIO's maintained mirror,
+// instead. `requireCompatible` below strips the registry host before
+// comparing against EXPECTED_REPOSITORY, so this is the only line that
+// needed to change: a caller-supplied `minio/minio:<tag>` override (from a
+// mirror that still serves it, or a private registry) and a
+// `quay.io/minio/minio:<tag>` override are both still accepted, unchanged.
+const DEFAULT_IMAGE = "quay.io/minio/minio:latest";
 
 /**
  * A single-node MinIO container — an S3-compatible object store. Requires
@@ -24,9 +32,11 @@ const DEFAULT_IMAGE = "minio/minio:latest";
  * Readiness is a protocol-aware HTTP check against `/minio/health/live` on
  * the API port — verified answering 200 on the very first poll after boot.
  *
- * No-arg construction floats to `minio/minio:latest`, so the version tracks
- * upstream rather than this library's release cycle (verified against
- * `minio/minio:RELEASE.2025-09-07T16-13-09Z`).
+ * No-arg construction floats to `quay.io/minio/minio:latest` (Docker Hub's
+ * `minio/minio` repository was removed upstream — see `DEFAULT_IMAGE`'s own
+ * comment), so the version tracks upstream rather than this library's
+ * release cycle (verified against `minio/minio:RELEASE.2025-09-07T16-13-09Z`,
+ * before the Docker Hub removal).
  */
 export class MinIOContainer extends GenericContainer {
   private rootUserState = "testuser";

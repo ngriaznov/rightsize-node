@@ -4,7 +4,8 @@ A single-node MinIO container — an S3-compatible object store, started with
 an explicit `server /data --console-address :9001` command (the image's
 default ENTRYPOINT alone does not serve).
 
-**Default image:** `minio/minio:latest`
+**Default image:** `quay.io/minio/minio:latest` (Docker Hub's `minio/minio`
+repository was removed upstream — see [Backend notes](#backend-notes) below)
 **Exposed ports:** `9000` (S3 API, what the helpers here use), `9001`
 (web console — published only, no helper wraps it)
 **Wait strategy:** `Wait.forHttp("/minio/health/live").forPort(9000)`
@@ -34,14 +35,19 @@ console.log(result.stdout); // "hello"
 
 ## Backend notes
 
-- **No-arg construction floats to `minio/minio:latest`.** Verified against
-  `minio/minio:RELEASE.2025-09-07T16-13-09Z`.
+- **No-arg construction floats to `quay.io/minio/minio:latest`.** Docker
+  Hub's `minio/minio` repository has been removed upstream (`docker pull
+  minio/minio` now fails with "repository does not exist"); `quay.io/minio/minio`
+  is MinIO's maintained mirror. Verified against
+  `minio/minio:RELEASE.2025-09-07T16-13-09Z`, before the Docker Hub removal.
 - **Compatibility check:** the constructor only accepts images whose
-  repository is `minio/minio` (registry host, tag, and digest stripped). A
-  different repository throws `IncompatibleImageError` before any backend
-  call; override with
+  repository is `minio/minio` (registry host, tag, and digest stripped) — so
+  both `quay.io/minio/minio:<tag>` and a bare `minio/minio:<tag>` are
+  accepted, the registry host never enters the comparison. A different
+  repository throws `IncompatibleImageError` before any backend call;
+  override with
   `DockerImageName.parse(image).asCompatibleSubstituteFor("minio/minio")` for
-  a verified compatible fork or mirror.
+  a verified compatible fork or mirror under a different repository name.
 - **Credentials default to `testuser`/`testpassword`, not this library's
   usual `test`/`test` pair.** MinIO rejects a root password shorter than 8
   characters, so `test` (4 characters) doesn't work here — this module's

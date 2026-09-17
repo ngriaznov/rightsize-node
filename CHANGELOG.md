@@ -30,6 +30,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   at `start()` instead of silently reaching the restored guest — docker is
   unaffected, since restoring there is an ordinary `docker create`/`run` with a
   fresh env array.
+- **The MinIO module's default image moved to `quay.io/minio/minio:latest`.**
+  Docker Hub's `minio/minio` repository has been removed upstream (`docker pull`
+  now fails with "repository does not exist"); `quay.io/minio/minio` is MinIO's
+  maintained mirror. The compatibility check `MinIOContainer` uses to accept a
+  caller-supplied override is registry-agnostic (it compares the parsed
+  `minio/minio` repository only, ignoring any registry host), so both
+  `quay.io/minio/minio:<tag>` and `minio/minio:<tag>` overrides keep working
+  unchanged.
 
 ## [0.7.9] - 2026-09-10
 
