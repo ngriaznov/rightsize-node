@@ -14,6 +14,22 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   keep their existing default). One driven CLI flag was renamed upstream —
   `msb snapshot create --from` became `--from-sandbox` — and this library's
   checkpoint machinery now emits the new spelling; nothing changes for callers.
+- **Checkpoint restore now goes through `msb restore --disk-only` instead of
+  `msb run --from-snapshot`.** Upstream 0.7.1 removed `run --from-snapshot`
+  outright (`msb run` rejects it as an unexpected argument) and moved restore to
+  a dedicated `msb restore <ref> --name <name> --disk-only` command; this
+  library's checkpoint reboot (both the internal stop/snapshot/reboot cycle and
+  `GenericContainer.fromCheckpoint().start()`) now emits that instead.
+  `--disk-only` cold-boots the captured disk without resuming processes/RAM,
+  matching this library's existing checkpoint semantics exactly — nothing
+  changes for callers there. One narrower behavior does change on microsandbox:
+  `msb restore` has no `-e`/`--env` flag at all (a disk-only restore replays the
+  sandbox's own captured configuration, making a re-passed env redundant), so a
+  `withEnv()` call after `fromCheckpoint()` that actually changes the env beyond
+  what the checkpoint captured now throws a new `CheckpointRestoreEnvOverrideError`
+  at `start()` instead of silently reaching the restored guest — docker is
+  unaffected, since restoring there is an ordinary `docker create`/`run` with a
+  fresh env array.
 
 ## [0.7.9] - 2026-09-10
 

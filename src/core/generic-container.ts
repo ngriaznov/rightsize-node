@@ -12,6 +12,7 @@ import {
   CheckpointUnsupportedError,
   CheckpointBackendMismatchError,
   ReuseFromCheckpointError,
+  CheckpointRestoreEnvOverrideError,
   RelativeContainerPathError,
   BackendError,
   RootDiskConflictError,
@@ -42,6 +43,29 @@ function requireAbsoluteContainerPath(containerPath: string): void {
   if (!path.posix.isAbsolute(containerPath)) {
     throw new RelativeContainerPathError(containerPath);
   }
+}
+
+/**
+ * Order-insensitive equality for env pairs — `start()`'s only use is telling
+ * "the checkpoint's own captured env, re-applied unchanged" from "the caller
+ * actually changed it" (see `CheckpointRestoreEnvOverrideError`). Compared as
+ * key/value sets rather than positionally: `withEnv()` re-setting an
+ * existing key moves it to the end of `envPairs` (last-write-wins,
+ * insertion-ordered — see `withEnv()`'s own doc), which must not by itself
+ * read as a change.
+ */
+function envPairsEqual(a: ReadonlyArray<readonly [string, string]>, b: ReadonlyArray<readonly [string, string]>): boolean {
+  const aMap = new Map(a);
+  const bMap = new Map(b);
+  if (aMap.size !== bMap.size) {
+    return false;
+  }
+  for (const [key, value] of aMap) {
+    if (bMap.get(key) !== value) {
+      return false;
+    }
+  }
+  return true;
 }
 
 const MAX_START_ATTEMPTS = 5;
@@ -136,6 +160,15 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
   private requireIsolationRequested = false;
   private checkpointRef: string | undefined;
   private checkpointSourceBackend: string | undefined;
+  /**
+   * `cp.spec.env` exactly as captured, set once by `fromCheckpoint()` and
+   * never touched again — kept separate from the mutable `envPairs` so
+   * `start()` can tell "the caller re-applied the checkpoint's own env
+   * unchanged" from "the caller actually overrode or extended it" (see
+   * `CheckpointRestoreEnvOverrideError`). `undefined` for every container
+   * not built via `fromCheckpoint()`.
+   */
+  private checkpointCapturedEnv: ReadonlyArray<readonly [string, string]> | undefined;
 
   private handle: SandboxHandle | undefined;
   private backend: SandboxBackend | undefined;
@@ -165,7 +198,14 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * captures. `start()` throws `CheckpointBackendMismatchError` before any
    * backend call if the active backend isn't the one that created `cp`, and
    * `ReuseFromCheckpointError` if this container is also marked
-   * `withReuse()` — reuse's identity hash never covers a checkpoint ref.
+   * `withReuse()` — reuse's identity hash never covers a checkpoint ref. On
+   * msb specifically, `start()` also throws `CheckpointRestoreEnvOverrideError`
+   * before any backend call if a further `withEnv()` call actually changes
+   * the env beyond what `cp.spec.env` captured — msb's restore command has
+   * no way to inject env at boot time (see that error's own doc); re-calling
+   * `withEnv()` with the checkpoint's own captured values, unchanged, never
+   * throws. docker is unaffected — an overridden/extended env reaches a
+   * docker restore normally.
    * Once started, a restored container is ordinary in every other respect:
    * fresh host ports, normal reaping-ledger tracking, normal stop.
    */
@@ -173,6 +213,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     const container = new GenericContainer(cp.ref);
     container.checkpointRef = cp.ref;
     container.checkpointSourceBackend = cp.backend;
+    container.checkpointCapturedEnv = cp.spec.env;
     for (const [key, value] of cp.spec.env) {
       container.withEnv(key, value);
     }
@@ -525,6 +566,22 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     // msb, a msb snapshot name means nothing to docker).
     if (this.checkpointSourceBackend !== undefined && this.checkpointSourceBackend !== backend.name) {
       throw new CheckpointBackendMismatchError(this.checkpointSourceBackend, backend.name);
+    }
+    // Also before any backend work: msb's restore command has no -e/--env
+    // flag at all (see CheckpointRestoreEnvOverrideError's own doc) — an env
+    // the caller has genuinely changed beyond the checkpoint's own captured
+    // values can never reach a restored msb sandbox, so this refuses rather
+    // than silently booting it without the env the caller asked for. Only
+    // msb is checked: docker's restore is an ordinary create/run against the
+    // committed image, so an overridden env reaches it normally. Re-applying
+    // the checkpoint's own captured env unchanged never throws — only a call
+    // that actually changes what would be sent does.
+    if (
+      this.checkpointRef !== undefined &&
+      backend.name === "microsandbox" &&
+      !envPairsEqual(this.checkpointCapturedEnv ?? [], this.envPairs)
+    ) {
+      throw new CheckpointRestoreEnvOverrideError(backend.name);
     }
     // Only the env-resolved path (never an explicit withBackend() override)
     // drives the reaper: writes this process's run record, sweeps dead runs

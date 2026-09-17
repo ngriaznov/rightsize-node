@@ -2,11 +2,12 @@
 // A stand-in for the real `msb` binary, driven entirely by a JSON state file
 // (path from RIGHTSIZE_FAKE_MSB_STATE) so a test can inspect/steer what
 // "sandboxes" exist without spawning a real microVM. Supports just enough of
-// the CLI surface MsbCliBackend actually calls: run, stop, rm,
+// the CLI surface MsbCliBackend actually calls: run, restore, stop, rm,
 // ls --format json, exec, logs [--tail N | -f], snapshot create/rm, copy.
-// `callLog` records every stop/run/rm/snapshot-create invocation (cmd + full
-// argv) so a test can assert the checkpoint stop/snapshot/reboot cycle's
-// exact call order and the reboot `run`'s exact argv, not just its end state.
+// `callLog` records every stop/run/restore/rm/snapshot-create invocation
+// (cmd + full argv) so a test can assert the checkpoint stop/snapshot/reboot
+// cycle's exact call order and the reboot `restore`'s exact argv, not just
+// its end state.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
@@ -23,6 +24,43 @@ function readState() {
 }
 function logCall(state, cmd, args) {
   state.callLog = [...(state.callLog ?? []), { cmd, args }];
+}
+// Shared boot-failure knobs, reproducing msb's own transient failure shapes
+// on demand for whichever CLI surface actually boots a sandbox — `run` and,
+// since msb 0.7.1, `restore` (the checkpoint reboot's own boot command, see
+// commands.ts). `bootClassified`'s install-lock poll and one-shot
+// state-db/image-cache retries must keep working across a checkpoint reboot
+// exactly like an ordinary boot, so both CLI surfaces drive the same knobs.
+// Mutates and persists `state` and exits the process when a knob fires;
+// otherwise returns normally and does nothing.
+function maybeFailBoot(state) {
+  if ((state.failRunsWithCacheError ?? 0) > 0) {
+    state.failRunsWithCacheError -= 1;
+    writeState(state);
+    process.stderr.write(
+      "error: image error: cache error at /tmp/fake-msb/cache/layers/sha256_deadbeef.tar.gz: " +
+        "No such file or directory (os error 2)\n",
+    );
+    process.exit(1);
+  }
+  if ((state.failRunsWithInstallLock ?? 0) > 0) {
+    state.failRunsWithInstallLock -= 1;
+    writeState(state);
+    process.stderr.write(
+      "error: runtime error: microsandbox install operation in progress until " +
+        "2026-08-20 15:51:16.869758300; retry after it completes\n",
+    );
+    process.exit(1);
+  }
+  if ((state.failRunsWithStateDbError ?? 0) > 0) {
+    state.failRunsWithStateDbError -= 1;
+    writeState(state);
+    process.stderr.write(
+      "error: database error: Execution Error: error returned from database: " +
+        "(code: 1) index idx_manifest_layers_unique already exists\n",
+    );
+    process.exit(1);
+  }
 }
 function writeState(state) {
   // A test that never inspects state may spawn this fixture without
@@ -51,45 +89,9 @@ if (cmd === "run") {
   const name = args[nameIdx + 1];
   const state = readState();
   logCall(state, "run", args);
-  // Reproduces the real msb binary's image-cache corruption failure on
-  // demand: while the counter is positive, a `run` decrements it and exits
-  // with the exact error shape a corrupted cache produces (captured verbatim
-  // from msb 0.6.3, digest shortened), so tests can drive the backend's
-  // classify-heal-retry path without a real cache race.
-  if ((state.failRunsWithCacheError ?? 0) > 0) {
-    state.failRunsWithCacheError -= 1;
-    writeState(state);
-    process.stderr.write(
-    "error: image error: cache error at /tmp/fake-msb/cache/layers/sha256_deadbeef.tar.gz: " +
-      "No such file or directory (os error 2)\n",
-    );
-    process.exit(1);
-  }
-  // Reproduces the real msb binary's install-lock refusal on demand (message
-  // shape captured verbatim from msb 0.6.9 on Windows), so tests can drive
-  // the backend's install-lock poll without a real concurrent msb install.
-  if ((state.failRunsWithInstallLock ?? 0) > 0) {
-    state.failRunsWithInstallLock -= 1;
-    writeState(state);
-    process.stderr.write(
-      "error: runtime error: microsandbox install operation in progress until " +
-        "2026-08-20 15:51:16.869758300; retry after it completes\n",
-    );
-    process.exit(1);
-  }
-  // Reproduces the real msb binary's state-database failure on demand (error
-  // shape captured verbatim from msb 0.6.3 on Windows — the startup-migration
-  // race), so tests can drive the backend's classify-retry path without real
-  // concurrent msb invocations.
-  if ((state.failRunsWithStateDbError ?? 0) > 0) {
-    state.failRunsWithStateDbError -= 1;
-    writeState(state);
-    process.stderr.write(
-      "error: database error: Execution Error: error returned from database: " +
-        "(code: 1) index idx_manifest_layers_unique already exists\n",
-    );
-    process.exit(1);
-  }
+  // Reproduces the real msb binary's image-cache-corruption/install-lock/
+  // state-db failures on demand — see maybeFailBoot's own doc.
+  maybeFailBoot(state);
   // Reproduces msb 0.6.16's fast-exit workload shape on demand: the attached
   // `run` process exits 0 immediately, without ever entering the watch loop
   // below (so state never shows "Running" to a poller, mirroring 0.6.16's
@@ -134,6 +136,29 @@ if (cmd === "run") {
       process.exit(0);
     }
   }, 50);
+} else if (cmd === "restore") {
+  // restore <SNAPSHOT-OR-ARCHIVE-PATH> --name <NAME> [-m SIZE] --disk-only
+  // [-p HOST:GUEST]... — msb 0.7.1's replacement for `run --from-snapshot`,
+  // the checkpoint cycle's reboot command (see MsbCommands.restore and
+  // MsbCliBackend.bootOnce). Reproduces the real binary's actual shape,
+  // confirmed against its source (crates/cli/lib/commands/restore.rs):
+  // unlike `run`, this NEVER stays open as a supervisor — `restore`'s own
+  // CLI process always detaches once the sandbox is confirmed booted and
+  // exits on its own, success or failure, which is why this fixture never
+  // runs a watch-interval the way "run" above does.
+  const ref = args[1];
+  const nameIdx = args.indexOf("--name");
+  const name = args[nameIdx + 1];
+  const state = readState();
+  logCall(state, "restore", args);
+  // Reproduces the real msb binary's image-cache-corruption/install-lock/
+  // state-db failures on demand — see maybeFailBoot's own doc; a checkpoint
+  // reboot is exposed to the same transients as any other boot.
+  maybeFailBoot(state);
+  state.sandboxes[name] = { status: "Running", logs: [`restoring ${name} from ${ref}`, "ready"] };
+  writeState(state);
+  process.stdout.write(`restoring ${name} from ${ref}\nready\n`);
+  process.exit(0);
 } else if (cmd === "stop") {
   const name = args[1];
   const state = readState();

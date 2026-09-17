@@ -607,7 +607,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       const handle = await backend.create(spec);
       await backend.start(handle);
 
-      // Refuse exactly the NEXT `run` — which is the checkpoint cycle's
+      // Refuse exactly the NEXT `restore` — which is the checkpoint cycle's
       // post-snapshot reboot — with msb's install-lock message. The reboot
       // must go through the same classified poll the ordinary boot path
       // uses and succeed on its retry, not fail the whole checkpoint.
@@ -622,7 +622,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
         callLog: Array<{ cmd: string; args: string[] }>;
       };
       assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the reboot retry to bring the sandbox back up");
-      const rebootRuns = state.callLog.filter((c) => c.cmd === "run" && c.args.includes("--from-snapshot"));
+      const rebootRuns = state.callLog.filter((c) => c.cmd === "restore");
       assert.equal(rebootRuns.length, 2, "expected the refused reboot plus one retried reboot");
 
       await backend.stop(handle);
@@ -663,14 +663,12 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the sandbox to be running again after the cycle");
       assert.equal(await backend.hasCheckpoint(ref), true, "expected the artifact directory to hold a snapshot.json");
 
-      const rebootCall = state.callLog.filter((c) => c.cmd === "run").at(-1);
-      assert.ok(rebootCall !== undefined, "expected a reboot 'run' call after the snapshot/rm cycle");
-      const fromSnapshotIdx = rebootCall?.args.indexOf("--from-snapshot") ?? -1;
-      assert.ok(fromSnapshotIdx !== -1, "expected the reboot run to carry --from-snapshot");
+      const rebootCall = state.callLog.filter((c) => c.cmd === "restore").at(-1);
+      assert.ok(rebootCall !== undefined, "expected a reboot 'restore' call after the snapshot/rm cycle");
       assert.equal(
-        rebootCall?.args[fromSnapshotIdx + 1],
+        rebootCall?.args[1],
         ref,
-        "expected the reboot run's --from-snapshot value to be the exact full path ref, not the bare snapshot name",
+        "expected the reboot restore's positional to be the exact full path ref, not the bare snapshot name",
       );
 
       await backend.stop(handle);
@@ -706,13 +704,14 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     const cycle = state.callLog.slice(-4);
     assert.deepEqual(
       cycle.map((c) => c.cmd),
-      ["stop", "snapshotCreate", "rm", "run"],
-      "expected the checkpoint cycle to drive exactly stop -> snapshot create -> rm -> run, in order",
+      ["stop", "snapshotCreate", "rm", "restore"],
+      "expected the checkpoint cycle to drive exactly stop -> snapshot create -> rm -> restore, in order",
     );
     assert.deepEqual(
       cycle[3]?.args,
-      ["run", "--name", handle.id, "-p", "15999:80", "-e", "FOO=bar", "--from-snapshot", "rz-ckpt-abcdef012345"],
-      "expected the reboot's run to carry --from-snapshot <ref> plus every other flag from the original spec",
+      ["restore", "rz-ckpt-abcdef012345", "--name", handle.id, "--disk-only", "-p", "15999:80"],
+      "expected the reboot's restore to carry the ref positional, --disk-only, and the ports from the " +
+        "original spec — never -e: msb restore has no env flag at all (see MsbCommands.restore)",
     );
 
     await backend.stop(handle);

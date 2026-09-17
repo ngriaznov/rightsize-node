@@ -169,6 +169,42 @@ export class ReuseFromCheckpointError extends Error {
 }
 
 /**
+ * Thrown at `start()` when a container built via `GenericContainer.fromCheckpoint()`
+ * carries an env that no longer matches the checkpoint's own captured env —
+ * an extra `withEnv()` call, or one overriding a key the checkpoint already
+ * set — and the active backend has no way to apply that at restore time.
+ *
+ * msb is the one backend this affects: 0.7.1 replaced `run --from-snapshot`
+ * with a dedicated `msb restore` command that has no `-e`/`--env` flag at
+ * all (a disk-only restore replays the sandbox's own captured
+ * configuration). Before 0.7.1, an overridden or extended env silently
+ * reached the restored guest via `run -e`; since there is now no msb
+ * invocation this library could emit that would honor it, silently dropping
+ * it would let the workload boot with env the caller never asked for and
+ * without env it did ask for — a correctness bug, not a graceful
+ * degradation — so this throws instead, before any backend call. Restoring
+ * with the checkpoint's own env completely unchanged never hits this: only
+ * a call that actually changes what would be sent does. docker is
+ * unaffected — restoring there is an ordinary `docker create`/`run` against
+ * the committed image with a fresh env array, so this is never thrown when
+ * the active backend is `"docker"`.
+ */
+export class CheckpointRestoreEnvOverrideError extends Error {
+  constructor(
+    /** The active backend's name — always `"microsandbox"` today, the one backend this affects. */
+    readonly backend: string,
+  ) {
+    super(
+      `fromCheckpoint(...).withEnv(...) cannot override or extend a checkpoint's captured env when restoring ` +
+        `on the '${backend}' backend — its restore command has no way to inject env at boot time, so an ` +
+        `overridden or extended env would be silently dropped instead of reaching the restored workload. ` +
+        `Restore with the checkpoint's own env unchanged, or bake the desired env into a fresh checkpoint instead.`,
+    );
+    this.name = "CheckpointRestoreEnvOverrideError";
+  }
+}
+
+/**
  * Thrown by `copyFileToContainer`/`copyContentToContainer`/
  * `copyFileFromContainer` when `containerPath` is not absolute — both
  * backends require an absolute `NAME:/path` shape, so a relative path can

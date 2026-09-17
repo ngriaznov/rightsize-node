@@ -25,6 +25,7 @@ export {
   CheckpointUnsupportedError,
   CheckpointBackendMismatchError,
   ReuseFromCheckpointError,
+  CheckpointRestoreEnvOverrideError,
   RelativeContainerPathError,
   InvalidCheckpointNameError,
   CheckpointArtifactMissingError,

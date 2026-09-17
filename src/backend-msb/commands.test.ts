@@ -185,34 +185,73 @@ describe("MsbCommands", () => {
     ]);
   });
 
-  it("run: checkpointRef boots via --from-snapshot instead of the image, keeping every other flag", () => {
-    const argv = MsbCommands.run(
+  it("run: a checkpointRef spec (never actually reached via bootOnce, which dispatches those to restore()) still boots the ordinary image, not --from-snapshot", () => {
+    // msb 0.7.1 removed `run --from-snapshot` outright — run() has no
+    // checkpointRef branch left at all. MsbCliBackend.bootOnce is the layer
+    // that now dispatches a checkpointRef spec to MsbCommands.restore()
+    // instead of ever calling run() with one; this just pins that run()
+    // itself no longer special-cases the field.
+    const argv = MsbCommands.run(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345" }));
+    assert.deepEqual(argv, ["run", "--name", "rz-abc12345-1", "redis:8.6-alpine"]);
+  });
+
+  it("restore: minimal spec emits ref, --name, and --disk-only, nothing else", () => {
+    const argv = MsbCommands.restore(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345" }));
+    assert.deepEqual(argv, ["restore", "rz-ckpt-abcdef012345", "--name", "rz-abc12345-1", "--disk-only"]);
+  });
+
+  it("restore: memory flag comes right after --name, before --disk-only", () => {
+    const argv = MsbCommands.restore(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345", memoryLimitMb: 256 }));
+    assert.deepEqual(argv, ["restore", "rz-ckpt-abcdef012345", "--name", "rz-abc12345-1", "-m", "256M", "--disk-only"]);
+  });
+
+  it("restore: ports appear after --disk-only, in spec order", () => {
+    const argv = MsbCommands.restore(
       baseSpec({
         checkpointRef: "rz-ckpt-abcdef012345",
-        memoryLimitMb: 256,
-        ports: [{ hostPort: 1111, guestPort: 22 }],
-        env: [["A", "1"]],
-        command: ["sh", "-c", "true"],
+        ports: [
+          { hostPort: 1111, guestPort: 22 },
+          { hostPort: 2222, guestPort: 80 },
+        ],
       }),
     );
     assert.deepEqual(argv, [
-      "run",
+      "restore",
+      "rz-ckpt-abcdef012345",
       "--name",
       "rz-abc12345-1",
-      "-m",
-      "256M",
+      "--disk-only",
       "-p",
       "1111:22",
-      "-e",
-      "A=1",
-      "--from-snapshot",
-      "rz-ckpt-abcdef012345",
-      "--",
-      "sh",
-      "-c",
-      "true",
+      "-p",
+      "2222:80",
     ]);
-    assert.equal(argv.includes("redis:8.6-alpine"), false, "the image must never appear alongside --from-snapshot");
+  });
+
+  it("restore: never emits -e, --mount-file, --root-disk, or --net, even when the spec carries env/mounts/disk/network settings", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        env: [["A", "1"]],
+        mounts: [{ hostPath: "/h", guestPath: "/g", readOnly: false }],
+        diskLimitMb: 4096,
+        networkDisabled: true,
+      }),
+    );
+    for (const flag of ["-e", "--mount-file", "--root-disk", "--net"]) {
+      assert.equal(argv.includes(flag), false, `restore's argv must never carry ${flag} — msb restore has no such flag`);
+    }
+  });
+
+  it("restore: never appends the spec's command — msb restore has no trailing-command shape at all", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({ checkpointRef: "rz-ckpt-abcdef012345", command: ["sh", "-c", "true"] }),
+    );
+    assert.equal(argv.includes("--"), false);
+  });
+
+  it("restore: throws when spec.checkpointRef is undefined", () => {
+    assert.throws(() => MsbCommands.restore(baseSpec()));
   });
 
   it("snapshotCreate", () => {

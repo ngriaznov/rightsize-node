@@ -4,7 +4,13 @@ import * as path from "node:path";
 import { describe, it, assert } from "../../test/harness.js";
 import { GenericContainer } from "./generic-container.js";
 import { Network } from "./network.js";
-import { CheckpointUnsupportedError, CheckpointBackendMismatchError, ReuseFromCheckpointError, InvalidCheckpointNameError } from "./errors.js";
+import {
+  CheckpointUnsupportedError,
+  CheckpointBackendMismatchError,
+  ReuseFromCheckpointError,
+  InvalidCheckpointNameError,
+  CheckpointRestoreEnvOverrideError,
+} from "./errors.js";
 import type { WaitStrategy, WaitTarget } from "./wait.js";
 import type { BackendCapabilities, SandboxBackend, SandboxHandle, NetworkLink, ReaperKillCommand } from "./backend.js";
 import type { ContainerSpec, ExecResult } from "./model.js";
@@ -562,7 +568,7 @@ describe("GenericContainer.fromCheckpoint()", () => {
     await restored.stop();
   });
 
-  it("allows the caller to override builder state after fromCheckpoint()", async () => {
+  it("allows the caller to override builder state after fromCheckpoint() on docker — an overridden env reaches an ordinary docker create/run unaffected", async () => {
     const backend = new FakeCheckpointBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
     const cp = {
       ref: "rightsize/checkpoint:abcdef012345",
@@ -598,6 +604,108 @@ describe("GenericContainer.fromCheckpoint()", () => {
     assert.deepEqual(backend.lastCreatedSpec()?.command, ["sleep", "120"]);
 
     await restored.stop();
+  });
+
+  describe("fromCheckpoint() env on microsandbox — msb's restore has no -e/--env flag since 0.7.1", () => {
+    function msbCheckpoint(): { ref: string; backend: string; spec: ContainerSpec } {
+      return {
+        ref: "/cache/checkpoints/rz-ckpt-abcdef012345",
+        backend: "microsandbox",
+        spec: {
+          name: "rz-source-1",
+          image: "alpine:3.19",
+          env: [["A", "1"] as const],
+          command: ["sleep", "60"],
+          ports: [],
+          mounts: [],
+          networkId: undefined,
+          aliases: [],
+          runId: "deadbeef",
+          memoryLimitMb: undefined,
+          keepAlive: false,
+          checkpointRef: "/cache/checkpoints/rz-ckpt-abcdef012345",
+          diskLimitMb: undefined,
+          tmpfsRootMb: undefined,
+          networkDisabled: false,
+        },
+      };
+    }
+
+    it("re-applying the checkpoint's own captured env unchanged never throws", async () => {
+      const backend = new FakeCheckpointBackend("microsandbox", {
+        hardwareIsolated: true,
+        checkpoint: true,
+        checkpointRestartsWorkload: true,
+      });
+      const restored = GenericContainer.fromCheckpoint(msbCheckpoint()).withBackend(backend).waitingFor(instantReady());
+      await restored.start();
+
+      assert.deepEqual(backend.lastCreatedSpec()?.env, [["A", "1"]]);
+
+      await restored.stop();
+    });
+
+    it("throws CheckpointRestoreEnvOverrideError before any backend call when withEnv() overrides an existing key", async () => {
+      const backend = new FakeCheckpointBackend("microsandbox", {
+        hardwareIsolated: true,
+        checkpoint: true,
+        checkpointRestartsWorkload: true,
+      });
+      const restored = GenericContainer.fromCheckpoint(msbCheckpoint())
+        .withBackend(backend)
+        .withEnv("A", "overridden")
+        .waitingFor(instantReady());
+
+      let thrown: unknown;
+      try {
+        await restored.start();
+      } catch (err) {
+        thrown = err;
+      }
+
+      assert.ok(thrown instanceof CheckpointRestoreEnvOverrideError, `expected CheckpointRestoreEnvOverrideError, got: ${String(thrown)}`);
+      assert.equal((thrown as CheckpointRestoreEnvOverrideError).backend, "microsandbox");
+      assert.deepEqual(backend.calls, [], "no backend call must have been made before the override was detected");
+    });
+
+    it("throws CheckpointRestoreEnvOverrideError before any backend call when withEnv() adds a new key", async () => {
+      const backend = new FakeCheckpointBackend("microsandbox", {
+        hardwareIsolated: true,
+        checkpoint: true,
+        checkpointRestartsWorkload: true,
+      });
+      const restored = GenericContainer.fromCheckpoint(msbCheckpoint())
+        .withBackend(backend)
+        .withEnv("EXTRA_FLAG", "1")
+        .waitingFor(instantReady());
+
+      let thrown: unknown;
+      try {
+        await restored.start();
+      } catch (err) {
+        thrown = err;
+      }
+
+      assert.ok(thrown instanceof CheckpointRestoreEnvOverrideError, `expected CheckpointRestoreEnvOverrideError, got: ${String(thrown)}`);
+      assert.deepEqual(backend.calls, [], "no backend call must have been made before the override was detected");
+    });
+
+    it("re-setting an existing key to the exact value it already had is NOT an override — it never throws", async () => {
+      const backend = new FakeCheckpointBackend("microsandbox", {
+        hardwareIsolated: true,
+        checkpoint: true,
+        checkpointRestartsWorkload: true,
+      });
+      const restored = GenericContainer.fromCheckpoint(msbCheckpoint())
+        .withBackend(backend)
+        .withEnv("A", "1")
+        .waitingFor(instantReady());
+      await restored.start();
+
+      assert.deepEqual(backend.lastCreatedSpec()?.env, [["A", "1"]]);
+
+      await restored.stop();
+    });
   });
 
   it("throws CheckpointBackendMismatchError before any backend call when the active backend differs from the checkpoint's creator", async () => {

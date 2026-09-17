@@ -3,9 +3,12 @@ import type { ContainerSpec } from "../core/model.js";
 /**
  * Pure msb CLI argv construction. Every spelling here was checked against the
  * real `msb` binary, not guessed from `--help` text alone. ATTACHED mode (no
- * `-d`) is the whole ballgame: `msb run -d` boots the microVM but never runs
- * the image's own ENTRYPOINT/CMD, only attached mode does — see
- * `MsbCliBackend.start` for the supervision this forces.
+ * `-d`) is the whole ballgame for `run()`: `msb run -d` boots the microVM but
+ * never runs the image's own ENTRYPOINT/CMD, only attached mode does — see
+ * `MsbCliBackend.start` for the supervision this forces. `restore()` is a
+ * different shape entirely — see its own doc and `MsbCliBackend.bootOnce`'s
+ * for why: `msb restore` always detaches and exits once the sandbox is
+ * confirmed up, it is never held open as a supervisor the way `run` is.
  */
 export const MsbCommands = {
   run(spec: ContainerSpec): string[] {
@@ -52,17 +55,54 @@ export const MsbCommands = {
     for (const mount of spec.mounts) {
       argv.push("--mount-file", `${mount.hostPath}:${mount.guestPath}:${mount.readOnly ? "ro" : "rw"},nodev`);
     }
-    if (spec.checkpointRef !== undefined) {
-      // `--from-snapshot` is mutually exclusive with the IMAGE positional arg —
-      // the snapshot itself pins the image (see MsbCliBackend's own doc on
-      // fromCheckpoint/checkpointRef).
-      argv.push("--from-snapshot", spec.checkpointRef);
-    } else {
-      argv.push(spec.image);
-    }
+    // `checkpointRef` never reaches here: msb 0.7.1 removed `run --from-snapshot`
+    // outright (clap rejects it as an unexpected argument now), so a spec that
+    // carries a checkpointRef is routed to `restore()` below, one layer up in
+    // `MsbCliBackend.bootOnce` — this function only ever builds an ordinary
+    // image boot.
+    argv.push(spec.image);
     if (spec.command !== undefined) {
       // undefined => the image's own ENTRYPOINT/CMD runs unmodified.
       argv.push("--", ...spec.command);
+    }
+    return argv;
+  },
+
+  /**
+   * `msb restore <ref> --name <name> [-m SIZE] --disk-only [-p HOST:GUEST]...`
+   * — the checkpoint-reboot argv, replacing the removed `run --from-snapshot`
+   * (msb 0.7.1 moved restore to this dedicated subcommand). `--disk-only`
+   * cold-boots just the captured disk without resuming processes/RAM — the
+   * same semantics the old `run --from-snapshot` boot had (a fresh workload
+   * started from captured filesystem state), and the only restore mode this
+   * library's checkpoint contract documents; always emitted, unconditionally.
+   *
+   * Deliberately narrower than `run()`: `msb restore` has no `-e`/`--env`
+   * flag at all — a disk-only restore replays the sandbox's own captured
+   * configuration, which makes re-passing env redundant (see
+   * `GenericContainer.fromCheckpoint`'s own doc on why an env the caller has
+   * actually changed beyond the checkpoint's own is refused before this is
+   * ever reached, rather than silently dropped here). It also has no
+   * `--root-disk`/`--mount-file`/`--net` equivalents — none of those carry
+   * over from a checkpoint's source spec in the first place (see the
+   * checkpoints guide: "Network topology, mounts, and keepAlive are never
+   * carried over from the source spec"). Only `-m`/`--memory` and
+   * `-p`/`--port` are threaded through, matching what
+   * `GenericContainer.fromCheckpoint()` actually re-applies from the
+   * checkpoint's own spec (memory limit, exposed ports — with FRESH host
+   * ports, never the source's old ones).
+   */
+  restore(spec: ContainerSpec): string[] {
+    if (spec.checkpointRef === undefined) {
+      throw new Error("MsbCommands.restore requires spec.checkpointRef");
+    }
+    const argv: string[] = ["restore", spec.checkpointRef, "--name", spec.name];
+    if (spec.memoryLimitMb !== undefined) {
+      argv.push("-m", `${spec.memoryLimitMb}M`);
+    }
+    argv.push("--disk-only");
+    for (const port of spec.ports) {
+      argv.push("-p", `${port.hostPort}:${port.guestPort}`);
     }
     return argv;
   },

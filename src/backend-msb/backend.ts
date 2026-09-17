@@ -370,9 +370,15 @@ export class MsbCliBackend implements SandboxBackend {
    * knows: the install-lock poll, the one-shot state-database retry, and the
    * one-shot image-cache heal. Both the ordinary `start()` path and the
    * checkpoint cycle's post-snapshot reboot come through here — a reboot
-   * from a snapshot is as exposed to msb's transients as any other boot,
-   * and skipping the classification there turned a passing install-lock
-   * poll into an immediate checkpoint failure on a live Windows run.
+   * from a snapshot (now `msb restore ... --disk-only`, see `bootOnce`) is
+   * as exposed to msb's transients as any other boot, and skipping the
+   * classification there turned a passing install-lock poll into an
+   * immediate checkpoint failure on a live Windows run. The image-cache heal
+   * targets `handle.spec.image`, which for a restore is the checkpoint ref
+   * GenericContainer.fromCheckpoint() threaded through as the builder's
+   * "image" — never a real OCI reference `msb image remove` can act on
+   * meaningfully; this predates the 0.7.1 migration (the same was true of
+   * `--from-snapshot` boots) and is unchanged here.
    */
   private async bootClassified(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
     let firstOutput: string;
@@ -457,23 +463,38 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
-   * One boot attempt: spawns the attached `msb run` child and polls until the
-   * sandbox reaches Running. `state.attached` and (for non-keepAlive specs)
-   * `startedNames` are populated only on success; on any failure the child is reaped here (for
+   * One boot attempt: spawns the msb child and polls until the sandbox
+   * reaches Running. For an ordinary spec (no `checkpointRef`) this spawns
+   * ATTACHED `msb run`, which stays alive as the sandbox's own supervisor for
+   * its whole lifetime. For a checkpoint-restore spec, this spawns
+   * `msb restore ... --disk-only` instead — see `MsbCommands.restore`'s own
+   * doc for the argv, and below for why its process shape is handled
+   * differently: unlike `run`, `restore` always detaches and exits once the
+   * sandbox is confirmed up, so its clean exit is a SUCCESS signal, not
+   * something to reap.
+   *
+   * `state.attached` and (for non-keepAlive specs) `startedNames` are
+   * populated only on success; on any failure the child is reaped here (for
    * the classified early-exit failures it has already exited; a readiness
    * timeout leaves it alive and it is hard-killed) so a failed attempt leaves
    * no live process or registered cleanup state behind — the caller owns
-   * retry policy, never cleanup (an exit-0 fast-exit success is the one
-   * exception: it IS success, so `state.attached`/`startedNames` ARE
-   * populated for it — see below). An early exit is classified from the
-   * child's combined output: the image-cache-corruption signature throws
-   * `ImageCacheCorruptionError` (the one failure `start()` heals and
-   * retries), a host-port bind conflict throws `PortBindConflictError`, and
-   * otherwise — if the exit code was 0 — `isCompletedFastExit` gets a chance
-   * to reclassify the exit as a workload that ran to completion before this
-   * poll loop could ever observe Running (msb 0.6.16's convergent-lifecycle
-   * rework; see that method's own doc); anything else surfaces the raw
-   * output as an ordinary boot failure, unchanged.
+   * retry policy, never cleanup (an exit-0 success is the exception in two
+   * shapes, neither of which leaves a live process behind: the ordinary
+   * `run` fast-exit case below, and every restore — see below — so
+   * `state.attached`/`startedNames` ARE populated for it). An early exit is
+   * classified from the child's combined output: the image-cache-corruption
+   * signature throws `ImageCacheCorruptionError` (the one failure `start()`
+   * heals and retries), a host-port bind conflict throws
+   * `PortBindConflictError`, and otherwise — if the exit code was 0 — a
+   * restore spec is confirmed successful once `msb ls` shows it Running
+   * (restore's own clean exit already means the CLI-side task succeeded;
+   * there is no live child left to hold onto, exactly as the fast-exit case
+   * below leaves none), an ordinary spec instead gets a chance via
+   * `isCompletedFastExit` to reclassify the exit as a workload that ran to
+   * completion before this poll loop could ever observe Running (msb
+   * 0.6.16's convergent-lifecycle rework; see that method's own doc);
+   * anything else surfaces the raw output as an ordinary boot failure,
+   * unchanged.
    */
   private async bootOnce(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
     // Fresh per-attempt diagnostics: a retried boot must not blend its tail
@@ -481,7 +502,9 @@ export class MsbCliBackend implements SandboxBackend {
     state.logTail = [];
     state.attachedExited = false;
 
-    const child = spawn(msbPath, MsbCommands.run(handle.spec), { stdio: [CLOSED_STDIN, "pipe", "pipe"] });
+    const isRestore = handle.spec.checkpointRef !== undefined;
+    const argv = isRestore ? MsbCommands.restore(handle.spec) : MsbCommands.run(handle.spec);
+    const child = spawn(msbPath, argv, { stdio: [CLOSED_STDIN, "pipe", "pipe"] });
     // Merge stdout+stderr into one tail, kept only for the boot diagnostics
     // below: this pipe is the sole carrier of msb's own output (registry/pull
     // errors, crash output printed before the sandbox exists). It is not a
@@ -513,26 +536,44 @@ export class MsbCliBackend implements SandboxBackend {
         }
         if (isPortBindConflictOutput(output)) {
           throw new PortBindConflictError(
-            `msb run for sandbox ${handle.id} could not bind a host port: ${output}`,
+            `msb ${isRestore ? "restore" : "run"} for sandbox ${handle.id} could not bind a host port: ${output}`,
           );
         }
-        if (exited.code === 0 && (await this.isCompletedFastExit(msbPath, handle.id))) {
-          // The workload ran to completion before this poll loop ever
-          // observed Running — see isCompletedFastExit's own doc. Started-
-          // and-already-finished: register it exactly like an ordinary
-          // successful boot. state.attachedExited is already true (the
-          // "exit" listener above set it) and state.attached is left
-          // undefined, since there is no live process left to reference —
-          // stop() checks attachedExited before it would ever touch
-          // state.attached, so it is already safe to call on this handle.
-          if (!handle.spec.keepAlive) {
-            this.startedNames.add(handle.id);
+        if (exited.code === 0) {
+          if (isRestore && (await this.runningSandboxNames(msbPath)).has(handle.id)) {
+            // Unlike `run`'s attached supervisor, `msb restore` always
+            // detaches and exits once the sandbox is confirmed up (see
+            // MsbCommands.restore's own doc) — a clean exit is the SUCCESS
+            // signal here, not something to classify as a premature death.
+            // state.attachedExited is already true (the "exit" listener
+            // above set it) and state.attached is left undefined, since
+            // there is no live process left to reference — stop() checks
+            // attachedExited before it would ever touch state.attached, so
+            // it is already safe to call on this handle.
+            if (!handle.spec.keepAlive) {
+              this.startedNames.add(handle.id);
+            }
+            return;
           }
-          return;
+          if (!isRestore && (await this.isCompletedFastExit(msbPath, handle.id))) {
+            // The workload ran to completion before this poll loop ever
+            // observed Running — see isCompletedFastExit's own doc. Started-
+            // and-already-finished: register it exactly like an ordinary
+            // successful boot. state.attachedExited is already true (the
+            // "exit" listener above set it) and state.attached is left
+            // undefined, since there is no live process left to reference —
+            // stop() checks attachedExited before it would ever touch
+            // state.attached, so it is already safe to call on this handle.
+            if (!handle.spec.keepAlive) {
+              this.startedNames.add(handle.id);
+            }
+            return;
+          }
         }
         throw new BackendError(
-          `msb run for sandbox ${handle.id} exited (code ${exited.code ?? "unknown"}) before reaching ` +
-            `Running — check the image entrypoint and 'msb run' output below:\n${output}`,
+          `msb ${isRestore ? "restore" : "run"} for sandbox ${handle.id} exited (code ${exited.code ?? "unknown"}) ` +
+            `before reaching Running — check the image entrypoint and 'msb ${isRestore ? "restore" : "run"}' ` +
+            `output below:\n${output}`,
         );
       }
       if ((await this.runningSandboxNames(msbPath)).has(handle.id)) {
@@ -648,27 +689,41 @@ export class MsbCliBackend implements SandboxBackend {
   /**
    * The stop/snapshot/reboot cycle: `msb stop <name>` (reusing this
    * backend's own `stop()`, which also quiesces the attached child and any
-   * network-link tunnels), `msb snapshot create --from <name> <ref>`, then
-   * `msb rm <name>` followed by a fresh ATTACHED boot of the SAME name from
-   * that snapshot — never `msb start`. Upstream's detached-start path
-   * (`Sandbox::start_detached`) passes `CREATE_BREAKAWAY_FROM_JOB` on
-   * Windows, which `ERROR_ACCESS_DENIED`s outright whenever the msb CLI runs
-   * inside a job object that doesn't grant breakaway rights — a Gradle/
-   * cargo/node test runner on a hosted Windows runner, or any process that
-   * embeds this library inside its own restrictive job object — and that
-   * denial is deterministic, not transient, so no retry shape fixes it.
-   * Attached `msb run` (this backend's normal boot, including `--from-snapshot`
-   * boots) never hits it, which is why the reboot reuses `bootOnce` instead
-   * of resuming in place: the stopped sandbox's disk state is already IN the
-   * snapshot, so `rm`-ing it first and booting a fresh attached sandbox
-   * under the same name/ports/env/memory (via a spec identical to
-   * `handle.spec` except `checkpointRef` set to the new `ref`) reproduces
-   * the exact same observable contract. `bootOnce` swaps `state.attached` to
-   * the freshly spawned child itself; nothing about `this.handles`/
-   * `startedNames` or the reaping ledger changes, since the name never
-   * changed. Its workload restarts from scratch (the VM reboots), which is
-   * why `capabilities.checkpointRestartsWorkload` is `true` here and the
-   * generic layer re-runs the wait strategy after this returns.
+   * network-link tunnels), `msb snapshot create --from-sandbox <name> <ref>`,
+   * then `msb rm <name>` followed by `msb restore <ref> --name <name>
+   * --disk-only` of the SAME name from that snapshot (via `bootOnce`, see
+   * `MsbCommands.restore`'s own doc) — never `msb start`. Upstream's
+   * detached-start path (`Sandbox::start_detached`) passes
+   * `CREATE_BREAKAWAY_FROM_JOB` on Windows, which `ERROR_ACCESS_DENIED`s
+   * outright whenever the msb CLI runs inside a job object that doesn't
+   * grant breakaway rights — a Gradle/cargo/node test runner on a hosted
+   * Windows runner, or any process that embeds this library inside its own
+   * restrictive job object — and that denial is deterministic, not
+   * transient, so no retry shape fixes it. Before 0.7.1, attached `msb run`
+   * (including its `--from-snapshot` boots) never hit this, which is why the
+   * reboot went through `bootOnce` rather than `msb start`. `msb restore` has
+   * no attached/detached distinction of its own — its CLI process always
+   * calls `sandbox.detach()` internally and exits once the restore is
+   * confirmed (see `bootOnce`'s own doc on why its exit is a SUCCESS signal,
+   * not something to reap) — so whether it shares upstream's
+   * `CREATE_BREAKAWAY_FROM_JOB` path on Windows is NOT verified here: this
+   * backend never runs the real msb binary (see this repo's hard "never boot
+   * a sandbox" rule), so this is a real open question for CI, not something
+   * this migration could confirm either way. If it recurs, it will surface
+   * as an ordinary unclassified `BackendError` out of `bootOnce` (deterministic exit-code
+   * failure, not one of the classified transients above), the same shape a
+   * genuine breakaway denial always took.
+   * `rm`-ing the sandbox first and restoring a fresh one under the same
+   * name/ports/memory (via a spec identical to `handle.spec` except
+   * `checkpointRef` set to the new `ref` — env is no longer threaded through
+   * at all, see `MsbCommands.restore`) reproduces the exact same observable
+   * contract. `bootOnce` swaps `state.attached` to the freshly spawned child
+   * itself (or leaves it `undefined`, since restore's own child exits on
+   * success — see `bootOnce`); nothing about `this.handles`/`startedNames`
+   * or the reaping ledger changes, since the name never changed. Its
+   * workload restarts from scratch (the VM reboots), which is why
+   * `capabilities.checkpointRestartsWorkload` is `true` here and the generic
+   * layer re-runs the wait strategy after this returns.
    *
    * If the snapshot step fails, the sandbox is left stopped — no
    * best-effort restart, since that restart would itself be the broken `msb
@@ -843,8 +898,10 @@ export class MsbCliBackend implements SandboxBackend {
    * field. Live-verified against msb 0.6.8: the full `sha256:<64hex>`
    * digest does not resolve as a snapshot ref at all (`msb snapshot inspect
    * sha256:<full>` fails "snapshot not found"); only the digest-dir name
-   * resolves for `inspect`/`rm`/`run --from-snapshot`, so it — not the full
-   * digest — is the ref this must hand back for `hasCheckpoint` and every
+   * resolves for `inspect`/`rm`/`restore` (the positional accepts a
+   * "snapshot group/member, ID, or archive path" — the digest-dir name, not
+   * the full digest), so it — not the full digest — is the ref this must
+   * hand back for `hasCheckpoint` and every
    * other snapshot-ref call to keep working. `_ref` (the archive's own
    * recorded ref) is unused here — msb's importer never takes one, unlike
    * docker's, where the effective ref really is the ref passed in.

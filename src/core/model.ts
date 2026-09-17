@@ -79,8 +79,9 @@ export interface ContainerSpec {
    * identity hash — reuse and `fromCheckpoint` is not a supported
    * combination (see `ReuseFromCheckpointError`). docker ignores it (the ref
    * IS an image, so the normal create path already boots from it via
-   * `image`); microsandbox boots via `msb run --from-snapshot <ref>` instead of
-   * its normal image boot when this is set.
+   * `image`); microsandbox boots via `msb restore <ref> --name <name>
+   * --disk-only` (see `MsbCommands.restore`) instead of its normal image
+   * boot when this is set.
    */
   readonly checkpointRef: string | undefined;
   /**

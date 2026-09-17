@@ -56,8 +56,10 @@ export function parseSnapshotList(json: string): SnapshotListEntry[] {
  * `sha256:<64hex>` digest does not resolve as a snapshot ref at all (`msb
  * snapshot inspect sha256:<full>` fails "snapshot not found" — msb treats
  * it as a literal path). Only the digest-dir name resolves for
- * `inspect`/`rm`/`run --from-snapshot`, so it — not the `digest` field — is the
- * effective ref `importCheckpoint` must hand back. `undefined` means no
+ * `inspect`/`rm`/`restore` (its positional accepts a "snapshot group/member,
+ * ID, or archive path" — the digest-dir name, not the full digest), so it —
+ * not the `digest` field — is the effective ref `importCheckpoint` must hand
+ * back. `undefined` means no
  * entry matched — the caller throws rather than returning an unconfirmed
  * ref.
  */

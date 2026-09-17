@@ -31,7 +31,7 @@ mechanisms:
 
 | | docker | microsandbox |
 |---|---|---|
-| Mechanism | Commit the running container to a new image | Stops the sandbox, snapshots its disk, and boots it back from that snapshot under the same name and ports |
+| Mechanism | Commit the running container to a new image | Stops the sandbox, snapshots its disk, and boots it back from that snapshot (`msb restore --disk-only`) under the same name and ports |
 | `capabilities.checkpoint` | `true` | `true` |
 | `capabilities.checkpointRestartsWorkload` | `false` — the container is undisturbed | `true` — the workload restarts |
 | Ref format | `rightsize/checkpoint:<12-hex>` (an image tag) | an absolute path, `<cacheDir>/checkpoints/rz-ckpt-<12-hex>` |
@@ -135,11 +135,24 @@ import type { Checkpoint } from "rightsize";
 
 async function restore(checkpoint: Checkpoint): Promise<GenericContainer> {
   return GenericContainer.fromCheckpoint(checkpoint)
-    .withEnv("EXTRA_FLAG", "1") // override/extend beyond the checkpoint's own env
+    .withEnv("EXTRA_FLAG", "1") // override/extend beyond the checkpoint's own env — docker only, see below
     .waitingFor(Wait.forListeningPort())
     .start();
 }
 ```
+
+**On microsandbox, `withEnv()` after `fromCheckpoint()` can only repeat the
+checkpoint's own captured env, never change it.** `msb restore` (the command
+this backend's restore goes through) has no `-e`/`--env` flag at all — a
+disk-only restore replays the sandbox's own captured configuration instead.
+Calling `withEnv()` with the checkpoint's captured values, unchanged, is
+fine; calling it with a new key or a different value for an existing one
+throws `CheckpointRestoreEnvOverrideError` at `start()`, before any backend
+call — there is no msb invocation this library could emit that would honor
+it, so this refuses rather than silently booting the restored sandbox
+without the env you asked for. Docker is unaffected: restoring there is an
+ordinary `docker create`/`run` against the committed image with a fresh env
+array, so the example above works as shown when `RIGHTSIZE_BACKEND=docker`.
 
 A restored container is ordinary in every other respect once started: fresh
 host ports (never the source's old ones), normal
