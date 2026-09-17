@@ -40,6 +40,27 @@ function countingWait(counter: { count: number }): WaitStrategy {
   };
 }
 
+/**
+ * Succeeds the first `succeedCount` calls, then throws on every call after
+ * that. Lets a test pass a container's own `start()` wait while still
+ * failing `checkpoint()`'s post-reboot re-wait, to exercise the
+ * teardown-on-failed-wait path without disturbing start()'s own behavior.
+ */
+function waitFailingAfter(succeedCount: number): WaitStrategy {
+  let calls = 0;
+  return {
+    waitUntilReady: async () => {
+      calls += 1;
+      if (calls > succeedCount) {
+        throw new Error("boom: post-checkpoint wait strategy failed");
+      }
+    },
+    withStartupTimeout(): WaitStrategy {
+      return this;
+    },
+  };
+}
+
 /** A minimal fake backend whose `capabilities` and `createCheckpoint` behavior are set by the test, recording every call it receives. */
 class FakeCheckpointBackend implements SandboxBackend {
   readonly name: string;
@@ -333,6 +354,35 @@ describe("GenericContainer.checkpoint()", () => {
     assert.equal(counter.count, 1, "docker's commit-to-image never disturbs the container, so no re-wait is needed");
 
     await container.stop();
+  });
+
+  it("tears down (stop+remove) the revived workload when the post-checkpoint wait strategy fails, instead of leaking it", async () => {
+    const backend = new FakeCheckpointBackend("microsandbox", {
+      hardwareIsolated: true,
+      checkpoint: true,
+      checkpointRestartsWorkload: true,
+    });
+    const container = new GenericContainer("alpine:3.19")
+      .withBackend(backend)
+      .withCommand("sleep", "60")
+      .waitingFor(waitFailingAfter(1));
+    await container.start();
+
+    await assert.rejects(() => container.checkpoint());
+
+    assert.equal(
+      container.isRunning,
+      false,
+      "a failed post-checkpoint wait must leave the container torn down, not half-alive",
+    );
+    assert.ok(
+      backend.calls.includes("stop"),
+      "expected checkpoint()'s failed re-wait to reap the revived workload via stop(), same as a failed start()",
+    );
+    assert.ok(
+      backend.calls.includes("remove"),
+      "expected checkpoint()'s failed re-wait to remove the sandbox, not leave it lingering",
+    );
   });
 
   it("leaves the reaper ledger untouched across the msb stop/snapshot/reboot checkpoint cycle", async () => {

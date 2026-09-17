@@ -1121,6 +1121,11 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * BEFORE the wait-strategy re-run — the wait must gate a container that is
    * fully re-linked, not just booted.
    *
+   * If that re-wait (or the link re-install before it) fails, this container
+   * is torn down to completion via `stop()` — same as a failed `start()` —
+   * before the rejection propagates, so a revived-but-never-ready workload
+   * never sits around as an orphan.
+   *
    * Checkpoints are never auto-reaped (a committed image or a disk snapshot
    * is not a container) — see the checkpoints guide for the manual cleanup
    * one-liners and the `Checkpoints.remove` cleanup affordance.
@@ -1169,10 +1174,25 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     // the returned `Checkpoint`) uses this, not the working `ref`.
     const effectiveRef = await backend.createCheckpoint(handle, ref);
     if (backend.capabilities.checkpointRestartsWorkload) {
-      if (this.installedNetworkLinks.length > 0) {
-        await backend.installNetworkLinks(handle, this.installedNetworkLinks);
+      // The backend checkpoint call above already succeeded — the artifact
+      // exists — but the reboot it triggered can still leave this container
+      // unusable: a revived workload that never becomes ready. Same shape as
+      // start()'s own post-boot wait (line ~722): a failure here must not
+      // leak the freshly-spawned workload (msb's revived `exec` child sits
+      // in `handle`'s attached slot from the moment the reboot reaches
+      // Running, well before this wait ever resolves). Tear this container
+      // down to completion via the same this.stop() start() uses, so the
+      // handle's attached child — and the sandbox itself — never outlive
+      // this rejection, before rethrowing.
+      try {
+        if (this.installedNetworkLinks.length > 0) {
+          await backend.installNetworkLinks(handle, this.installedNetworkLinks);
+        }
+        await this.waitStrategy.waitUntilReady(this.asWaitTarget());
+      } catch (err) {
+        await this.stop();
+        throw err;
       }
-      await this.waitStrategy.waitUntilReady(this.asWaitTarget());
     }
     // The workload argv the backend captured from the guest during the
     // createCheckpoint() call just above, when `handle.spec.command` was
