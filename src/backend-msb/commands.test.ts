@@ -219,7 +219,7 @@ describe("MsbCommands", () => {
     assert.deepEqual(MsbCommands.snapshotCreate("box-1", "rz-ckpt-abcdef012345"), [
       "snapshot",
       "create",
-      "--from",
+      "--from-sandbox",
       "box-1",
       "rz-ckpt-abcdef012345",
     ]);
@@ -229,7 +229,7 @@ describe("MsbCommands", () => {
     assert.deepEqual(MsbCommands.snapshotCreate("box-1", "rz-ckpt-abcdef012345", "/cache/checkpoints"), [
       "snapshot",
       "create",
-      "--from",
+      "--from-sandbox",
       "box-1",
       "rz-ckpt-abcdef012345",
       "--dest-dir",

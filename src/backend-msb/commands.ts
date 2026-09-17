@@ -73,7 +73,7 @@ export const MsbCommands = {
    * or under `<destDir>/<name>` when `destDir` is given (path-ref checkpoints).
    */
   snapshotCreate(sandbox: string, name: string, destDir?: string): string[] {
-    const argv = ["snapshot", "create", "--from", sandbox, name];
+    const argv = ["snapshot", "create", "--from-sandbox", sandbox, name];
     if (destDir !== undefined) {
       argv.push("--dest-dir", destDir);
     }

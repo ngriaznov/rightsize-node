@@ -194,7 +194,7 @@ if (cmd === "run") {
   process.exit(0);
 } else if (cmd === "snapshot" && args[1] === "create") {
   // snapshot create --from <sandbox> <name> [--dest-dir <dir>]
-  const fromIdx = args.indexOf("--from");
+  const fromIdx = args.indexOf("--from-sandbox");
   const from = args[fromIdx + 1];
   const name = args[fromIdx + 2];
   const destDirIdx = args.indexOf("--dest-dir");

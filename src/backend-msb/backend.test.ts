@@ -654,7 +654,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       assert.deepEqual(snapshotCall?.args, [
         "snapshot",
         "create",
-        "--from",
+        "--from-sandbox",
         handle.id,
         "rz-ckpt-pathref01",
         "--dest-dir",
