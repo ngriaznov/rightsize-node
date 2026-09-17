@@ -170,18 +170,19 @@ export interface SandboxBackend {
    * Materializes an exported archive's backend payload from `srcFile` and
    * returns the EFFECTIVE ref to use from here on — not necessarily `ref`
    * itself. docker preserves the original tag on `docker load`, so its
-   * effective ref IS `ref`; microsandbox's `snapshot load` writes under a
-   * digest-derived DIRECTORY NAME (e.g. `sha256-b9c0448ee9d54e33`) it never
-   * lets the caller choose, so its effective ref is that directory name,
-   * confirmed present via `snapshot list --format json` — never the full
-   * `sha256:<64hex>` digest, which does not resolve as a snapshot ref at
-   * all. An already-exists failure for a content-addressed archive is
-   * treated as success. `ref` is the archive's own recorded ref (from
-   * `checkpoint.json`), passed through for backends (docker) that have no
-   * new ref to derive. Only ever called once the generic layer has already
-   * validated the archive's `checkpoint.json` (version, name, backend)
-   * against the active backend; any failure other than "already imported"
-   * surfaces the underlying tool's stderr in a `BackendError`.
+   * effective ref IS `ref`; microsandbox's `snapshot load --dest
+   * <checkpointsDir>` writes under a path msb itself generates (never the
+   * caller's `ref`, never a name the caller can choose), which this backend
+   * parses straight out of `load`'s own printed output — no separate
+   * confirmation call needed, since 0.7.1 already prints the full, directly
+   * usable path (see `MsbCliBackend.importCheckpoint`). An already-exists
+   * failure for a content-addressed archive is treated as success. `ref` is
+   * the archive's own recorded ref (from `checkpoint.json`), passed through
+   * for backends (docker) that have no new ref to derive. Only ever called
+   * once the generic layer has already validated the archive's
+   * `checkpoint.json` (version, name, backend) against the active backend;
+   * any failure other than "already imported" surfaces the underlying
+   * tool's stderr in a `BackendError`.
    */
   importCheckpoint(srcFile: string, ref: string): Promise<string>;
   /**

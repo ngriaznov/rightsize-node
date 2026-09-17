@@ -67,6 +67,28 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that refusal as an error rather than attempting automatic head rotation —
   select another snapshot as head with msb's own CLI first, or remove the
   older siblings before the newest one.
+- **Checkpoint archives on the microsandbox backend now go through `msb
+  snapshot save`/`msb snapshot load` instead of the removed `msb snapshot
+  export`/`msb snapshot import`.** Upstream 0.7.1 renamed both subcommands
+  outright (the old spellings no longer exist at all) and changed `load`'s
+  contract: it now takes a `--dest <dir>`, which this library always passes
+  (the checkpoints cache directory, the same one created checkpoints already
+  land under) rather than letting an import fall through into msb's own
+  global default snapshot store. `Checkpoints.exportTo`/`Checkpoints.importFrom`
+  are unaffected — same signatures, same archive file naming — but
+  **`importFrom`'s effective ref on microsandbox now points at the loaded
+  artifact's own path** (`<cacheDir>/checkpoints/<generated-group>/snap_<hex-digest>`,
+  parsed straight out of `snapshot load`'s own printed output — a group
+  line, a digest line, then the artifact path as the last line) instead of a
+  bare digest-dir name resolved via a separate `msb snapshot list`
+  confirmation call, which is gone along with the pre-0.7.1 `load` shape it
+  existed to work around. An imported ref is now the same absolute-path,
+  `checkpoints`-directory-nested, `snap_<hex>`-basename shape a freshly
+  created checkpoint's ref already has, rather than a differently-shaped
+  digest string — visible if you print or log an imported checkpoint's
+  `ref`, harmless otherwise (refs stay opaque throughout this library, and
+  `Checkpoints.find`/`fromCheckpoint()` keep working unchanged). Docker is
+  unaffected — `docker load` still preserves the original tag.
 - **The MinIO module's default image moved to `quay.io/minio/minio:latest`.**
   Docker Hub's `minio/minio` repository has been removed upstream (`docker pull`
   now fails with "repository does not exist"); `quay.io/minio/minio` is MinIO's

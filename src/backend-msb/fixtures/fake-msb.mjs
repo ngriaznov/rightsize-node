@@ -325,14 +325,13 @@ if (cmd === "run") {
   process.exit(0);
 } else if (cmd === "snapshot" && args[1] === "inspect") {
   // snapshot inspect <name> — exit 0 if the snapshot exists, exit 1
-  // otherwise. hasCheckpoint's backend call. Checks BOTH maps — snapshots
-  // created via `snapshot create` and ones brought in via `snapshot
-  // import` — reproducing the real msb 0.6.6 binary verified live: the
-  // digest-dir name resolves for inspect regardless of how the snapshot
-  // got onto disk. This is the exact probe importCheckpoint's returned ref
-  // must satisfy, so an effective ref this can't find here (e.g. a full
-  // `sha256:` digest instead of the digest-dir name) reproduces the
-  // Checkpoints.find eviction bug this fixture exists to catch.
+  // otherwise. hasCheckpoint's backend call, but only for a BARE-NAME ref:
+  // an absolute-path ref (every `snapshot create`/`snapshot load` artifact
+  // since 0.7.1, including an imported one now that `importCheckpoint`
+  // hands back the loaded artifact's own path — see backend.ts) is answered
+  // by hasCheckpoint's own direct filesystem check instead and never
+  // reaches this fixture at all, so only `state.snapshots` (bare-name
+  // pre-dest-dir checkpoints) is checked here.
   const name = args[2];
   const state = readState();
   // Reproduces a genuine, non-"not found" probe failure on demand (an
@@ -348,7 +347,7 @@ if (cmd === "run") {
     );
     process.exit(1);
   }
-  if ((state.snapshots && name in state.snapshots) || (state.importedSnapshots && name in state.importedSnapshots)) {
+  if (state.snapshots && name in state.snapshots) {
     process.stdout.write(JSON.stringify({ name }));
     process.exit(0);
   }
@@ -409,13 +408,23 @@ if (cmd === "run") {
   writeState(state);
   process.exit(0);
 } else if (cmd === "snapshot" && args[1] === "load") {
-  // snapshot import <archive> — importCheckpoint's backend call. The
-  // effective ref is content-addressed (a digest-dir name derived from the
-  // archive's own bytes), reproducing the real binary's "re-importing the
-  // same digest is success, not failure" behavior: state.importedSnapshots
-  // is keyed by that digest-dir name, so importing byte-identical content
-  // twice hits the already-exists branch below both times after the first.
+  // snapshot load <archive> --dest <destDir> — importCheckpoint's backend
+  // call. EMPIRICALLY VERIFIED shape against a real msb 0.7.1 binary: a
+  // successful load prints a "group msb-<hex>: head snap_<digest>
+  // (Initialized)" line, a digest line, then the loaded artifact's own
+  // ABSOLUTE path — <destDir>/<generated-group>/snap_<digest> — as its LAST
+  // line, the exact shape parseImportedArtifactPath parses. Content-
+  // addressed: state.importedSnapshots is keyed by that artifact path (built
+  // from the archive's own bytes), so importing byte-identical content
+  // twice hits the already-exists branch below both times after the first —
+  // reproducing the real binary's "re-importing the same digest is success,
+  // not failure" dedup. `--dest` is required by MsbCommands.snapshotImport,
+  // but this fixture still falls back to a real, writable directory if it's
+  // ever missing (e.g. a hand-built argv in a test), the same fallback
+  // "snapshot create" uses for a missing --dest-dir.
   const archive = args[2];
+  const destIdx = args.indexOf("--dest");
+  const destDir = destIdx !== -1 ? args[destIdx + 1] : path.join(path.dirname(statePath ?? "."), "msb-default-snapshots");
   const state = readState();
   logCall(state, "snapshotImport", args);
   let content;
@@ -435,50 +444,44 @@ if (cmd === "run") {
     );
     process.exit(1);
   }
-  // Two distinct shapes, matching the real msb 0.6.6 binary: the digest-dir
-  // NAME (short, what the filesystem and `snapshot list`'s `name` field
-  // use — and the only shape that resolves as a snapshot ref) versus the
-  // FULL `sha256:<64hex>` digest (only ever surfaced in `snapshot list`'s
-  // `digest` field, and does NOT resolve as a ref). Deliberately kept
-  // different strings here so a test that accidentally asserted on the
-  // wrong one would fail instead of passing by coincidence.
-  const fullDigest = `sha256:${crypto.createHash("sha256").update(content).digest("hex")}`;
-  const digestDirName = `sha256-${crypto.createHash("sha256").update(content).digest("hex").slice(0, 16)}`;
-  const artifactPath = `/fake/home/.microsandbox/snapshots/${digestDirName}`;
+  const digest = crypto.createHash("sha256").update(content).digest("hex");
+  const group = `msb-${digest.slice(0, 12)}`;
+  const snapId = `snap_${digest.slice(0, 32)}`;
+  const artifactPath = path.join(destDir, group, snapId);
   state.importedSnapshots = state.importedSnapshots ?? {};
-  if (digestDirName in state.importedSnapshots) {
+  if (artifactPath in state.importedSnapshots) {
     writeState(state);
-    // Wording captured verbatim from the real msb 0.6.6 binary — the exact
-    // framing isSnapshotAlreadyExistsError matches against. The printed line
-    // still ends with the artifact path, same as the success case below.
+    // Wording captured verbatim from the real msb 0.6.6 binary (not
+    // re-verified against 0.7.1's already-exists shape specifically — see
+    // isSnapshotAlreadyExistsError's own doc) — the exact framing
+    // isSnapshotAlreadyExistsError matches against. The printed line still
+    // ends with the artifact path, same as the success case below.
     process.stderr.write(`error: snapshot already exists: ${artifactPath}\n`);
     process.exit(1);
   }
-  state.importedSnapshots[digestDirName] = { fullDigest, artifactPath, importedFrom: archive };
-  writeState(state);
-  process.stdout.write(`imported snapshot to ${artifactPath}\n`);
-  process.exit(0);
-} else if (cmd === "snapshot" && args[1] === "list") {
-  // snapshot list --format json — digest/name/artifact_path entries. `name`
-  // (and artifact_path's basename) carry the digest-dir NAME; `digest`
-  // carries the unrelated-looking FULL digest, which importCheckpoint must
-  // never treat as the effective ref (see confirmDigestDirNamePresent).
-  const state = readState();
-  if ((state.failSnapshotListWithError ?? 0) > 0) {
-    state.failSnapshotListWithError -= 1;
-    process.stderr.write(
-      "error: database error: Execution Error: error returned from database: " +
-        "(code: 1) index idx_manifest_layers_unique already exists\n",
-    );
-    process.exit(1);
+  if ((state.failSnapshotImportBadOutput ?? 0) > 0) {
+    // Reproduces an msb output this backend cannot parse — a last stdout
+    // line that is not an absolute path (e.g. just the "(Initialized)"
+    // status line, msb's own wording for a state, not a path) — so a test
+    // can drive MsbCliBackend.importCheckpoint's defensive parse-failure
+    // path without a real msb binary ever actually misbehaving this way.
+    // The artifact is still created (msb itself succeeded; this is purely
+    // about the stdout this fixture chooses to print), matching the fact
+    // that a real such failure would be a parsing bug in this library, not
+    // an msb failure.
+    state.failSnapshotImportBadOutput -= 1;
+    fs.mkdirSync(artifactPath, { recursive: true });
+    fs.writeFileSync(path.join(artifactPath, "snapshot.json"), JSON.stringify({ importedFrom: archive, digest }));
+    state.importedSnapshots[artifactPath] = { digest, importedFrom: archive };
+    writeState(state);
+    process.stdout.write(`group ${group}: head ${snapId} (Initialized)\n`);
+    process.exit(0);
   }
-  const entries = Object.entries(state.importedSnapshots ?? {}).map(([digestDirName, s]) => ({
-    digest: s.fullDigest,
-    name: digestDirName,
-    artifact_path: s.artifactPath,
-    image_ref: null,
-  }));
-  process.stdout.write(JSON.stringify(entries));
+  fs.mkdirSync(artifactPath, { recursive: true });
+  fs.writeFileSync(path.join(artifactPath, "snapshot.json"), JSON.stringify({ importedFrom: archive, digest }));
+  state.importedSnapshots[artifactPath] = { digest, importedFrom: archive };
+  writeState(state);
+  process.stdout.write(`group ${group}: head ${snapId} (Initialized)\ndigest: sha256:${digest}\n${artifactPath}\n`);
   process.exit(0);
 } else if (cmd === "copy") {
   // copy -q <src> <dst> — records the call so a test can assert the exact

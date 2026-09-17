@@ -378,21 +378,21 @@ base image itself on the restored container's first boot, same as any
 ordinary `start()` against that image. Make sure the image is reachable
 (a local pull, or registry access) wherever you import.
 
-**microsandbox refs change shape after import.** `importFrom`'s effective
-ref on microsandbox is a digest-derived directory name (`sha256-<16 hex
-chars>`, e.g. `sha256-b9c0448ee9d54e33`), never the absolute
-`snap_<hex-digest>` artifact path the archive itself carried — `msb
-snapshot load` writes under that directory name and doesn't let you choose
-it. This is
-deliberately NOT the full `sha256:<64 hex chars>` digest `msb snapshot list`
-also reports: that full digest does not resolve as a snapshot ref at all
-(msb treats it as a literal path), while the directory name does, for
-inspect/rm/restore alike.
+**microsandbox refs point at a new path after import.** `importFrom`'s
+effective ref on microsandbox is the freshly loaded artifact's own absolute
+path — `<cacheDir>/checkpoints/<generated-group>/snap_<hex-digest>` — never
+the archive's own recorded ref, and never the path the artifact had on the
+machine that exported it. `msb snapshot load --dest <cacheDir>/checkpoints`
+picks the `<generated-group>` directory itself (content-addressed, not
+something you can choose), so the ref's exact path changes on every import
+even though its shape doesn't: still an absolute path, still nested under
+this library's own checkpoints directory, still ending in a `snap_<hex>`
+basename — the same family of ref a freshly created checkpoint already has.
 This is harmless day to day (refs are opaque throughout this library; the
 returned `Checkpoint` restores normally, and `Checkpoints.find` on the
-importing machine shows the digest-dir-shaped ref from then on) but visible
-if you print or log a checkpoint's `ref`. Docker's ref round-trips
-unchanged — `docker load` preserves the original tag.
+importing machine shows the new path from then on) but visible if you print
+or log a checkpoint's `ref`. Docker's ref round-trips unchanged — `docker
+load` preserves the original tag.
 
 **Archive size**: on microsandbox the artifact is the zstd-compressed
 snapshot — bounded by the sandbox's actual disk usage, typically small; on

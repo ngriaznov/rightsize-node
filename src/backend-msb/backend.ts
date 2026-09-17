@@ -4,6 +4,7 @@ import * as readline from "node:readline";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { BackendError, PortBindConflictError, UnsupportedByBackendError, TmpfsRootCheckpointError } from "../core/errors.js";
+import { cacheDir } from "../core/cache-dir.js";
 import type { SandboxBackend, SandboxHandle, FollowHandle, NetworkLink, ReaperKillCommand, BackendCapabilities } from "../core/backend.js";
 import type { ContainerSpec, ExecResult } from "../core/model.js";
 import { MsbCommands } from "./commands.js";
@@ -15,9 +16,8 @@ import { isImageCacheCorruption } from "./image-cache.js";
 import { isMsbStateDbError } from "./state-db.js";
 import { isAgentEndpointNotReady } from "./agent-endpoint.js";
 import { isSnapshotNotFoundError } from "./snapshot-not-found.js";
-import { isSnapshotAlreadyExistsError, parseImportedDigestDirName } from "./snapshot-import.js";
+import { isSnapshotAlreadyExistsError, parseImportedArtifactPath } from "./snapshot-import.js";
 import { isSnapshotSaveAccessDeniedFailure, salvageStagedArchive } from "./snapshot-save-fsync.js";
-import { parseSnapshotList, confirmDigestDirNamePresent } from "./snapshot-list.js";
 import { parseSnapshotCreateArtifactPath } from "./snapshot-create.js";
 import { isSnapshotHeadRemovalRefused } from "./snapshot-rm.js";
 import { undeliveredLines } from "./follow-replay.js";
@@ -1112,59 +1112,70 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
-   * `msb snapshot load <archive>`, then resolves the EFFECTIVE ref: msb
-   * writes the import under a digest-derived directory name it never lets
-   * the caller choose (never the archive's own recorded `ref`), parsed from
-   * the printed artifact path's basename (see `parseImportedDigestDirName`).
+   * `msb snapshot load <archive> --dest <checkpointsDir>`, then resolves the
+   * EFFECTIVE ref: EMPIRICALLY VERIFIED against a real msb 0.7.1 binary, a
+   * successful load prints a `group msb-<hex>: head snap_<digest>
+   * (Initialized)` line, a digest line, and finally the loaded artifact's
+   * own absolute path as its LAST line — `<checkpointsDir>/<generated-
+   * group>/snap_<digest>`, never the archive's own recorded `ref` — parsed
+   * back out by `parseImportedArtifactPath` (the same last-non-empty-line,
+   * must-be-absolute defensive pattern `parseSnapshotCreateArtifactPath`
+   * uses for `snapshot create`). `checkpointsDir` is always this backend's
+   * own checkpoints cache directory (`<cacheDir>/checkpoints`, the same
+   * directory `checkpointRef()` mints created-checkpoint refs under) —
+   * omitting `--dest` would import into msb's own global default snapshot
+   * store instead, outside anywhere this library looks for or cleans up
+   * checkpoints. Created fresh (mkdir -p) before the load, since nothing
+   * guarantees a caller ever created a checkpoint locally first (an
+   * imported-only machine has no reason to have this directory yet).
+   *
+   * This replaces the pre-0.7.1 shape entirely: `snapshot load` used to
+   * write under a digest-derived directory name with no `--dest` of its
+   * own, so this method had to parse out just that bare NAME and then
+   * separately CONFIRM it via `msb snapshot list --format json` before
+   * handing it back (the only way to get a usable ref at all, since the
+   * bare name alone still had to resolve against msb's default store). 0.7.1
+   * prints the full, directly-usable, already-`--dest`-scoped path as part
+   * of `load`'s own output, so that whole list-and-confirm round trip is
+   * gone — dead code that this migration deletes outright, not merely
+   * bypassed.
+   *
    * An already-exists failure — msb's own content-addressed dedup — is
    * treated as success, since the artifact is already present under that
-   * digest either way; any OTHER import failure surfaces msb's own stderr.
-   * The digest-dir basename is then CONFIRMED present via `msb snapshot
-   * list --format json` (matching it against each entry's
-   * `name`/`artifact_path`) and returned as-is — never the entry's `digest`
-   * field. Live-verified against msb 0.6.8: the full `sha256:<64hex>`
-   * digest does not resolve as a snapshot ref at all (`msb snapshot inspect
-   * sha256:<full>` fails "snapshot not found"); only the digest-dir name
-   * resolves for `inspect`/`rm`/`restore` (the positional accepts a
-   * "snapshot group/member, ID, or archive path" — the digest-dir name, not
-   * the full digest), so it — not the full digest — is the ref this must
-   * hand back for `hasCheckpoint` and every
-   * other snapshot-ref call to keep working. `_ref` (the archive's own
-   * recorded ref) is unused here — msb's importer never takes one, unlike
-   * docker's, where the effective ref really is the ref passed in.
+   * digest either way, and its stderr is parsed the same way as a success's
+   * stdout; any OTHER import failure surfaces msb's own stderr in a
+   * `BackendError`, and unparseable output (no recognizable absolute last
+   * line — e.g. only the "group ... (Initialized)" line, msb's OWN wording
+   * for a state that is not itself a path) throws a `BackendError` quoting
+   * the raw output verbatim rather than misreading a status line as a ref.
+   * `_ref` (the archive's own recorded ref) is unused here — msb's importer
+   * never takes one, unlike docker's, where the effective ref really is the
+   * ref passed in.
    */
   async importCheckpoint(srcFile: string, _ref: string): Promise<string> {
     const msbPath = await this.msbPath();
-    const imported = await invoke(msbPath, MsbCommands.snapshotImport(srcFile), CHECKPOINT_TIMEOUT_MS);
+    const checkpointsDir = path.join(cacheDir(), "checkpoints");
+    await fs.mkdir(checkpointsDir, { recursive: true });
 
-    let digestDirName: string | undefined;
+    const imported = await invoke(msbPath, MsbCommands.snapshotImport(srcFile, checkpointsDir), CHECKPOINT_TIMEOUT_MS);
+
+    let artifactPath: string | undefined;
     if (imported.exitCode === 0) {
-      digestDirName = parseImportedDigestDirName(imported.stdout);
+      artifactPath = parseImportedArtifactPath(imported.stdout);
     } else if (isSnapshotAlreadyExistsError(imported.stderr)) {
-      digestDirName = parseImportedDigestDirName(imported.stderr);
+      artifactPath = parseImportedArtifactPath(imported.stderr);
     } else {
       throw new BackendError(
-        `msb snapshot load ${srcFile} failed (exit ${imported.exitCode}): ${imported.stderr.trim()}`,
+        `msb snapshot load ${srcFile} --dest ${checkpointsDir} failed (exit ${imported.exitCode}): ${imported.stderr.trim()}`,
       );
     }
-    if (digestDirName === undefined) {
+    if (artifactPath === undefined) {
       throw new BackendError(
-        `msb snapshot load ${srcFile} did not print a recognizable artifact path — output:\n` +
-          `${imported.stdout}${imported.stderr}`,
+        `msb snapshot load ${srcFile} --dest ${checkpointsDir} did not print a recognizable artifact path as its ` +
+          `last line — output:\n${imported.stdout}${imported.stderr}`,
       );
     }
-
-    const list = await invoke(msbPath, MsbCommands.snapshotList(), CHECKPOINT_TIMEOUT_MS);
-    if (list.exitCode !== 0) {
-      throw new BackendError(`msb snapshot list failed (exit ${list.exitCode}): ${list.stderr.trim()}`);
-    }
-    const confirmedRef = confirmDigestDirNamePresent(parseSnapshotList(list.stdout), digestDirName);
-    if (confirmedRef === undefined) {
-      throw new BackendError(
-        `imported snapshot '${digestDirName}' from ${srcFile} did not appear in 'msb snapshot list' — could not confirm the import`,
-      );
-    }
-    return confirmedRef;
+    return artifactPath;
   }
 
   private async runningSandboxNames(msbPath: string): Promise<Set<string>> {

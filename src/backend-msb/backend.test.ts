@@ -8,6 +8,7 @@ import { BackendError, TmpfsRootCheckpointError } from "../core/errors.js";
 import type { ContainerSpec } from "../core/model.js";
 import { GenericContainer } from "../core/generic-container.js";
 import { readCheckpointRegistry } from "../core/checkpoint/registry.js";
+import { cacheDir } from "../core/cache-dir.js";
 import type { WaitStrategy } from "../core/wait.js";
 
 /** A no-op readiness check — this suite never runs a real workload, only the fake-msb double. */
@@ -56,11 +57,16 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     statePath = path.join(tmpDir, "state.json");
     await fs.writeFile(statePath, JSON.stringify({ sandboxes: {} }));
     process.env["RIGHTSIZE_FAKE_MSB_STATE"] = statePath;
+    // importCheckpoint derives its `--dest` from cacheDir() — pin it to this
+    // test's own temp dir so an imported artifact's fake files land there
+    // instead of the real host's checkpoints cache.
+    process.env["RIGHTSIZE_CACHE_DIR"] = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-backend-cache-test-"));
     backend = new MsbCliBackend(Promise.resolve(FAKE_MSB));
   });
 
   after(async () => {
     delete process.env["RIGHTSIZE_FAKE_MSB_STATE"];
+    delete process.env["RIGHTSIZE_CACHE_DIR"];
   });
 
   // fake-msb-wrapper.sh is a POSIX `sh` script run directly as the "msb
@@ -1308,7 +1314,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     }
   });
 
-  it("importCheckpoint resolves the effective digest via snapshot list, treating a re-import of the same bytes as success", async () => {
+  it("importCheckpoint resolves the effective ref via the loaded artifact path msb's own 'snapshot load' prints, treating a re-import of the same bytes as success", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -1322,21 +1328,27 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
 
     try {
       const effectiveRef = await backend.importCheckpoint(artifactPath, checkpointRef);
-      assert.match(effectiveRef, /^sha256-[0-9a-f]{16}$/);
+      // The loaded artifact path, not a bare digest-dir name: absolute,
+      // nested under this backend's own checkpoints cache directory (never
+      // msb's global default store — see MsbCommands.snapshotImport's own
+      // doc on why --dest is always passed), basename shaped like any other
+      // snapshot artifact.
+      assert.ok(path.isAbsolute(effectiveRef), `expected an absolute path ref, got ${effectiveRef}`);
+      assert.equal(path.dirname(path.dirname(effectiveRef)), path.join(cacheDir(), "checkpoints"));
+      assert.match(path.basename(effectiveRef), /^snap_[0-9a-f]+$/i);
+      assert.ok(effectiveRef !== checkpointRef, "expected the imported ref to be distinct from the original snapshot's own ref");
 
-      // The exact regression this backend once had: importCheckpoint
-      // returning `msb snapshot list`'s full `sha256:<64hex>` digest field
-      // instead of the digest-dir name. That full digest does not resolve
-      // as a snapshot ref at all (live-verified against msb 0.6.8), so
-      // Checkpoints.find's hasCheckpoint probe on it would report the
-      // freshly imported artifact absent and evict the registry entry.
+      // The exact regression this backend once had (pre-0.7.1): importCheckpoint
+      // returning a ref `hasCheckpoint` could not actually probe (msb's full
+      // `sha256:<64hex>` digest, which never resolves as a snapshot ref).
       // Asserting hasCheckpoint(effectiveRef) here pins that the returned
-      // ref is one the backend can actually probe.
+      // ref is one the backend can actually probe — now via a plain
+      // filesystem check, since it is a path ref.
       assert.equal(await backend.hasCheckpoint(effectiveRef), true);
 
       // Re-importing the SAME bytes hits msb's own already-exists path
-      // (content-addressed dedup) and must resolve to the SAME digest, not
-      // throw — that's success, not failure, for identical content.
+      // (content-addressed dedup) and must resolve to the SAME artifact
+      // path, not throw — that's success, not failure, for identical content.
       const secondRef = await backend.importCheckpoint(artifactPath, checkpointRef);
       assert.equal(secondRef, effectiveRef);
     } finally {
@@ -1366,6 +1378,37 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     }
     assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
     assert.match((thrown as Error).message, /database error/);
+
+    await fs.rm(artifactPath, { force: true });
+  });
+
+  it("importCheckpoint throws a clear, red-proof error when msb's load output has no recognizable artifact path", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Reproduces the exact shape that broke the pre-0.7.1 locate-via-list
+    // logic: msb's own "group ... (Initialized)" status line with no
+    // trailing absolute path — see fake-msb.mjs's failSnapshotImportBadOutput
+    // knob and parseImportedArtifactPath's own doc.
+    const artifactPath = path.join(os.tmpdir(), `rightsize-msb-import-badoutput-test-${Date.now()}.artifact`);
+    await fs.writeFile(artifactPath, "some-bytes-for-bad-output-case");
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failSnapshotImportBadOutput = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: unknown;
+    try {
+      await backend.importCheckpoint(artifactPath, "unused-ref");
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match(
+      (thrown as Error).message,
+      /did not print a recognizable artifact path/,
+      "expected a clear, actionable message rather than a misread ref or a crash",
+    );
+    assert.match((thrown as Error).message, /Initialized/, "expected the raw, unparsed msb output quoted verbatim");
 
     await fs.rm(artifactPath, { force: true });
   });

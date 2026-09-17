@@ -485,7 +485,7 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
   );
 
   itIntegration(
-    "checkpoint archive round trip: exportTo/importFrom carry a named checkpoint across a remove(), and the imported ref is a digest, distinct from the original",
+    "checkpoint archive round trip: exportTo/importFrom carry a named checkpoint across a remove(), and the imported ref points at the loaded artifact path, distinct from the original",
     async () => {
       const savedBackendEnv = process.env["RIGHTSIZE_BACKEND"];
       process.env["RIGHTSIZE_BACKEND"] = "microsandbox";
@@ -531,11 +531,24 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
 
         const imported = await Checkpoints.importFrom(archivePath);
         assert.equal(imported.backend, "microsandbox");
-        assert.ok(imported.ref !== originalRef, "expected the imported ref to be a digest, distinct from the original snap_<hex> artifact path");
-        // Digest-shaped: msb has published both `sha256-<16hex>` (0.6.6) and a bare
-        // 64-hex digest (0.6.8) for a loaded snapshot, so the prefix is optional — what
-        // must hold is that the ref is a content digest and not the original name.
-        assert.match(imported.ref, /^(sha256-)?[0-9a-f]{16,64}$/, "expected msb's digest-shaped effective ref");
+        assert.ok(
+          imported.ref !== originalRef,
+          "expected the imported ref to point at the freshly loaded artifact, distinct from the original snap_<hex> path",
+        );
+        // Since msb 0.7.1, `snapshot load --dest <checkpointsDir>` prints the
+        // loaded artifact's own absolute path as the last line of its
+        // output, and that path — not a bare digest-dir name, and not a
+        // separate `snapshot list` confirmation — is the effective ref this
+        // library hands back. Same shape family as a freshly created
+        // checkpoint's own ref (absolute, nested under the checkpoints
+        // directory, snap_<hex> basename), just under msb's own generated
+        // group directory rather than the original source sandbox's name.
+        assert.ok(path.isAbsolute(imported.ref), `expected an absolute path ref, got ${imported.ref}`);
+        assert.ok(
+          imported.ref.split(path.sep).includes("checkpoints"),
+          `expected 'checkpoints' to be an ancestor of ${imported.ref}`,
+        );
+        assert.match(path.basename(imported.ref), /^snap_[0-9a-f]+$/i);
 
         // Named archive: replace semantics re-register it under the same name.
         const rediscovered = await Checkpoints.find(name);

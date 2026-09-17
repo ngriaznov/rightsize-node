@@ -216,19 +216,34 @@ export const MsbCommands = {
     return ["snapshot", "inspect", ref];
   },
 
-  /** `msb snapshot save <ref> <dest>` — writes a `.tar.zst` artifact archive; deliberately never `--with-image` (its import fails an integrity check in 0.6.6, see the checkpoints guide). `exportCheckpoint`'s backend call. */
+  /**
+   * `msb snapshot save <ref> <dest>` — writes a `.tar.zst` artifact archive;
+   * deliberately never `--with-image` (its import fails an integrity check
+   * in 0.6.6, see the checkpoints guide). Upstream renamed the subcommand
+   * from `export` to `save` for msb 0.7.1 (EMPIRICALLY VERIFIED against a
+   * real 0.7.1 binary — `snapshot export` no longer exists at all); `<ref>`
+   * and `<dest>` are still plain positionals with the explicit filename
+   * preserved, so nothing about the argv shape besides the verb changes.
+   * `exportCheckpoint`'s backend call.
+   */
   snapshotExport(ref: string, dest: string): string[] {
     return ["snapshot", "save", ref, dest];
   },
 
-  /** `msb snapshot load <archive>` — unpacks into a digest-derived directory under `~/.microsandbox/snapshots/`, never the original name; `importCheckpoint`'s backend call. */
-  snapshotImport(archive: string): string[] {
-    return ["snapshot", "load", archive];
-  },
-
-  /** `msb snapshot list --format json` — full `digest`/`name`/`artifact_path`/`image_ref` entries, used to CONFIRM an imported snapshot's digest-dir basename is present (the basename itself, not the `digest` field, is the effective ref — the full digest does not resolve as a snapshot ref). */
-  snapshotList(): string[] {
-    return ["snapshot", "list", "--format", "json"];
+  /**
+   * `msb snapshot load <archive> --dest <destDir>` — upstream renamed the
+   * subcommand from `import` to `load` for msb 0.7.1 (EMPIRICALLY VERIFIED
+   * against a real 0.7.1 binary — `snapshot import` no longer exists at
+   * all) and added `--dest`, which this always passes: omitting it imports
+   * into msb's own global default snapshot store instead of this library's
+   * checkpoints directory, which is exactly the placement bug `--dest`
+   * exists to avoid (mirrors `snapshotCreate`'s own `--dest-dir`, a
+   * differently-spelled flag on a different subcommand). `destDir` is
+   * always the checkpoints cache directory (see `MsbCliBackend.importCheckpoint`).
+   * `importCheckpoint`'s backend call.
+   */
+  snapshotImport(archive: string, destDir: string): string[] {
+    return ["snapshot", "load", archive, "--dest", destDir];
   },
 
   /** `msb copy -q <hostPath> <name>:<containerPath>` — host-to-guest transfer, `cp -r`-style destination naming for a directory source. */

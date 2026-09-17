@@ -394,12 +394,14 @@ describe("MsbCommands", () => {
     ]);
   });
 
-  it("snapshotImport", () => {
-    assert.deepEqual(MsbCommands.snapshotImport("/in/archive.tar.zst"), ["snapshot", "load", "/in/archive.tar.zst"]);
-  });
-
-  it("snapshotList: --format json, never --json", () => {
-    assert.deepEqual(MsbCommands.snapshotList(), ["snapshot", "list", "--format", "json"]);
+  it("snapshotImport: always carries --dest, never omitted", () => {
+    assert.deepEqual(MsbCommands.snapshotImport("/in/archive.tar.zst", "/cache/checkpoints"), [
+      "snapshot",
+      "load",
+      "/in/archive.tar.zst",
+      "--dest",
+      "/cache/checkpoints",
+    ]);
   });
 
   it("copyIn", () => {
