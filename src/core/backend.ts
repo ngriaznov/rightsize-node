@@ -129,6 +129,27 @@ export interface SandboxBackend {
    */
   createCheckpoint(handle: SandboxHandle, ref: string): Promise<string>;
   /**
+   * OPTIONAL: the workload argv this backend captured from `handle`'s guest
+   * during its MOST RECENT `createCheckpoint` call, when that call's source
+   * container had no explicit `spec.command` — `undefined` when nothing was
+   * captured (an explicit command needed no capture, the capture attempt
+   * itself failed, or this backend never captures at all). `createCheckpoint`
+   * itself never surfaces this — it stays `Promise<string>`, unchanged — so
+   * `GenericContainer.checkpoint()` calls this SEPARATELY, right after
+   * `createCheckpoint` returns, to fold the result into a NAMED checkpoint's
+   * registry entry (`CheckpointRegistryEntry.capturedCommand`) and into the
+   * `Checkpoint.spec.command` it hands back, so a later restore — registry-
+   * mediated or not — has the fully-resolved workload argv without a second
+   * capture attempt against a sandbox that (on msb) no longer even runs the
+   * old one. A backend that never captures (docker: restoring a checkpoint
+   * is an ordinary boot from the committed image, whose own baked
+   * ENTRYPOINT/CMD already reproduces the workload with no capture needed)
+   * simply omits this method — every existing implementation keeps compiling
+   * and behaving unchanged. See `MsbCliBackend.createCheckpoint`'s own doc
+   * for when and how the microsandbox backend actually captures one.
+   */
+  capturedWorkloadCommand?(handle: SandboxHandle): ReadonlyArray<string> | undefined;
+  /**
    * Best-effort removal of a checkpoint identified by `ref` (docker: `rmi`;
    * microsandbox: `msb snapshot rm`) — "not found" is success, the same
    * contract as `removeByName`. SPI-only: there is no public

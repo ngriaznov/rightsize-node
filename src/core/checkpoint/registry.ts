@@ -35,6 +35,28 @@ export interface CheckpointRegistryEntry {
   readonly backend: string;
   readonly createdIso: string;
   readonly spec: CheckpointRegistrySpec;
+  /**
+   * The workload argv `GenericContainer.checkpoint()` captured from the
+   * guest at checkpoint time (via `SandboxBackend.capturedWorkloadCommand`),
+   * for a source container whose own `spec.command` was `undefined` — the
+   * image's default entrypoint was running, so there is no explicit command
+   * to fall back on at restore time. msb-only in practice today: `msb
+   * restore` boots a restored sandbox with only its guest agent inside and
+   * never re-runs a captured workload on its own (EMPIRICALLY VERIFIED
+   * against msb 0.7.1 — see `MsbCliBackend.bootRestoreOnce`'s own doc), so
+   * this library restarts it itself, using this field as the argv source
+   * when the checkpoint carries no explicit `spec.command`.
+   *
+   * ADDITIVE and OPTIONAL — deliberately NOT part of the pinned, cross-
+   * language `CheckpointRegistrySpec` shape `spec` above carries: absent on
+   * every entry written before this field existed, and on any entry whose
+   * source container already had an explicit `spec.command` (nothing to
+   * capture). Reading an old entry without it is not an error — only
+   * restoring FROM one, when the entry also has no explicit `spec.command`,
+   * throws `CheckpointWorkloadCommandMissingError` rather than booting a
+   * workload-less sandbox silently (see `fromCheckpointRegistryEntry` below).
+   */
+  readonly capturedCommand?: ReadonlyArray<string>;
 }
 
 /** `<cacheDir>/checkpoints` — the directory every named checkpoint's registry file lives under. */
@@ -100,6 +122,13 @@ function isCheckpointRegistryEntry(value: unknown): value is CheckpointRegistryE
     typeof rec["backend"] !== "string" ||
     typeof rec["createdIso"] !== "string"
   ) {
+    return false;
+  }
+  // Additive and optional (see CheckpointRegistryEntry's own doc): an entry
+  // written before this field existed simply omits the key, which is fine —
+  // only a PRESENT-but-malformed value (not an array of strings) is corrupt.
+  const capturedCommand = rec["capturedCommand"];
+  if (capturedCommand !== undefined && !(Array.isArray(capturedCommand) && capturedCommand.every((c) => typeof c === "string"))) {
     return false;
   }
   return isCheckpointRegistrySpec(rec["spec"]);
@@ -219,13 +248,25 @@ export function toCheckpointRegistrySpec(spec: ContainerSpec): CheckpointRegistr
  * pointing at itself. `diskLimitMb`/`tmpfsRootMb`/`networkDisabled` are
  * placeholders too — the registry's pinned `CheckpointRegistrySpec` shape
  * doesn't carry them, same as it never carried `keepAlive`.
+ *
+ * `command` resolves with `entry.capturedCommand` as its fallback: when the
+ * source container had an explicit command, `entry.spec.command` already
+ * carries it and `capturedCommand` (never set for that case) never enters
+ * into it; when it did not, this substitutes whatever guest cmdline
+ * `checkpoint()` captured, so the restored `ContainerSpec`'s `command` is
+ * already the fully-resolved workload argv a restore-side backend (msb)
+ * needs to revive it, with no separate lookup needed at restore time. When
+ * NEITHER is present (an entry written before capture existed, or one whose
+ * capture attempt itself failed), `command` stays `undefined` exactly as
+ * before, and it is the restoring backend's own job to refuse rather than
+ * boot that sandbox silently idle (see `MsbCliBackend.bootRestoreOnce`).
  */
 export function fromCheckpointRegistryEntry(entry: CheckpointRegistryEntry): ContainerSpec {
   return {
     name: entry.name,
     image: entry.ref,
     env: envRecordToPairs(entry.spec.env),
-    command: entry.spec.command ?? undefined,
+    command: entry.spec.command ?? entry.capturedCommand ?? undefined,
     ports: entry.spec.exposedPorts.map((guestPort) => ({ hostPort: 0, guestPort })),
     mounts: [],
     networkId: undefined,

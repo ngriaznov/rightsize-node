@@ -170,6 +170,17 @@ if (cmd === "run") {
     process.stderr.write(`error: failed to restore snapshot '${ref}': destination disk is full\n`);
     process.exit(1);
   }
+  if ((state.failRestoreWithAccessDenied ?? 0) > 0) {
+    // Reproduces the Windows file-handle-release-lag failure on the
+    // just-written snapshot artifact (see isRestoreAccessDeniedFailure) so a
+    // test can drive MsbCliBackend.bootClassified's bounded restore retry
+    // without a real Windows host underneath. Never touches sandbox state,
+    // matching a real activation failure that never created anything.
+    state.failRestoreWithAccessDenied -= 1;
+    writeState(state);
+    process.stderr.write("error: io error: Access is denied. (os error 5)\n");
+    process.exit(1);
+  }
   if (state.restoreSettlesAsStopped) {
     // Drives MsbCliBackend.bootRestoreOnce's Stopped/disappearance fast-fail
     // path on demand: the sandbox never progresses past a settled "Stopped"
@@ -247,6 +258,12 @@ if (cmd === "run") {
       if (sandbox.restorePollsUntilRunning <= 0) {
         sandbox.status = "Running";
         delete sandbox.restorePollsUntilRunning;
+        // Marks the very next "exec" call against this sandbox as
+        // MsbCliBackend.reviveWorkload's own workload-revival session — the
+        // real backend calls it the instant it observes this same Running
+        // transition, before anything else could possibly exec against the
+        // sandbox. Consumed (cleared) by the "exec" branch below.
+        sandbox.pendingWorkloadRevival = true;
       }
       advanced = true;
     }
@@ -263,15 +280,98 @@ if (cmd === "run") {
   process.stdout.write(JSON.stringify(entries));
   process.exit(0);
 } else if (cmd === "exec") {
-  // exec [--stream] <name> -- <cmd...>
+  // exec [-e KEY=VALUE]... [--stream] <name> -- <cmd...> — MsbCommands.exec's
+  // plain one-shot form and MsbCommands.execWithEnv's env-carrying,
+  // workload-revival variant both land here.
   const dashIdx = args.indexOf("--");
   const rest = args.slice(dashIdx + 1);
+  const name = args[dashIdx - 1];
   if (rest[0] === "sh" && rest[1] === "-c" && rest[2] === "command -v nc") {
     process.stdout.write("/usr/bin/nc\n");
     process.exit(0);
   }
-  process.stdout.write(`exec-ok:${rest.join(" ")}\n`);
-  process.exit(0);
+  if (rest[0] === "sh" && rest[1] === "-c" && typeof rest[2] === "string" && rest[2].includes("rightsize:capture-workload-cmdline")) {
+    // MsbCliBackend.captureGuestWorkloadCmdline's own guest script — steered
+    // entirely by state.cmdlineCaptureArgv/state.cmdlineCaptureFails so a
+    // test can drive both parse-success and capture-failure without a real
+    // guest /proc underneath.
+    const state = readState();
+    if (state.cmdlineCaptureFails) {
+      process.stderr.write("error: exec failed: no such process\n");
+      process.exit(1);
+    }
+    const argv = state.cmdlineCaptureArgv;
+    if (Array.isArray(argv) && argv.length > 0) {
+      // Raw NUL-separated bytes, mirroring a real /proc/<pid>/cmdline read —
+      // never newline-joined, so a captured argv element containing a
+      // newline round-trips unaffected.
+      process.stdout.write(argv.join("\0") + "\0");
+      process.exit(0);
+    }
+    // No matching child found — the script's own "exit 1" branch.
+    process.exit(1);
+  }
+  const state = readState();
+  const sandbox = state.sandboxes[name];
+  if (sandbox?.pendingWorkloadRevival) {
+    // MsbCliBackend.reviveWorkload's own exec call — the fixture knows this
+    // because the "ls" branch above only ever sets this flag the instant a
+    // restore's sandbox settles Running, and reviveWorkload is the very next
+    // thing the real backend does at that point (see fake-msb.mjs's own doc
+    // and reviveWorkload's). Consumed here so a LATER exec against the same
+    // sandbox (a test's own nc probe, say) is never mistaken for a second
+    // revival.
+    delete sandbox.pendingWorkloadRevival;
+    logCall(state, "execWorkload", args);
+    const exitCode = state.execWorkloadExitCode;
+    if (typeof exitCode === "number") {
+      // Scripted early-exit variant: writes some diagnostic output then
+      // exits immediately, reproducing a workload that fails fast (nonzero)
+      // or completes fast (0) rather than staying up.
+      writeState(state);
+      process.stdout.write(`exec-workload:${name}:${rest.join(" ")}\n`);
+      if (exitCode !== 0) {
+        process.stderr.write(`workload exited ${exitCode}\n`);
+      } else if (state.execWorkloadFastExitStopsSandbox) {
+        // Reproduces the ONE shape a quick exit 0 counts as success under
+        // (see isCompletedFastExit, reused verbatim by reviveWorkload): the
+        // workload finished so fast the sandbox itself already settled
+        // Stopped with the boot-completion marker by the time reviveWorkload
+        // probes it.
+        const fresh = readState();
+        fresh.sandboxes[name] = {
+          status: "Stopped",
+          logs: [`exec-workload:${name}:${rest.join(" ")}`],
+          systemLog: [`boot diagnostics for ${name}`, "--- sandbox started ---"],
+        };
+        writeState(fresh);
+      }
+      process.exit(exitCode);
+    }
+    // The ordinary long-lived case: nothing in THIS process's own control
+    // flow ever decides to exit — no scripted timer, no exit knob — the same
+    // "must be killed to end" shape a genuine long-lived server workload
+    // has. It DOES end promptly once the sandbox itself is actually killed
+    // (msb stop's own state update, watched the same way the "run" branch
+    // above watches it, mirroring the real guest: stopping the sandbox ends
+    // every process inside it, including an in-flight exec session) —
+    // MsbCliBackend.stop()'s reap-on-stop path (graceful wait, SIGKILL
+    // escalation if that watch is ever too slow) is exercised exactly like
+    // it always was for bootRunOnce's own attached `msb run` child.
+    writeState(state);
+    process.stdout.write(`exec-workload:${name}:${rest.join(" ")}\n`);
+    const watchInterval = setInterval(() => {
+      const current = readState();
+      const currentSandbox = current.sandboxes[name];
+      if (currentSandbox === undefined || currentSandbox.status !== "Running") {
+        clearInterval(watchInterval);
+        process.exit(0);
+      }
+    }, 50);
+  } else {
+    process.stdout.write(`exec-ok:${rest.join(" ")}\n`);
+    process.exit(0);
+  }
 } else if (cmd === "snapshot" && args[1] === "create") {
   // snapshot create --from-sandbox <sandbox> <name> [--dest-dir <dir>] — msb
   // 0.7.1's own snapshot-store layout (EMPIRICALLY VERIFIED against a real

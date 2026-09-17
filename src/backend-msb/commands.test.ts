@@ -143,6 +143,24 @@ describe("MsbCommands", () => {
     assert.deepEqual(MsbCommands.exec("box-1", ["echo", "hi"]), ["exec", "box-1", "--", "echo", "hi"]);
   });
 
+  it("execWithEnv: no env pairs is identical to exec()'s own argv shape", () => {
+    assert.deepEqual(MsbCommands.execWithEnv("box-1", [], ["echo", "hi"]), ["exec", "box-1", "--", "echo", "hi"]);
+  });
+
+  it("execWithEnv: -e KEY=VALUE pairs appear right after 'exec', before the name, in spec order", () => {
+    assert.deepEqual(
+      MsbCommands.execWithEnv(
+        "box-1",
+        [
+          ["A", "1"],
+          ["B", "2"],
+        ],
+        ["redis-server", "--port", "6379"],
+      ),
+      ["exec", "-e", "A=1", "-e", "B=2", "box-1", "--", "redis-server", "--port", "6379"],
+    );
+  });
+
   it("execStream", () => {
     assert.deepEqual(MsbCommands.execStream("box-1", ["nc", "-l", "-p", "80"]), [
       "exec",

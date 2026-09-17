@@ -4,10 +4,16 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, assert, after, beforeEach } from "../../test/harness.js";
 import { MsbCliBackend } from "./backend.js";
-import { BackendError, TmpfsRootCheckpointError } from "../core/errors.js";
+import { BackendError, TmpfsRootCheckpointError, CheckpointWorkloadCommandMissingError } from "../core/errors.js";
 import type { ContainerSpec } from "../core/model.js";
 import { GenericContainer } from "../core/generic-container.js";
-import { readCheckpointRegistry } from "../core/checkpoint/registry.js";
+import {
+  readCheckpointRegistry,
+  writeCheckpointRegistryAtomic,
+  toCheckpointRegistrySpec,
+  fromCheckpointRegistryEntry,
+  type CheckpointRegistryEntry,
+} from "../core/checkpoint/registry.js";
 import { cacheDir } from "../core/cache-dir.js";
 import type { WaitStrategy } from "../core/wait.js";
 
@@ -554,7 +560,10 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       // First, an ordinary container checkpoints under the name "seeded" —
       // this is the artifact + registry entry a later refused re-checkpoint
       // must not touch.
-      const ordinary = new GenericContainer("fake:latest").withBackend(backend).waitingFor(instantReady());
+      const ordinary = new GenericContainer("fake:latest")
+        .withBackend(backend)
+        .withCommand("sleep", "60")
+        .waitingFor(instantReady());
       await ordinary.start();
       const first = await ordinary.checkpoint("seeded");
       await ordinary.stop();
@@ -609,7 +618,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-ckpt-lock-test-"));
     try {
       const ref = path.join(dir, "checkpoints", "rz-ckpt-lockretry1");
-      const spec = baseSpec("rz-testrun1-ckpt-lock");
+      const spec = baseSpec("rz-testrun1-ckpt-lock", { command: ["sleep", "60"] });
       const handle = await backend.create(spec);
       await backend.start(handle);
 
@@ -646,7 +655,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     try {
       const checkpointsDir = path.join(dir, "checkpoints");
       const ref = path.join(checkpointsDir, "rz-ckpt-pathref01");
-      const spec = baseSpec("rz-testrun1-ckpt-pathref");
+      const spec = baseSpec("rz-testrun1-ckpt-pathref", { command: ["sleep", "60"] });
       const handle = await backend.create(spec);
       await backend.start(handle);
 
@@ -707,6 +716,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     const spec = baseSpec("rz-testrun1-ckpt-1", {
       ports: [{ hostPort: 15999, guestPort: 80 }],
       env: [["FOO", "bar"]],
+      command: ["sleep", "60"],
     });
     const handle = await backend.create(spec);
     await backend.start(handle);
@@ -722,12 +732,17 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the sandbox to be running again after the cycle");
 
     // The initial backend.start() above already logged its own "run" call;
-    // only the last four calls belong to the checkpoint cycle itself.
-    const cycle = state.callLog.slice(-4);
+    // only the last five calls belong to the checkpoint cycle itself — the
+    // reboot's own restore, THEN reviveWorkload's workload-revival exec
+    // (msb restore boots the reboot idle; this backend restarts the
+    // captured workload itself — see MsbCliBackend.bootRestoreOnce's own
+    // doc).
+    const cycle = state.callLog.slice(-5);
     assert.deepEqual(
       cycle.map((c) => c.cmd),
-      ["stop", "snapshotCreate", "rm", "restore"],
-      "expected the checkpoint cycle to drive exactly stop -> snapshot create -> rm -> restore, in order",
+      ["stop", "snapshotCreate", "rm", "restore", "execWorkload"],
+      "expected the checkpoint cycle to drive exactly stop -> snapshot create -> rm -> restore -> the " +
+        "workload-revival exec, in order",
     );
     assert.deepEqual(
       cycle[3]?.args,
@@ -735,6 +750,12 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       "expected the reboot's restore to carry the DISCOVERED artifact ref positional and the ports from " +
         "the original spec — never --disk-only (a disk-scope snapshot rejects it) and never -e: msb " +
         "restore has no env flag at all (see MsbCommands.restore)",
+    );
+    assert.deepEqual(
+      cycle[4]?.args,
+      ["exec", "-e", "FOO=bar", handle.id, "--", "sleep", "60"],
+      "expected the workload-revival exec to carry the original spec's env as -e pairs and its explicit " +
+        "command as the trailing argv",
     );
 
     await backend.stop(handle);
@@ -758,6 +779,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       ports: [{ hostPort: 15998, guestPort: 80 }],
       mounts: [{ hostPath: "/host/config.json", guestPath: "/guest/config.json", readOnly: true }],
       networkDisabled: true,
+      command: ["sleep", "60"],
     });
     const handle = await backend.create(spec);
     await backend.start(handle);
@@ -791,15 +813,17 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
-  // The three tests below exercise MsbCliBackend.bootRestoreOnce directly at
-  // the start() level, on a handle whose spec already carries checkpointRef
-  // — the exact same code path BOTH the internal checkpoint()
+  // The tests below exercise MsbCliBackend.bootRestoreOnce directly at the
+  // start() level, on a handle whose spec already carries checkpointRef —
+  // the exact same code path BOTH the internal checkpoint()
   // stop/snapshot/reboot cycle above and GenericContainer.fromCheckpoint()
   // .start() drive (fromCheckpoint() only ever sets spec.checkpointRef the
   // same way baseSpec's override does here), so covering it here covers
   // both callers without standing up the full checkpoint registry machinery.
 
-  it("start() on a checkpointRef spec supervises msb restore as the detached boot it is: waits for restore's own exit, then polls ls to Running, with no attached child", async () => {
+  // RED-PROOF (a): restore + explicit-command spec => exec child spawned
+  // with the right argv and -e pairs, wait strategy satisfied, stop() reaps.
+  it("start() on a checkpointRef spec supervises msb restore as the detached boot it is, THEN revives its captured workload as a genuine attached exec child", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -809,30 +833,276 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     // whose own CLI process has already exited before the background boot
     // catches up. A one-shot check right after that exit must not be
     // mistaken for either success or failure.
-    const spec = baseSpec("rz-testrun1-restore-detached", { checkpointRef: "/fake/checkpoints/snap_deadbeef" });
+    const spec = baseSpec("rz-testrun1-restore-detached", {
+      checkpointRef: "/fake/checkpoints/snap_deadbeef",
+      env: [["A", "1"], ["B", "2"]],
+      command: ["redis-server", "--port", "6379"],
+    });
     const handle = await backend.create(spec);
 
     await backend.start(handle);
 
     const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
       sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
     };
     assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the restored sandbox to reach Running");
+
+    // `msb restore` itself boots the sandbox idle (see
+    // MsbCliBackend.bootRestoreOnce's own doc) — this backend must have
+    // revived the captured workload itself via a genuine attached `msb
+    // exec` child, with the spec's env as -e pairs and its explicit command
+    // as the trailing argv, in that order.
+    const execCall = state.callLog.filter((c) => c.cmd === "execWorkload").at(-1);
+    assert.deepEqual(
+      execCall?.args,
+      ["exec", "-e", "A=1", "-e", "B=2", handle.id, "--", "redis-server", "--port", "6379"],
+      "expected the workload-revival exec's argv to carry -e KEY=VALUE pairs then the sandbox name then " +
+        "-- <explicit command>",
+    );
+
+    const internal = (backend as unknown as { handles: Map<string, { attached: unknown }> }).handles.get(handle.id);
+    assert.ok(
+      internal?.attached !== undefined,
+      "expected the restored sandbox's handle to carry the workload-revival exec child as its attached " +
+        "process — the same slot bootRunOnce's own attached `msb run` child fills for an ordinary boot",
+    );
+
+    // stop() must reap this attached child exactly like any other: no hang,
+    // no throw, no leftover process.
+    const startedAt = Date.now();
+    await backend.stop(handle);
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs < 3000, `stop() took ${elapsedMs}ms — expected the revived workload to be reaped promptly`);
+    await backend.remove(handle);
+  });
+
+  // RED-PROOF (b): no-command spec + captured-cmdline registry field => exec
+  // uses the captured argv.
+  it("createCheckpoint captures the guest workload cmdline before stopping a no-command sandbox, and a later registry-mediated restore uses it", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.cmdlineCaptureArgv = ["redis-server", "--appendonly", "yes"];
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    // The source spec carries NO explicit command — the image's own default
+    // entrypoint was "running" — so createCheckpoint's pre-stop capture is
+    // the only source for a workload argv.
+    const spec = baseSpec("rz-testrun1-ckpt-capture", { env: [["MODE", "prod"]] });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-capture-entry");
+    const capturedCommand = backend.capturedWorkloadCommand(handle);
+    if (capturedCommand === undefined) {
+      throw new Error("expected createCheckpoint to have captured the guest's own workload cmdline before stopping it");
+    }
+    assert.deepEqual(capturedCommand, ["redis-server", "--appendonly", "yes"]);
+
+    // Persist the registry entry the way GenericContainer.checkpoint(name)
+    // would: spec.command stays null (the source truly had none),
+    // capturedCommand carries the fallback as its own additive field.
+    const entry: CheckpointRegistryEntry = {
+      name: "captured-entrypoint",
+      ref: effectiveRef,
+      backend: "microsandbox",
+      createdIso: new Date().toISOString(),
+      spec: toCheckpointRegistrySpec(handle.spec),
+      capturedCommand,
+    };
+    await writeCheckpointRegistryAtomic(cacheDir(), "captured-entrypoint", entry);
+
+    // A LATER restore, registry-mediated: fromCheckpointRegistryEntry's own
+    // merge (see its own doc) resolves `command` from capturedCommand, since
+    // the registry's own spec.command is null.
+    const read = await readCheckpointRegistry(cacheDir(), "captured-entrypoint");
+    assert.equal(read.kind, "found");
+    if (read.kind !== "found") {
+      return;
+    }
+    const restoredSpec = fromCheckpointRegistryEntry(read.entry);
+    assert.deepEqual(
+      restoredSpec.command,
+      capturedCommand,
+      "expected the reconstructed spec's command to fall back to the captured cmdline",
+    );
+
+    const restoredHandle = await backend.create(restoredSpec);
+    await backend.start(restoredHandle);
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+    const execCall = state.callLog.filter((c) => c.cmd === "execWorkload").at(-1);
+    assert.deepEqual(
+      execCall?.args,
+      ["exec", "-e", "MODE=prod", restoredHandle.id, "--", "redis-server", "--appendonly", "yes"],
+      "expected the workload-revival exec to use the CAPTURED cmdline as its argv, with the checkpoint's own env",
+    );
+
+    await backend.stop(restoredHandle);
+    await backend.remove(restoredHandle);
+    await backend.stop(handle);
+    await backend.remove(handle);
+    await backend.removeCheckpoint(effectiveRef);
+  });
+
+  // RED-PROOF (c): no-command + no captured field => typed error, no idle boot.
+  it("a restore whose spec has no command and no captured cmdline throws CheckpointWorkloadCommandMissingError — never boots idle", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // No command override (baseSpec's default is undefined) and nothing
+    // scripted for state.cmdlineCaptureArgv/cmdlineCaptureFails — the
+    // fixture's own capture-script branch falls through to its "no matching
+    // child" exit 1, exactly like a genuine capture miss.
+    const spec = baseSpec("rz-testrun1-restore-nocapture", { checkpointRef: "/fake/checkpoints/snap_nocapture" });
+    const handle = await backend.create(spec);
+
+    let thrown: unknown;
+    try {
+      await backend.start(handle);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(
+      thrown instanceof CheckpointWorkloadCommandMissingError,
+      `expected CheckpointWorkloadCommandMissingError, got: ${String(thrown)}`,
+    );
+    assert.match((thrown as Error).message, /predates workload-cmdline capture/);
+
+    // Never registered as started — a caller must not treat this as a
+    // successful (if idle) boot.
+    const started = (backend as unknown as { startedNames: Set<string> }).startedNames;
+    assert.equal(started.has(handle.id), false, "expected the failed revival to never register the sandbox as started");
+
+    // The msb-level sandbox itself DID reach Running (msb restore succeeded
+    // — this backend simply refuses to treat that as a usable boot); stop()
+    // must still be a safe no-op over it.
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  // RED-PROOF (d): restore access-denied once then success => boot succeeds
+  // with exactly 2 restore invocations.
+  it("msb restore's Windows access-denied failure on its own snapshot artifact is retried — boot succeeds with exactly 2 restore invocations", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-restore-accessdenied", {
+      checkpointRef: "/fake/checkpoints/snap_accessdenied",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.start(handle);
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the retried restore to bring the sandbox up");
+    const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
+    assert.equal(restoreCalls.length, 2, "expected the refused restore plus exactly one retried restore");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  // RED-PROOF (e): exec child early-nonzero => classified failure (plus the
+  // exit-0 sibling shapes the same "mirror bootRunOnce" classification has).
+  it("the revived workload exec exiting quickly with nonzero is a classified boot failure carrying its output", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-revive-failfast", {
+      checkpointRef: "/fake/checkpoints/snap_revivefail",
+      command: ["bad-command"],
+    });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.execWorkloadExitCode = 127;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: unknown;
+    try {
+      await backend.start(handle);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /exited \(code 127\)/);
+    assert.match(
+      (thrown as Error).message,
+      /workload exited 127/,
+      "expected the exec child's own output to be surfaced",
+    );
+
+    const started = (backend as unknown as { startedNames: Set<string> }).startedNames;
+    assert.equal(started.has(handle.id), false, "expected a failed workload revival to never register the sandbox as started");
+
+    await backend.remove(handle);
+  });
+
+  it("a revived workload exec exiting 0 quickly is STILL a failure unless the sandbox itself confirms a completed fast exit", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-revive-exit0-nomarker", {
+      checkpointRef: "/fake/checkpoints/snap_exit0nomarker",
+      command: ["true"],
+    });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.execWorkloadExitCode = 0;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: unknown;
+    try {
+      await backend.start(handle);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /exited \(code 0\)/);
+
+    await backend.remove(handle);
+  });
+
+  it("a revived workload exec exiting 0 quickly succeeds when the sandbox itself confirms a completed fast exit (the repo's existing fast-exit-completion semantics)", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-revive-exit0-fastexit", {
+      checkpointRef: "/fake/checkpoints/snap_exit0fastexit",
+      command: ["true"],
+    });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.execWorkloadExitCode = 0;
+    seeded.execWorkloadFastExitStopsSandbox = true;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.start(handle); // must not throw
 
     const internal = (backend as unknown as { handles: Map<string, { attached: unknown }> }).handles.get(handle.id);
     assert.equal(
       internal?.attached,
       undefined,
-      "expected a restored sandbox's handle to carry no attached child process — msb itself supervises it, " +
-        "out of process",
+      "expected no live child left to hold onto for a completed fast exit — same as bootRunOnce's own fast-exit branch",
     );
 
-    // Teardown must be a clean no-op over the childless handle — no hang,
-    // no throw, despite there never having been a live process to reap.
-    const startedAt = Date.now();
+    const started = (backend as unknown as { startedNames: Set<string> }).startedNames;
+    assert.equal(started.has(handle.id), true, "expected the fast-exit-completed sandbox to still be registered as started");
+
     await backend.stop(handle);
-    const elapsedMs = Date.now() - startedAt;
-    assert.ok(elapsedMs < 3000, `stop() on a childless restored handle took ${elapsedMs}ms — expected no hang`);
     await backend.remove(handle);
   });
 
@@ -1057,7 +1327,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     if (skipOnWindows()) {
       return;
     }
-    const spec = baseSpec("rz-testrun1-ckpt-rm");
+    const spec = baseSpec("rz-testrun1-ckpt-rm", { command: ["sleep", "60"] });
     const handle = await backend.create(spec);
     await backend.start(handle);
     const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-toremove");
@@ -1076,7 +1346,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     if (skipOnWindows()) {
       return;
     }
-    const spec = baseSpec("rz-testrun1-ckpt-rm-head");
+    const spec = baseSpec("rz-testrun1-ckpt-rm-head", { command: ["sleep", "60"] });
     const handle = await backend.create(spec);
     await backend.start(handle);
     const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-head");
@@ -1241,7 +1511,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     if (skipOnWindows()) {
       return;
     }
-    const spec = baseSpec("rz-testrun1-ckpt-export");
+    const spec = baseSpec("rz-testrun1-ckpt-export", { command: ["sleep", "60"] });
     const handle = await backend.create(spec);
     await backend.start(handle);
     const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-toexport");
@@ -1318,7 +1588,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     if (skipOnWindows()) {
       return;
     }
-    const spec = baseSpec("rz-testrun1-ckpt-import");
+    const spec = baseSpec("rz-testrun1-ckpt-import", { command: ["sleep", "60"] });
     const handle = await backend.create(spec);
     await backend.start(handle);
     const checkpointRef = await backend.createCheckpoint(handle, "rz-ckpt-toimport");

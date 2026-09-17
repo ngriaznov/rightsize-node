@@ -133,6 +133,33 @@ class FakeCheckpointBackend implements SandboxBackend {
   cleanupSync(): void {}
 }
 
+/**
+ * Same fake, but ALSO implements the optional `capturedWorkloadCommand` SPI
+ * — standing in for `MsbCliBackend`'s own real capture — so
+ * `GenericContainer.checkpoint()`'s plumbing (registry write, returned
+ * `Checkpoint.spec`) can be exercised without a real msb binary. Every
+ * `createCheckpoint(handle, ref)` call records `capturedFor`, letting a test
+ * script the answer `capturedWorkloadCommand` gives for that exact handle.
+ */
+class FakeCapturingBackend extends FakeCheckpointBackend {
+  /** Steered per-call: keyed by ref, set right before each createCheckpoint call a test wants captured. */
+  nextCapturedCommand: ReadonlyArray<string> | undefined;
+  capturedByHandle = new Map<string, ReadonlyArray<string>>();
+
+  override async createCheckpoint(handle: SandboxHandle, ref: string): Promise<string> {
+    const effectiveRef = await super.createCheckpoint(handle, ref);
+    if (this.nextCapturedCommand !== undefined) {
+      this.capturedByHandle.set(handle.id, this.nextCapturedCommand);
+      this.nextCapturedCommand = undefined;
+    }
+    return effectiveRef;
+  }
+
+  capturedWorkloadCommand(handle: SandboxHandle): ReadonlyArray<string> | undefined {
+    return this.capturedByHandle.get(handle.id);
+  }
+}
+
 describe("GenericContainer.checkpoint()", () => {
   it("rejects with CheckpointUnsupportedError before any backend call when capabilities.checkpoint is false", async () => {
     const backend = new FakeCheckpointBackend("fake-no-checkpoint", {
@@ -512,6 +539,62 @@ describe("GenericContainer.checkpoint(name) — named checkpoints", () => {
 
       const names = await listCheckpointNames(cacheDirPath);
       assert.deepEqual(names, [], "expected an unnamed checkpoint to never write a registry entry");
+
+      await container.stop();
+    });
+  });
+
+  it("persists a backend-captured workload command as the registry entry's additive capturedCommand field", async () => {
+    await withTempCacheDirEnv(async (cacheDirPath) => {
+      const backend = new FakeCapturingBackend("microsandbox", {
+        hardwareIsolated: true,
+        checkpoint: true,
+        checkpointRestartsWorkload: true,
+      });
+      // No .withCommand(...) — the source container carries no explicit
+      // command, mirroring the one shape MsbCliBackend itself ever attempts
+      // a capture for.
+      const container = new GenericContainer("alpine:3.19").withBackend(backend).waitingFor(instantReady());
+      await container.start();
+      backend.nextCapturedCommand = ["redis-server", "--appendonly", "yes"];
+
+      const cp = await container.checkpoint("captured-entrypoint");
+
+      const read = await readCheckpointRegistry(cacheDirPath, "captured-entrypoint");
+      assert.equal(read.kind, "found");
+      if (read.kind === "found") {
+        assert.deepEqual(read.entry.capturedCommand, ["redis-server", "--appendonly", "yes"]);
+        assert.equal(read.entry.spec.command, null, "expected the pinned spec.command to stay null — the source truly had none");
+      }
+      // The returned Checkpoint's own spec already carries the captured
+      // fallback too, so a SAME-PROCESS fromCheckpoint(cp).start() needs no
+      // registry round trip to revive the right workload.
+      assert.deepEqual(cp.spec.command, ["redis-server", "--appendonly", "yes"]);
+
+      await container.stop();
+    });
+  });
+
+  it("writes no capturedCommand key when the backend never reports one", async () => {
+    await withTempCacheDirEnv(async (cacheDirPath) => {
+      const backend = new FakeCapturingBackend("microsandbox", {
+        hardwareIsolated: true,
+        checkpoint: true,
+        checkpointRestartsWorkload: true,
+      });
+      const container = new GenericContainer("alpine:3.19").withBackend(backend).withCommand("sleep", "60").waitingFor(instantReady());
+      await container.start();
+      // backend.nextCapturedCommand left undefined — an explicit command
+      // needs no capture, the one shape the real MsbCliBackend ever skips it for.
+
+      const cp = await container.checkpoint("explicit-command");
+
+      const read = await readCheckpointRegistry(cacheDirPath, "explicit-command");
+      assert.equal(read.kind, "found");
+      if (read.kind === "found") {
+        assert.equal("capturedCommand" in read.entry, false, "expected no capturedCommand key at all, not one set to undefined");
+      }
+      assert.deepEqual(cp.spec.command, ["sleep", "60"]);
 
       await container.stop();
     });

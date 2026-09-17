@@ -3,7 +3,13 @@ import type { ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { BackendError, PortBindConflictError, UnsupportedByBackendError, TmpfsRootCheckpointError } from "../core/errors.js";
+import {
+  BackendError,
+  PortBindConflictError,
+  UnsupportedByBackendError,
+  TmpfsRootCheckpointError,
+  CheckpointWorkloadCommandMissingError,
+} from "../core/errors.js";
 import { cacheDir } from "../core/cache-dir.js";
 import type { SandboxBackend, SandboxHandle, FollowHandle, NetworkLink, ReaperKillCommand, BackendCapabilities } from "../core/backend.js";
 import type { ContainerSpec, ExecResult } from "../core/model.js";
@@ -23,6 +29,7 @@ import { isSnapshotHeadRemovalRefused } from "./snapshot-rm.js";
 import { undeliveredLines } from "./follow-replay.js";
 import { requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript } from "./network-links.js";
 import { ExecTunnel } from "./exec-tunnel.js";
+import { isRestoreAccessDeniedFailure } from "./restore-access-denied.js";
 
 const FIRST_RUN_PULL_TIMEOUT_MS = 600_000; // a cold pull can be slow
 const READINESS_POLL_MS = 300;
@@ -50,6 +57,25 @@ const COPY_TIMEOUT_MS = 120_000;
 // already confirmed no longer Running. Never a wait-for-content budget: a
 // stopped sandbox's log cannot grow, so the first successful fetch is final.
 const TERMINAL_FETCH_FAILURE_BUDGET_MS = 10_000;
+// How long `reviveWorkload` gives a freshly-spawned workload-revival exec
+// child to prove it isn't an immediate boot failure before treating it as
+// the ordinary long-lived case. Unlike `bootRunOnce`'s own attached child,
+// there is no separate "reached Running" signal to poll for here — the
+// SANDBOX already reports Running regardless of whether this exec succeeds
+// — so a short settle window is what that same exit-vs-success race
+// collapses to when the only observable signal left is the child's own
+// exit. A few multiples of the ordinary poll cadence is plenty: a failing
+// workload (bad command, missing binary, an immediate usage error) exits
+// within milliseconds of spawn, while a genuine long-lived server never
+// exits on its own at all.
+const EXEC_REVIVE_SETTLE_MS = READINESS_POLL_MS * 3;
+// Bounded retry policy for `msb restore` hitting a Windows access-denied
+// failure on its own just-written snapshot artifact (see
+// `isRestoreAccessDeniedFailure`) — a brief file-handle release lag that
+// normally clears within one retry, so several short-backoff attempts cover
+// the real cases without masking a genuinely stuck lock.
+const RESTORE_ACCESS_DENIED_RETRY_LIMIT = 3;
+const RESTORE_ACCESS_DENIED_RETRY_DELAY_MS = 500;
 
 /**
  * The boot failure `start()` heals and retries — carries the `msb run`
@@ -108,6 +134,21 @@ export function isMsbInstallLockActive(output: string): boolean {
 class InstallLockActiveError extends Error {
   constructor(readonly output: string) {
     super(`msb install lock active:\n${output}`);
+  }
+}
+
+/**
+ * Restore-path classified failure for `isRestoreAccessDeniedFailure` — a
+ * Windows-only `msb restore` transient against its own just-written
+ * snapshot artifact (see that function's own doc). Internal to the boot
+ * path, like its siblings above; `bootClassified` owns the bounded-retry
+ * policy. Only ever thrown from `bootRestoreOnce`, since it is a restore
+ * invocation's own failure signature — an ordinary `run` boot never touches
+ * a snapshot artifact at all.
+ */
+class RestoreAccessDeniedError extends Error {
+  constructor(readonly output: string) {
+    super(`msb restore access-denied on its own snapshot artifact:\n${output}`);
   }
 }
 
@@ -244,6 +285,14 @@ interface HandleState {
   attachedExited: boolean;
   resources: ExecTunnel[];
   logTail: string[];
+  // The workload argv `createCheckpoint` captured from this sandbox's guest
+  // — via `captureGuestWorkloadCmdline` — during its MOST RECENT checkpoint
+  // call, when that call's source spec had no explicit `command`. Survives
+  // past that call so `capturedWorkloadCommand()` can hand it back to
+  // `GenericContainer.checkpoint()` for the named-checkpoint registry write;
+  // `undefined` whenever nothing was captured (explicit command, no
+  // checkpoint taken yet, or a capture attempt that itself failed).
+  capturedCommand: string[] | undefined;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -267,6 +316,76 @@ function drainTail(stream: NodeJS.ReadableStream, tail: string[]): Promise<void>
     });
     rl.on("close", () => resolveDrain());
   });
+}
+
+/**
+ * Busybox-ash-compatible: finds the first non-kernel child of PID 1 in the
+ * guest and prints its `/proc/<pid>/cmdline` RAW — NUL-separated with a
+ * trailing NUL, the kernel's own on-disk shape, never re-encoded by this
+ * script itself — to stdout, exit 0; exits 1 if none is found. Walks
+ * every `/proc/<pid>/stat` in NUMERIC pid order (`ls | sort -n`, since a bare
+ * shell glob sorts lexically — "10" before "2" — which is wrong for "the
+ * first child") and, for each, reads field 4 (`ppid`, 1-indexed per
+ * `/proc/pid/stat`'s own `pid (comm) state ppid ...` layout), skipping any
+ * whose `ppid` isn't `1`. `comm` is split out via the FIRST `(` and the LAST
+ * `)` (`${st#*(}` / `${comm%)*}`, both plain POSIX parameter expansion, no
+ * `extglob` needed) rather than a naive single-`(`/`)` split, since a
+ * process name may itself contain spaces (or, in principle, parens) — the
+ * same robustness a greedy sed capture between the first "(" and the last
+ * ")" would get. Two names are excluded even though
+ * their `ppid` may show `1`: the guest's own init (`init.krun`) and any
+ * bracketed kernel-thread name (`[kworker/0:1]`, `[ksoftirqd/0]`, ...) — the
+ * shape every kernel thread's `comm` renders as. Read by `MsbCliBackend`'s
+ * own `createCheckpoint`, BEFORE it stops the source sandbox — see that
+ * method's own doc — via a plain `exec`, never anything backend-specific
+ * beyond that: this is guest-side shell, not msb CLI surface.
+ */
+const CAPTURE_WORKLOAD_CMDLINE_SCRIPT = [
+  // A marker comment, not functional shell — lets the msb fixture (and any
+  // future test double) recognize this exact exec call by its script
+  // content rather than guessing from argv shape alone.
+  "# rightsize:capture-workload-cmdline",
+  "for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$' | sort -n); do",
+  "  st=$(cat /proc/$pid/stat 2>/dev/null) || continue",
+  "  rest=${st##*) }",
+  "  set -- $rest",
+  "  ppid=$2",
+  "  if [ \"$ppid\" != \"1\" ]; then continue; fi",
+  "  comm=${st#*(}",
+  "  comm=${comm%)*}",
+  "  case \"$comm\" in",
+  "    init.krun|\\[*\\]) continue ;;",
+  "  esac",
+  "  cat /proc/$pid/cmdline",
+  "  exit 0",
+  "done",
+  "exit 1",
+].join("\n");
+
+/**
+ * Parses `CAPTURE_WORKLOAD_CMDLINE_SCRIPT`'s stdout — the discovered
+ * process's raw `/proc/<pid>/cmdline` bytes, NUL-separated with a trailing
+ * NUL — into an argv. `captureGuestWorkloadCmdline` fetches this through the
+ * ordinary `exec()` (`invoke()`'s line-based reconstruction, not
+ * `fetchStdoutExact`'s byte-exact one — see that function's own doc), which
+ * appends a trailing `\n` to any non-empty output; since the guest script's
+ * own output never contains a real newline of its own (it is exactly the
+ * NUL-joined cmdline bytes), that single appended `\n` is always the whole
+ * of `invoke()`'s own last "line" and is stripped here before splitting,
+ * rather than being read back as a bogus trailing argv element. `undefined`
+ * on anything that isn't a clean, non-empty argv after that: empty output
+ * (the script found no matching child, exited 1, or the guest's own cmdline
+ * was itself empty) or content that splits into zero non-empty tokens. Never
+ * throws — see `captureGuestWorkloadCmdline`'s own doc on why a capture
+ * failure must never fail the checkpoint that triggered it.
+ */
+function parseCapturedWorkloadCmdline(stdout: string): string[] | undefined {
+  if (stdout.length === 0) {
+    return undefined;
+  }
+  const withoutTrailingNewline = stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
+  const parts = withoutTrailingNewline.split("\0").filter((s) => s.length > 0);
+  return parts.length > 0 ? parts : undefined;
 }
 
 /**
@@ -326,7 +445,7 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   async create(spec: ContainerSpec): Promise<SandboxHandle> {
-    this.handles.set(spec.name, { attached: undefined, attachedExited: false, resources: [], logTail: [] });
+    this.handles.set(spec.name, { attached: undefined, attachedExited: false, resources: [], logTail: [], capturedCommand: undefined });
     return { id: spec.name, spec };
   }
 
@@ -438,6 +557,33 @@ export class MsbCliBackend implements SandboxBackend {
               `host.\nfirst attempt:\n${first.output}\nafter retry:\n${second.output}`,
           );
         }
+      }
+      if (first instanceof RestoreAccessDeniedError) {
+        // Windows-only in practice (see isRestoreAccessDeniedFailure's own
+        // doc): a brief file-handle release lag on the just-written snapshot
+        // artifact right after the source sandbox's own teardown. A short,
+        // bounded number of retries covers it without masking a genuinely
+        // stuck lock — only ever reached from bootRestoreOnce, since this
+        // signature is specific to a restore invocation's own artifact read.
+        let last = first;
+        for (let attempt = 1; attempt <= RESTORE_ACCESS_DENIED_RETRY_LIMIT; attempt++) {
+          await sleep(RESTORE_ACCESS_DENIED_RETRY_DELAY_MS);
+          try {
+            await this.bootOnce(msbPath, handle, state);
+            return;
+          } catch (again) {
+            if (!(again instanceof RestoreAccessDeniedError)) {
+              throw again;
+            }
+            last = again;
+          }
+        }
+        throw new BackendError(
+          `msb restore for sandbox ${handle.id} hit a Windows access-denied failure on its just-written ` +
+            `snapshot artifact ${RESTORE_ACCESS_DENIED_RETRY_LIMIT} times in a row — this is normally a ` +
+            `brief file-handle release lag that clears within one retry, so a failure held this long looks ` +
+            `like a genuinely stuck lock on this host.\n${last.output}`,
+        );
       }
       if (!(first instanceof ImageCacheCorruptionError)) {
         throw first;
@@ -634,14 +780,20 @@ export class MsbCliBackend implements SandboxBackend {
    *      `stop`, and one `ls` hiccup during the readiness window must not
    *      turn into a spurious restore failure.
    *
-   * No child is ever left behind, on success or failure: the restore
-   * process has already exited either way, msb itself (out-of-process) is
-   * now the sandbox's own supervisor, and there is nothing here left to
-   * hold onto — `state.attached` is never touched by this method, so it
-   * stays `undefined` for every restored sandbox, and `stop()`'s
-   * attached-child handling (exit-based death detection, the SIGKILL
-   * escalation) is therefore a no-op for it by construction, exactly like
-   * the ordinary fast-exit success case in `bootRunOnce`.
+   * The `msb restore` CLI process itself is never held onto — it has already
+   * exited by the time phase 2 even starts, and msb itself (out-of-process)
+   * is the sandbox's own supervisor from here on, the same as it always was.
+   * But a restored sandbox reaches Running with ONLY its guest agent inside
+   * — the captured workload never re-executes on its own (EMPIRICALLY
+   * VERIFIED against msb 0.7.1) — so once Running is confirmed, this method
+   * calls `reviveWorkload` to start it itself BEFORE returning: THAT call is
+   * what populates `state.attached` (a workload-revival `msb exec` child,
+   * not the restore CLI process), and `stop()`'s ordinary attached-child
+   * handling (exit-based death detection, the SIGKILL escalation) applies to
+   * IT exactly as it always did for `bootRunOnce`'s own attached `msb run`
+   * child. See `reviveWorkload`'s own doc for the full revival contract,
+   * including the typed error a checkpoint predating workload-cmdline
+   * capture throws instead of booting silently idle.
    */
   private async bootRestoreOnce(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
     const argv = MsbCommands.restore(handle.spec);
@@ -688,6 +840,9 @@ export class MsbCliBackend implements SandboxBackend {
     if (isPortBindConflictOutput(output)) {
       throw new PortBindConflictError(`msb restore for sandbox ${handle.id} could not bind a host port: ${output}`);
     }
+    if (isRestoreAccessDeniedFailure(output)) {
+      throw new RestoreAccessDeniedError(output);
+    }
     if (exitCode !== 0) {
       throw new BackendError(
         `msb restore for sandbox ${handle.id} exited (code ${exitCode}) — check the snapshot ref and ` +
@@ -713,6 +868,14 @@ export class MsbCliBackend implements SandboxBackend {
       if (ls !== undefined) {
         lastSeenStatus = statusOf(ls.stdout, handle.id);
         if (lastSeenStatus === "Running") {
+          // `msb restore` boots a restored sandbox with only its guest agent
+          // inside — the captured workload never re-runs on its own (see
+          // this method's own doc and `reviveWorkload`'s) — so this backend
+          // starts it itself before registering the boot as complete. A
+          // `reviveWorkload` failure propagates unclassified: never register
+          // `startedNames` for a sandbox whose workload never actually came
+          // up.
+          await this.reviveWorkload(msbPath, handle, state);
           if (!handle.spec.keepAlive) {
             this.startedNames.add(handle.id);
           }
@@ -770,6 +933,140 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
+   * Starts the workload a restore itself never re-runs. EMPIRICALLY VERIFIED
+   * against msb 0.7.1: a restored sandbox reaches Running with ONLY its
+   * guest agent inside (`guest ps` shows `/init.krun` and kernel threads —
+   * the captured workload command does not re-execute; `msb start`/`msb
+   * logs` on such a sandbox are equally idle/empty). Only ever called from
+   * `bootRestoreOnce`, once it has confirmed Running — see this class's own
+   * doc on `bootRestoreOnce`.
+   *
+   * Spawns a LONG-LIVED, attached `msb exec [-e K=V]... <name> -- <argv>`
+   * session (`MsbCommands.execWithEnv`, env from `handle.spec.env` — a
+   * restore's own `msb restore` has no `-e`/`--env` flag at all, so this exec
+   * is the one place a restored sandbox's guest ever sees it again) — this
+   * becomes the sandbox's own workload from here on, and exec sessions are
+   * exactly what msb's own log capture records (the primary session's
+   * stdout/stderr land in `exec.log`, served by `msb logs`/`-f` — see
+   * `MsbCommands.exec`'s own doc). This exec child slots into the EXACT SAME
+   * `state.attached` role `bootRunOnce`'s own attached `msb run` child fills
+   * for an ordinary boot: child-exit-based death detection, reap-on-stop
+   * (`stop()`'s SIGKILL escalation), and every other attached-child teardown
+   * semantic apply to it unchanged — the detached-restore round left that
+   * slot merely optional, never removed it.
+   *
+   * `handle.spec.command` is ALREADY the fully-resolved workload argv by the
+   * time this runs, in priority order: an explicit command the source
+   * container carried, or — when it had none — the guest cmdline
+   * `createCheckpoint` captured at checkpoint time, merged in by
+   * `createCheckpoint` itself (for its own immediate reboot) or by
+   * `fromCheckpointRegistryEntry` (for a registry-mediated restore, same or
+   * later process — see both functions' own docs). `undefined` here means
+   * NEITHER source exists — an old registry entry predating capture, or one
+   * whose capture attempt itself failed — so this throws
+   * `CheckpointWorkloadCommandMissingError` itself rather than depending on
+   * a caller to have checked first: never boot a restored sandbox silently
+   * idle.
+   *
+   * The exec child gets a brief settle window (`EXEC_REVIVE_SETTLE_MS`) to
+   * prove it isn't an immediate boot failure before this returns success —
+   * mirroring `bootRunOnce`'s own exit-vs-Running race, except a restore's
+   * exec session has no separate "Running" signal of its own to poll for
+   * (the SANDBOX already reports Running regardless of whether this exec
+   * succeeds), so a settle window is what that race collapses to here. An
+   * exit observed within the window is classified exactly like
+   * `bootRunOnce`'s own early exit: exit 0 counts as success only when
+   * `isCompletedFastExit` ALSO confirms it (the sandbox itself settled
+   * Stopped with the boot-completion marker — the repo's existing fast-exit-
+   * completion semantics, reused verbatim); any other exit — nonzero, or
+   * exit 0 without that confirmation — throws a `BackendError` carrying the
+   * exec child's own output, the same failure shape an attached run's early
+   * exit already has.
+   */
+  private async reviveWorkload(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
+    const command = handle.spec.command;
+    if (command === undefined) {
+      throw new CheckpointWorkloadCommandMissingError(handle.spec.checkpointRef ?? handle.id);
+    }
+
+    state.logTail = [];
+    const argv = MsbCommands.execWithEnv(handle.id, handle.spec.env, command);
+    const child = spawn(msbPath, argv, { stdio: [CLOSED_STDIN, "pipe", "pipe"] });
+    const stdoutDone = drainTail(child.stdout, state.logTail);
+    const stderrDone = drainTail(child.stderr, state.logTail);
+
+    let exited: { code: number | null } | undefined;
+    child.once("exit", (code) => {
+      exited = { code };
+      state.attachedExited = true;
+    });
+
+    const settleDeadline = Date.now() + EXEC_REVIVE_SETTLE_MS;
+    while (exited === undefined && Date.now() < settleDeadline) {
+      await sleep(READINESS_POLL_MS);
+    }
+
+    if (exited === undefined) {
+      // Stayed up through the whole settle window — the ordinary long-lived
+      // case. Slots into state.attached exactly like bootRunOnce's own
+      // attached child.
+      state.attached = child;
+      return;
+    }
+
+    await Promise.all([stdoutDone, stderrDone]);
+    const output = state.logTail.join("\n");
+    if (exited.code === 0 && (await this.isCompletedFastExit(msbPath, handle.id))) {
+      // Mirrors bootRunOnce's own fast-exit success case: the workload ran to
+      // completion so quickly this settle window caught its natural exit
+      // rather than a crash. No live child left to hold onto — state.attached
+      // stays undefined, same as bootRunOnce's own fast-exit branch.
+      return;
+    }
+    throw new BackendError(
+      `msb exec for sandbox ${handle.id}'s revived workload exited (code ${exited.code ?? "unknown"}) before ` +
+        `staying up — check the workload command and its output below:\n${output}`,
+    );
+  }
+
+  /**
+   * Best-effort: execs `CAPTURE_WORKLOAD_CMDLINE_SCRIPT` in `handle`'s guest
+   * and parses its stdout via `parseCapturedWorkloadCmdline`. Only ever
+   * called from `createCheckpoint`, BEFORE it stops the sandbox (see that
+   * method's own doc), and only when `handle.spec.command` is undefined — an
+   * explicit command needs no capture. Never throws: an exec failure
+   * (nonzero exit, the exec channel itself erroring) and unparseable output
+   * both resolve `undefined` rather than failing the checkpoint — the
+   * captured cmdline is a best-effort fallback, and its absence is fully
+   * handled later, at restore time (`reviveWorkload` throws
+   * `CheckpointWorkloadCommandMissingError` when neither an explicit nor a
+   * captured command exists).
+   */
+  private async captureGuestWorkloadCmdline(handle: SandboxHandle): Promise<string[] | undefined> {
+    try {
+      const result = await this.exec(handle, ["sh", "-c", CAPTURE_WORKLOAD_CMDLINE_SCRIPT]);
+      if (result.exitCode !== 0) {
+        return undefined;
+      }
+      return parseCapturedWorkloadCmdline(result.stdout);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * SPI implementation of `SandboxBackend.capturedWorkloadCommand` — see its
+   * own doc. Reads back whatever `createCheckpoint` most recently stashed on
+   * this sandbox's `HandleState` (keyed by name, so it survives the
+   * stop/snapshot/reboot cycle's own handle-object churn); `undefined` if
+   * this sandbox was never checkpointed, or its checkpoint needed no
+   * capture, or the capture attempt failed.
+   */
+  capturedWorkloadCommand(handle: SandboxHandle): ReadonlyArray<string> | undefined {
+    return this.handles.get(handle.id)?.capturedCommand;
+  }
+
+  /**
    * The fast-exit post-mortem classification: only ever consulted from
    * `bootRunOnce` above, and only once the attached `msb run` child has already
    * exited with code 0 before Running was observed. msb 0.6.16's
@@ -812,11 +1109,16 @@ export class MsbCliBackend implements SandboxBackend {
     }
     await invoke(msbPath, MsbCommands.stop(handle.id), STOP_TIMEOUT_MS).catch(() => {});
     const attached = state?.attached;
-    // The attached `msb run` child is msb's own supervisor for this sandbox:
-    // it stays alive for the sandbox's entire lifetime and only exits once
-    // the `msb stop` call just above lands, so the common path here is
-    // "attach a listener, then observe the exit that our own stop just
-    // caused." state.attachedExited exists for the other case: if the child
+    // The attached child is either an ordinary boot's `msb run` process —
+    // msb's own supervisor for this sandbox, staying alive for its entire
+    // lifetime — or, for a restored sandbox, the `msb exec` session
+    // `reviveWorkload` spawned to revive its captured workload (msb itself,
+    // out-of-process, is the actual supervisor there; this exec child is
+    // just the workload session riding inside it). Either way it stays alive
+    // until the sandbox itself stops, and only exits once the `msb stop`
+    // call just above lands, so the common path here is "attach a listener,
+    // then observe the exit that our own stop just caused." state.attachedExited
+    // exists for the other case: if the child
     // had already died before this method ever ran (crashed, or killed by
     // something external), start()'s own listener already flipped it, and
     // Node never replays a past "exit" event to a listener attached after
@@ -893,14 +1195,26 @@ export class MsbCliBackend implements SandboxBackend {
    * name/ports/memory (via a spec identical to `handle.spec` except
    * `checkpointRef` set to the EFFECTIVE ref this method discovers, below —
    * env is no longer threaded through at all, see `MsbCommands.restore`)
-   * reproduces the exact same observable contract. `bootRestoreOnce` never
-   * touches `state.attached` at all (see its own doc — a restored sandbox
-   * has no attached child, ever, not even transiently); nothing about
+   * reproduces the exact same observable contract. Nothing about
    * `this.handles`/`startedNames` or the reaping ledger changes, since the
-   * name never changed. Its workload restarts
-   * from scratch (the VM reboots), which is why
-   * `capabilities.checkpointRestartsWorkload` is `true` here and the generic
-   * layer re-runs the wait strategy after this returns.
+   * name never changed. Its workload restarts from scratch (the VM
+   * reboots), which is why `capabilities.checkpointRestartsWorkload` is
+   * `true` here and the generic layer re-runs the wait strategy after this
+   * returns — AFTER `bootRestoreOnce` has already revived the workload
+   * itself via `reviveWorkload` (see that method's own doc): `msb restore`
+   * boots the reboot idle, only the guest agent inside, so `bootRestoreOnce`
+   * no longer leaves `state.attached` untouched the way it did before this
+   * revival step existed — it now carries the workload-revival exec child,
+   * the same attached-child slot `bootRunOnce`'s own `msb run` child fills
+   * for an ordinary boot.
+   *
+   * Before stopping the source sandbox, this also best-effort captures its
+   * guest workload cmdline (`captureGuestWorkloadCmdline`) when
+   * `handle.spec.command` is undefined — the image's own default entrypoint
+   * was running, so there is no explicit command for `reviveWorkload` to
+   * fall back on at either this method's own immediate reboot or a later,
+   * registry-mediated restore. See that method's own doc for why a capture
+   * failure never fails the checkpoint itself.
    *
    * If the snapshot step fails, the sandbox is left stopped — no
    * best-effort restart, since that restart would itself be the broken `msb
@@ -937,6 +1251,23 @@ export class MsbCliBackend implements SandboxBackend {
       throw new TmpfsRootCheckpointError();
     }
     const msbPath = await this.msbPath();
+    const state = this.handles.get(handle.id);
+    if (state === undefined) {
+      throw new BackendError(`no handle state for sandbox '${handle.id}' — create() was never called for it`);
+    }
+
+    // Guest cmdline capture — BEFORE stopping the source sandbox (see
+    // captureGuestWorkloadCmdline's own doc) — only when there is no
+    // explicit command for a restore to fall back on later. Best-effort: a
+    // capture failure never fails the checkpoint itself (captureGuestWorkloadCmdline
+    // already swallows it into `undefined`); its absence only surfaces
+    // later, at restore time, as CheckpointWorkloadCommandMissingError.
+    // Stashed on `state` (keyed by sandbox name, so it survives this
+    // method's own remove+reboot churn below) for `capturedWorkloadCommand()`
+    // to hand back to `GenericContainer.checkpoint()` afterward.
+    const capturedCommand = handle.spec.command === undefined ? await this.captureGuestWorkloadCmdline(handle) : undefined;
+    state.capturedCommand = capturedCommand;
+
     await this.stop(handle);
 
     // A path ref (see checkpoint/ref.ts) hands msb the ref's own basename as
@@ -971,11 +1302,15 @@ export class MsbCliBackend implements SandboxBackend {
 
     await invoke(msbPath, MsbCommands.rm(handle.id), STOP_TIMEOUT_MS).catch(() => {});
 
-    const state = this.handles.get(handle.id);
-    if (state === undefined) {
-      throw new BackendError(`no handle state for sandbox '${handle.id}' — create() was never called for it`);
-    }
-    const rebootHandle: SandboxHandle = { id: handle.id, spec: { ...handle.spec, checkpointRef: effectiveRef } };
+    // `command` resolves the same way `fromCheckpointRegistryEntry` resolves
+    // it for a later, registry-mediated restore: the source's own explicit
+    // command first, the guest cmdline just captured above as the fallback —
+    // so `reviveWorkload`, inside the reboot this triggers next, already has
+    // the fully-resolved workload argv without any restore-time lookup.
+    const rebootHandle: SandboxHandle = {
+      id: handle.id,
+      spec: { ...handle.spec, checkpointRef: effectiveRef, command: handle.spec.command ?? capturedCommand },
+    };
     try {
       await this.bootClassified(msbPath, rebootHandle, state);
     } catch (err) {

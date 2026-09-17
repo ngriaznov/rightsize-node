@@ -175,6 +175,40 @@ describe("readCheckpointRegistry", () => {
       assert.deepEqual(read.entry, entry);
     }
   });
+
+  it("resolves 'found' for a pre-existing entry with no capturedCommand key at all — additive and optional, an old entry must not be treated as corrupt", async () => {
+    const dir = await makeTempCacheDir();
+    await fs.mkdir(checkpointsDir(dir), { recursive: true });
+    // Hand-written, deliberately WITHOUT capturedCommand — the exact shape
+    // every registry entry written before this field existed has on disk.
+    const oldEntry = baseEntry();
+    await fs.writeFile(checkpointRegistryPath(dir, oldEntry.name), JSON.stringify(oldEntry));
+    const read = await readCheckpointRegistry(dir, oldEntry.name);
+    assert.equal(read.kind, "found");
+    if (read.kind === "found") {
+      assert.equal("capturedCommand" in read.entry, false);
+    }
+  });
+
+  it("resolves 'found' and preserves capturedCommand for an entry that carries it", async () => {
+    const dir = await makeTempCacheDir();
+    const entry = baseEntry({ capturedCommand: ["redis-server", "--appendonly", "yes"] });
+    await writeCheckpointRegistryAtomic(dir, entry.name, entry);
+    const read = await readCheckpointRegistry(dir, entry.name);
+    assert.equal(read.kind, "found");
+    if (read.kind === "found") {
+      assert.deepEqual(read.entry.capturedCommand, ["redis-server", "--appendonly", "yes"]);
+    }
+  });
+
+  it("resolves 'corrupt' when capturedCommand is present but not an array of strings", async () => {
+    const dir = await makeTempCacheDir();
+    await fs.mkdir(checkpointsDir(dir), { recursive: true });
+    const entry = { ...baseEntry(), capturedCommand: "not-an-array" };
+    await fs.writeFile(checkpointRegistryPath(dir, entry.name), JSON.stringify(entry));
+    const read = await readCheckpointRegistry(dir, entry.name);
+    assert.equal(read.kind, "corrupt");
+  });
 });
 
 describe("writeCheckpointRegistryAtomic / removeCheckpointRegistryFile", () => {
@@ -302,5 +336,29 @@ describe("toCheckpointRegistrySpec / fromCheckpointRegistryEntry", () => {
       original.ports.map((p) => p.guestPort),
     );
     assert.equal(reconstructed.memoryLimitMb, original.memoryLimitMb);
+  });
+
+  it("fromCheckpointRegistryEntry falls back to capturedCommand when spec.command is null", () => {
+    const entry = baseEntry({
+      spec: { env: {}, command: null, exposedPorts: [], memoryLimitMb: null },
+      capturedCommand: ["redis-server", "--appendonly", "yes"],
+    });
+    const spec = fromCheckpointRegistryEntry(entry);
+    assert.deepEqual(spec.command, ["redis-server", "--appendonly", "yes"]);
+  });
+
+  it("fromCheckpointRegistryEntry prefers the explicit spec.command over capturedCommand when both are present", () => {
+    const entry = baseEntry({
+      spec: { env: {}, command: ["sleep", "60"], exposedPorts: [], memoryLimitMb: null },
+      capturedCommand: ["this-must-be-ignored"],
+    });
+    const spec = fromCheckpointRegistryEntry(entry);
+    assert.deepEqual(spec.command, ["sleep", "60"]);
+  });
+
+  it("fromCheckpointRegistryEntry leaves command undefined when neither spec.command nor capturedCommand is present", () => {
+    const entry = baseEntry({ spec: { env: {}, command: null, exposedPorts: [], memoryLimitMb: null } });
+    const spec = fromCheckpointRegistryEntry(entry);
+    assert.equal(spec.command, undefined);
   });
 });

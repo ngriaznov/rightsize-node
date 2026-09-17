@@ -12,6 +12,7 @@ import {
   TmpfsRootExceedsMemoryError,
   NetworkDisabledConflictError,
   TmpfsRootCheckpointError,
+  CheckpointWorkloadCommandMissingError,
 } from "./errors.js";
 import type { ContainerSpec, FileMount } from "./model.js";
 
@@ -177,6 +178,17 @@ describe("TmpfsRootCheckpointError", () => {
     assert.ok(err instanceof Error);
     assert.equal(err.name, "TmpfsRootCheckpointError");
     assert.match(err.message, /withTmpfsRoot/);
+  });
+});
+
+describe("CheckpointWorkloadCommandMissingError", () => {
+  it("is an Error with the right name, carries the ref, and names it in the message", () => {
+    const err = new CheckpointWorkloadCommandMissingError("/cache/checkpoints/rz-source-1/snap_deadbeef");
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "CheckpointWorkloadCommandMissingError");
+    assert.equal(err.ref, "/cache/checkpoints/rz-source-1/snap_deadbeef");
+    assert.match(err.message, /rz-source-1\/snap_deadbeef/);
+    assert.match(err.message, /predates workload-cmdline capture/);
   });
 });
 

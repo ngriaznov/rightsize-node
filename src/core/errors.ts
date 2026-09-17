@@ -380,3 +380,32 @@ export class TmpfsRootCheckpointError extends Error {
     this.name = "TmpfsRootCheckpointError";
   }
 }
+
+/**
+ * Thrown restoring a microsandbox checkpoint whose source container had no
+ * explicit command (the image's own default entrypoint was running) and
+ * whose registry entry carries no captured workload cmdline either —
+ * `msb restore` boots a restored sandbox with only its guest agent inside
+ * and never re-runs anything on its own (EMPIRICALLY VERIFIED against msb
+ * 0.7.1 — see `MsbCliBackend.bootRestoreOnce`'s own doc), so without EITHER
+ * source this library has no workload argv left to revive. Thrown instead of
+ * silently booting the sandbox idle — the checkpoint either predates
+ * workload-cmdline capture, or its capture attempt failed at checkpoint time
+ * (see `CheckpointRegistryEntry.capturedCommand`'s own doc on why a capture
+ * failure never fails the checkpoint that created it, only a later restore
+ * of it). Only ever thrown by the microsandbox backend.
+ */
+export class CheckpointWorkloadCommandMissingError extends Error {
+  constructor(
+    /** The checkpoint ref being restored. */
+    readonly ref: string,
+  ) {
+    super(
+      `sandbox restore from checkpoint '${ref}' has no explicit command and no captured workload cmdline in ` +
+        "its registry entry — this checkpoint predates workload-cmdline capture, or its capture attempt " +
+        "failed at checkpoint time, so there is no workload argv left to revive. Re-checkpoint the source " +
+        "container under a build that captures one.",
+    );
+    this.name = "CheckpointWorkloadCommandMissingError";
+  }
+}

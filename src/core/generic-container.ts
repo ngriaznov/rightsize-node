@@ -1174,6 +1174,12 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       }
       await this.waitStrategy.waitUntilReady(this.asWaitTarget());
     }
+    // The workload argv the backend captured from the guest during the
+    // createCheckpoint() call just above, when `handle.spec.command` was
+    // undefined — see `SandboxBackend.capturedWorkloadCommand`'s own doc.
+    // `undefined` on every backend that never captures one (docker, or msb
+    // when the source container already carried an explicit command).
+    const capturedCommand = backend.capturedWorkloadCommand?.(handle);
     if (name !== undefined) {
       // Only after the backend checkpoint above has actually succeeded — a
       // failed createCheckpoint() already threw, so a registry entry is
@@ -1184,10 +1190,20 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
         backend: backend.name,
         createdIso: new Date().toISOString(),
         spec: toCheckpointRegistrySpec(handle.spec),
+        ...(capturedCommand !== undefined ? { capturedCommand } : {}),
       };
       await writeCheckpointRegistryAtomic(cacheDir(), name, entry);
     }
-    return { ref: effectiveRef, backend: backend.name, spec: handle.spec };
+    // `handle.spec.command` already covers an explicit command; only
+    // substitute the captured fallback when the source had none, so a later
+    // `fromCheckpoint(cp).start()` on THIS in-memory `Checkpoint` — unnamed
+    // or named, same process or not — already carries the fully-resolved
+    // workload argv a restore-side backend needs to revive it, the same
+    // merge `fromCheckpointRegistryEntry` applies for a registry-mediated
+    // restore.
+    const effectiveSpec: ContainerSpec =
+      handle.spec.command !== undefined || capturedCommand === undefined ? handle.spec : { ...handle.spec, command: capturedCommand };
+    return { ref: effectiveRef, backend: backend.name, spec: effectiveSpec };
   }
 
   /**

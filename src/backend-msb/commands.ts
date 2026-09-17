@@ -260,6 +260,31 @@ export const MsbCommands = {
     return ["exec", name, "--", ...cmd];
   },
 
+  /**
+   * `msb exec -e KEY=VALUE... <name> -- <cmd...>` — the workload-revival exec
+   * variant `MsbCliBackend.reviveWorkload` spawns to restart a restored
+   * sandbox's captured workload with its ORIGINAL env (a restore's own `msb
+   * restore` has no `-e`/`--env` flag at all — see `restore()`'s own doc —
+   * so this is the one place that env reaches a restored sandbox's guest).
+   * Distinct from the plain `exec()` builder above, which every other
+   * one-shot exec call this backend makes (the `nc` probe, `/etc/hosts`
+   * alias install, `mkdir -p`, ...) uses and which never carries env — those
+   * calls have no reason to widen the guest command's environment, and
+   * `msb exec` accepts `-e` at all only because a genuine workload restart
+   * needs it. `-e` is repeatable (mirrors `run()`'s own `-e`) and is emitted
+   * right after `exec`, before the sandbox NAME positional — the same
+   * relative placement `run()` gives its own `-e` flags among its other
+   * options, ahead of the trailing positional(s).
+   */
+  execWithEnv(name: string, env: ReadonlyArray<readonly [string, string]>, cmd: readonly string[]): string[] {
+    const argv: string[] = ["exec"];
+    for (const [key, value] of env) {
+      argv.push("-e", `${key}=${value}`);
+    }
+    argv.push(name, "--", ...cmd);
+    return argv;
+  },
+
   execStream(name: string, cmd: readonly string[]): string[] {
     return ["exec", "--stream", name, "--", ...cmd];
   },

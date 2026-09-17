@@ -97,6 +97,46 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `minio/minio` repository only, ignoring any registry host), so both
   `quay.io/minio/minio:<tag>` and `minio/minio:<tag>` overrides keep working
   unchanged.
+- **Restored microsandbox containers now have their workload restarted by
+  rightsize itself, via an `msb exec` session.** EMPIRICALLY VERIFIED against
+  msb 0.7.1: `msb restore` boots a restored sandbox with ONLY its guest agent
+  inside — the captured workload never re-executes on its own (`msb start`/
+  `msb logs` against such a sandbox are equally idle/empty). This broke the
+  checkpoint contract for every restore on this backend: a restored container
+  behaved as though nothing had ever run in it. Both the internal
+  `checkpoint()` stop/snapshot/reboot cycle and `GenericContainer
+  .fromCheckpoint().start()` now revive the workload themselves the instant a
+  restore reaches Running, spawning a long-lived, attached `msb exec [-e
+  KEY=VALUE]... <name> -- <argv>` session with the checkpoint's own env — the
+  wait strategy runs only after that exec is spawned. This exec child slots
+  into the same attached-child role an ordinary boot's `msb run` process
+  fills: child-exit-based death detection, reap-on-stop, and every other
+  attached-child teardown semantic apply to it unchanged. The workload argv
+  comes from the checkpoint's own explicit command when the source container
+  had one; when it did not (the image's own default entrypoint was running),
+  `checkpoint()` now also captures that entrypoint's cmdline from the guest
+  immediately before stopping the source sandbox, and restore falls back to
+  it. That captured cmdline is stored as `capturedCommand`, an ADDITIVE and
+  OPTIONAL field on a named checkpoint's registry entry — old registry
+  entries without it keep reading fine. A checkpoint that predates
+  workload-cmdline capture (or whose capture attempt itself failed) and also
+  carries no explicit command now throws `CheckpointWorkloadCommandMissingError`
+  at restore time rather than silently booting the sandbox idle. No public
+  API changes: `Checkpoint`, `ContainerSpec`, and the checkpoint registry file
+  format are all unchanged and stay backward-compatible.
+- **`msb restore` hitting a Windows file-handle-release-lag failure on its
+  own just-written snapshot artifact is now retried.** Observed on Windows CI
+  immediately after the source sandbox's own teardown in the checkpoint
+  cycle: `msb restore` intermittently fails with exit 1 and `error: io
+  error: Access is denied. (os error 5)` — msb's own docs describe deferred
+  file-handle release on Windows, and the snapshot artifact `msb restore`
+  was asked to read can still be mid-release for a brief window right after
+  it was written. This backend now classifies that specific output shape
+  (matching `"Access is denied"` together with `"io error"`/`"os error 5"`
+  conservatively) as a retryable transient of the restore invocation and
+  retries it a bounded number of times with a short backoff, mirroring the
+  install-lock and state-database retry policies this backend already has.
+  The signature never occurs on unix, so this is a no-op there.
 
 ## [0.7.9] - 2026-09-10
 
