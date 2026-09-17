@@ -137,6 +137,21 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   retries it a bounded number of times with a short backoff, mirroring the
   install-lock and state-database retry policies this backend already has.
   The signature never occurs on unix, so this is a no-op there.
+- **`createCheckpoint`'s own reboot now retries msb's "sandbox already
+  exists" refusal on a genuine ~30-second budget (2-second intervals)
+  instead of failing the checkpoint outright on the first hit.** The
+  checkpoint cycle removes the source sandbox and immediately restores a
+  fresh one under the same name; on Windows, msb 0.7.1's own restore-time
+  collision check (`existing.is_some() || dir_exists`) can still see either
+  the just-removed sandbox's database record or its on-disk directory as
+  present for a window after `msb rm` returns — the directory in particular
+  has been observed on CI outliving the database record by more than 3.5
+  seconds under load, well past what a handful of short retries could ever
+  outlast. The retry budget mirrors this backend's own install-lock poll
+  shape and applies only to this reboot — an ordinary
+  `GenericContainer.fromCheckpoint().start()` restoring a name that turns
+  out to still be live keeps failing immediately, since reusing a live name
+  is a real error, not this backend's own release race.
 
 ## [0.7.9] - 2026-09-10
 

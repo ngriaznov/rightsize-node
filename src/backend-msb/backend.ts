@@ -30,6 +30,7 @@ import { undeliveredLines } from "./follow-replay.js";
 import { requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript } from "./network-links.js";
 import { ExecTunnel } from "./exec-tunnel.js";
 import { isRestoreAccessDeniedFailure } from "./restore-access-denied.js";
+import { isSandboxAlreadyExistsFailure } from "./sandbox-already-exists.js";
 
 const FIRST_RUN_PULL_TIMEOUT_MS = 600_000; // a cold pull can be slow
 const READINESS_POLL_MS = 300;
@@ -76,6 +77,26 @@ const EXEC_REVIVE_SETTLE_MS = READINESS_POLL_MS * 3;
 // the real cases without masking a genuinely stuck lock.
 const RESTORE_ACCESS_DENIED_RETRY_LIMIT = 3;
 const RESTORE_ACCESS_DENIED_RETRY_DELAY_MS = 500;
+
+/**
+ * How long `createCheckpoint`'s own reboot step keeps retrying msb's
+ * "sandbox already exists" refusal (see `isSandboxAlreadyExistsFailure`),
+ * and the pause between attempts — the same install-lock-poll shape
+ * `INSTALL_LOCK_RETRY_BUDGET_MS`/`INSTALL_LOCK_RETRY_DELAY_MS` already use.
+ * EMPIRICALLY VERIFIED against msb 0.7.1's own source
+ * (`prepare_create_target` in `sdk/rust/lib/backend/local/sandbox/create.rs`:
+ * `existing.is_some() || dir_exists`): the checkpoint cycle's `rm` can
+ * return once the sandbox's database record clears, well before its
+ * on-disk directory actually releases on Windows — observed on CI exceeding
+ * 3.5s under load — so the very next `restore` under the same name can race
+ * that lingering directory into this refusal. A few hundred milliseconds
+ * (this backend's earlier retry shape, before this budget existed) is
+ * nowhere near enough to outlast that; ~30s at 2s intervals comfortably
+ * does, while a refusal that outlives even that still fails clearly instead
+ * of hanging. See `rebootRetryingAlreadyExists`.
+ */
+const CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS = 30_000;
+const CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_DELAY_MS = 2_000;
 
 /**
  * The boot failure `start()` heals and retries — carries the `msb run`
@@ -149,6 +170,26 @@ class InstallLockActiveError extends Error {
 class RestoreAccessDeniedError extends Error {
   constructor(readonly output: string) {
     super(`msb restore access-denied on its own snapshot artifact:\n${output}`);
+  }
+}
+
+/**
+ * Restore-path classified failure for `isSandboxAlreadyExistsFailure` — msb
+ * refusing `restore` because a sandbox under this name already exists (its
+ * database record, its on-disk directory, or both — see that function's own
+ * doc). Internal to the boot path, like its siblings above; only ever
+ * thrown from `bootRestoreOnce`. `bootClassified` itself never retries this
+ * one (unlike its siblings) — it simply propagates, so the ordinary
+ * `start()` path (a `GenericContainer.fromCheckpoint(cp).start()` restore
+ * of a name that turns out to still be live) surfaces it immediately, a
+ * real error. Only `createCheckpoint`'s own reboot step, via
+ * `rebootRetryingAlreadyExists`, retries it — a caller reusing a live name
+ * is never this backend's own race to hide, but the checkpoint cycle's own
+ * `rm`-then-restore of the SAME name is exactly that race.
+ */
+class SandboxAlreadyExistsError extends Error {
+  constructor(readonly output: string) {
+    super(`msb restore refused — a sandbox with this name already exists:\n${output}`);
   }
 }
 
@@ -426,6 +467,15 @@ export class MsbCliBackend implements SandboxBackend {
   // anything) has a best-effort synchronous read of it. Never written to
   // except by this one .then() below; never awaited anywhere else.
   private resolvedMsbPath: string | undefined;
+  // Test-only override seam for rebootRetryingAlreadyExists' own budget/delay
+  // — defaults to the real CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS/
+  // _DELAY_MS constants so production behavior is unchanged. Without this, a
+  // budget-exhaustion red-proof would mean a unit test actually blocking for
+  // the real ~30s; a test reaches these the same way it already reaches
+  // `handles`/`startedNames` elsewhere in this suite — an unsafe cast — to
+  // shrink them to milliseconds instead.
+  private checkpointRebootAlreadyExistsRetryBudgetMs = CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS;
+  private checkpointRebootAlreadyExistsRetryDelayMs = CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_DELAY_MS;
 
   constructor(private readonly msbPathPromise: Promise<string>) {
     this.msbPathPromise.then(
@@ -843,6 +893,9 @@ export class MsbCliBackend implements SandboxBackend {
     if (isRestoreAccessDeniedFailure(output)) {
       throw new RestoreAccessDeniedError(output);
     }
+    if (isSandboxAlreadyExistsFailure(output)) {
+      throw new SandboxAlreadyExistsError(output);
+    }
     if (exitCode !== 0) {
       throw new BackendError(
         `msb restore for sandbox ${handle.id} exited (code ${exitCode}) — check the snapshot ref and ` +
@@ -1160,6 +1213,64 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
+   * `createCheckpoint`'s own reboot step, with msb's "sandbox already
+   * exists" refusal (`SandboxAlreadyExistsError`, see
+   * `isSandboxAlreadyExistsFailure`'s own doc) retried on a bounded budget
+   * instead of surfaced immediately. The checkpoint cycle's `rm` right
+   * before this can return once the sandbox's database record clears, well
+   * before its on-disk directory actually releases on a loaded Windows
+   * host, so the very next `restore` under the same name can race that
+   * lingering directory straight into msb's own refusal — see
+   * `CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS`'s own doc.
+   *
+   * `this.checkpointRebootAlreadyExistsRetryBudgetMs`/`_RetryDelayMs` back
+   * this loop rather than the bare module constants directly, so a
+   * budget-exhaustion test can shrink them to milliseconds instead of
+   * actually blocking for the real ~30s — see those fields' own doc.
+   *
+   * Only `SandboxAlreadyExistsError` is retried here; any other failure
+   * `bootClassified` throws (on the first attempt or a later one) propagates
+   * immediately, unretried — this exists for exactly the one known-transient
+   * signature, not as a generic reboot retry. Never reached by the ordinary
+   * `start()` path: a `GenericContainer.fromCheckpoint(cp).start()` restore
+   * of a fresh name calls `bootClassified` directly, whose own catch chain
+   * has never caught `SandboxAlreadyExistsError` and still doesn't — an
+   * already-exists failure there (only reachable if a caller reuses a name
+   * that is still live) keeps propagating as-is, a real error rather than
+   * this backend's own release race to paper over.
+   */
+  private async rebootRetryingAlreadyExists(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
+    try {
+      await this.bootClassified(msbPath, handle, state);
+      return;
+    } catch (first) {
+      if (!(first instanceof SandboxAlreadyExistsError)) {
+        throw first;
+      }
+      const deadline = Date.now() + this.checkpointRebootAlreadyExistsRetryBudgetMs;
+      let last = first;
+      while (Date.now() < deadline) {
+        await sleep(this.checkpointRebootAlreadyExistsRetryDelayMs);
+        try {
+          await this.bootClassified(msbPath, handle, state);
+          return;
+        } catch (again) {
+          if (!(again instanceof SandboxAlreadyExistsError)) {
+            throw again;
+          }
+          last = again;
+        }
+      }
+      throw new BackendError(
+        `msb restore for sandbox ${handle.id} kept hitting msb's "sandbox already exists" refusal for ` +
+          `${this.checkpointRebootAlreadyExistsRetryBudgetMs / 1000}s — msb's own on-disk sandbox directory ` +
+          `can lag its database record's own release on a loaded Windows host well past a short wait, but a ` +
+          `refusal held this long looks like a genuinely stuck sandbox rather than a release race.\n${last.output}`,
+      );
+    }
+  }
+
+  /**
    * The stop/snapshot/reboot cycle: `msb stop <name>` (reusing this
    * backend's own `stop()`, which also quiesces the attached child and any
    * network-link tunnels), `msb snapshot create --from-sandbox <name> <ref>`
@@ -1312,7 +1423,7 @@ export class MsbCliBackend implements SandboxBackend {
       spec: { ...handle.spec, checkpointRef: effectiveRef, command: handle.spec.command ?? capturedCommand },
     };
     try {
-      await this.bootClassified(msbPath, rebootHandle, state);
+      await this.rebootRetryingAlreadyExists(msbPath, rebootHandle, state);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       throw new BackendError(

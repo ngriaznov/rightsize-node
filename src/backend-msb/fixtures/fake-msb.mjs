@@ -181,6 +181,22 @@ if (cmd === "run") {
     process.stderr.write("error: io error: Access is denied. (os error 5)\n");
     process.exit(1);
   }
+  if ((state.failRestoresWithAlreadyExists ?? 0) > 0) {
+    // Reproduces msb's own sandbox-name-collision refusal (see
+    // isSandboxAlreadyExistsFailure) so a test can drive
+    // MsbCliBackend.rebootRetryingAlreadyExists' bounded checkpoint-reboot
+    // retry without a real Windows host underneath — see that function's own
+    // doc on why the checkpoint cycle's rm-then-restore of the same name can
+    // race msb's own deferred DB-record/on-disk-directory release into this.
+    // Verbatim msb wording (a decrementing counter, unlike restoreSettlesAsStopped
+    // below, so a test can arm N failures then let a later restore succeed).
+    // Never touches sandbox state, matching a real activation failure that
+    // never created anything.
+    state.failRestoresWithAlreadyExists -= 1;
+    writeState(state);
+    process.stderr.write(`error: sandbox '${name}' already exists\n`);
+    process.exit(1);
+  }
   if (state.restoreSettlesAsStopped) {
     // Drives MsbCliBackend.bootRestoreOnce's Stopped/disappearance fast-fail
     // path on demand: the sandbox never progresses past a settled "Stopped"

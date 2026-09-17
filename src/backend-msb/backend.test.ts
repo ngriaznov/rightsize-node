@@ -1013,6 +1013,101 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
+  // RED-PROOF: createCheckpoint's own reboot retries msb's "sandbox already
+  // exists" refusal on a bounded budget (rebootRetryingAlreadyExists) — 5
+  // failures (more than the single retry this backend had before this
+  // budget existed, i.e. more than the OLD behavior could ever absorb) then
+  // success must still let the checkpoint succeed, with the exact
+  // restore-invocation count asserted.
+  it("createCheckpoint's reboot retries msb's 'sandbox already exists' refusal — succeeds with exactly 6 restore invocations after 5 failures", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Shrink the retry budget/delay so 5 failures-then-success runs in
+    // milliseconds instead of the real ~30s — the same unsafe-cast seam
+    // this suite already uses elsewhere in this file to reach other private
+    // state (`handles`/`startedNames`).
+    const seam = backend as unknown as {
+      checkpointRebootAlreadyExistsRetryBudgetMs: number;
+      checkpointRebootAlreadyExistsRetryDelayMs: number;
+    };
+    seam.checkpointRebootAlreadyExistsRetryBudgetMs = 2_000;
+    seam.checkpointRebootAlreadyExistsRetryDelayMs = 20;
+
+    const spec = baseSpec("rz-testrun1-ckpt-alreadyexists", { command: ["sleep", "60"] });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoresWithAlreadyExists = 5;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.createCheckpoint(handle, "rz-ckpt-alreadyexists1");
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the retried reboot to bring the sandbox back up");
+    const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
+    assert.equal(restoreCalls.length, 6, "expected the 5 refused reboots plus exactly one succeeding retry");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  // RED-PROOF: createCheckpoint's own reboot exhausts its "sandbox already
+  // exists" retry budget and surfaces a clear, typed error naming the
+  // sandbox and the preserved checkpoint ref — never an infinite retry.
+  it("createCheckpoint's reboot surfaces a clear error once its 'sandbox already exists' retry budget is exhausted", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Shrink the budget so exhausting it runs in well under a second
+    // instead of the real ~30s — same seam as the success-path red-proof
+    // above.
+    const seam = backend as unknown as {
+      checkpointRebootAlreadyExistsRetryBudgetMs: number;
+      checkpointRebootAlreadyExistsRetryDelayMs: number;
+    };
+    seam.checkpointRebootAlreadyExistsRetryBudgetMs = 150;
+    seam.checkpointRebootAlreadyExistsRetryDelayMs = 20;
+
+    const spec = baseSpec("rz-testrun1-ckpt-alreadyexists-stuck", { command: ["sleep", "60"] });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    // Never clears — msb keeps refusing "already exists" for every restore
+    // attempt the shrunk budget could possibly fit.
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoresWithAlreadyExists = 1000;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: unknown;
+    try {
+      await backend.createCheckpoint(handle, "rz-ckpt-alreadyexists-stuck1");
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /already exists/);
+    assert.match(
+      (thrown as Error).message,
+      /fromCheckpoint/,
+      "expected the error to name fromCheckpoint() as the recovery path, same as any other failed reboot",
+    );
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, unknown>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    // The old sandbox was already rm'd before the reboot was ever attempted
+    // — an exhausted retry must never leave a half-recreated sandbox behind.
+    assert.equal(state.sandboxes[handle.id], undefined, "expected the sandbox to have been removed, not restored");
+    const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
+    assert.ok(restoreCalls.length >= 2, `expected more than one retried restore attempt before giving up, got ${restoreCalls.length}`);
+  });
+
   // RED-PROOF (e): exec child early-nonzero => classified failure (plus the
   // exit-0 sibling shapes the same "mirror bootRunOnce" classification has).
   it("the revived workload exec exiting quickly with nonzero is a classified boot failure carrying its output", async () => {
