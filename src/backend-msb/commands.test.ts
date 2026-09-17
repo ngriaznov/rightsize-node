@@ -228,19 +228,106 @@ describe("MsbCommands", () => {
     ]);
   });
 
-  it("restore: never emits -e, --mount-file, --root-disk, or --net, even when the spec carries env/mounts/disk/network settings", () => {
+  it("restore: never emits -e, --mount-file, or --root-disk, even when the spec carries env/disk settings — msb restore has no such flags", () => {
     const argv = MsbCommands.restore(
       baseSpec({
         checkpointRef: "rz-ckpt-abcdef012345",
         env: [["A", "1"]],
-        mounts: [{ hostPath: "/h", guestPath: "/g", readOnly: false }],
         diskLimitMb: 4096,
-        networkDisabled: true,
       }),
     );
-    for (const flag of ["-e", "--mount-file", "--root-disk", "--net"]) {
+    for (const flag of ["-e", "--mount-file", "--root-disk"]) {
       assert.equal(argv.includes(flag), false, `restore's argv must never carry ${flag} — msb restore has no such flag`);
     }
+  });
+
+  it("restore: networkDisabled emits --no-net right after --disk-only, before ports", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        networkDisabled: true,
+        ports: [{ hostPort: 1111, guestPort: 22 }],
+      }),
+    );
+    assert.deepEqual(argv, [
+      "restore",
+      "rz-ckpt-abcdef012345",
+      "--name",
+      "rz-abc12345-1",
+      "--disk-only",
+      "--no-net",
+      "-p",
+      "1111:22",
+    ]);
+  });
+
+  it("restore: networkDisabled false emits no --no-net and no other --net flag", () => {
+    const argv = MsbCommands.restore(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345", networkDisabled: false }));
+    assert.equal(argv.includes("--no-net"), false);
+    assert.equal(argv.includes("--net"), false);
+  });
+
+  it("restore: mounts emit --volume host:guest:ro|rw,nodev after ports, in spec order", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        ports: [{ hostPort: 1111, guestPort: 22 }],
+        mounts: [
+          { hostPath: "/host/f.txt", guestPath: "/guest/f.txt", readOnly: true },
+          { hostPath: "/h", guestPath: "/g", readOnly: false },
+        ],
+      }),
+    );
+    assert.deepEqual(argv, [
+      "restore",
+      "rz-ckpt-abcdef012345",
+      "--name",
+      "rz-abc12345-1",
+      "--disk-only",
+      "-p",
+      "1111:22",
+      "--volume",
+      "/host/f.txt:/guest/f.txt:ro,nodev",
+      "--volume",
+      "/h:/g:rw,nodev",
+    ]);
+  });
+
+  it("restore: never emits --mount-file for mounts — the flag is --volume, not run()'s spelling", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        mounts: [{ hostPath: "/h", guestPath: "/g", readOnly: false }],
+      }),
+    );
+    assert.equal(argv.includes("--mount-file"), false);
+    assert.equal(argv.includes("--volume"), true);
+  });
+
+  it("restore: memory, network, ports, and mounts all appear together in that fixed order after --disk-only", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        memoryLimitMb: 1024,
+        networkDisabled: true,
+        ports: [{ hostPort: 1111, guestPort: 22 }],
+        mounts: [{ hostPath: "/h", guestPath: "/g", readOnly: false }],
+      }),
+    );
+    assert.deepEqual(argv, [
+      "restore",
+      "rz-ckpt-abcdef012345",
+      "--name",
+      "rz-abc12345-1",
+      "-m",
+      "1024M",
+      "--disk-only",
+      "--no-net",
+      "-p",
+      "1111:22",
+      "--volume",
+      "/h:/g:rw,nodev",
+    ]);
   });
 
   it("restore: never appends the spec's command — msb restore has no trailing-command shape at all", () => {

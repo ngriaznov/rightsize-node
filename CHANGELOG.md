@@ -29,7 +29,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   what the checkpoint captured now throws a new `CheckpointRestoreEnvOverrideError`
   at `start()` instead of silently reaching the restored guest — docker is
   unaffected, since restoring there is an ordinary `docker create`/`run` with a
-  fresh env array.
+  fresh env array. `msb restore` also has its own mount (`--volume`) and
+  network-policy (`--no-net`) flags, distinct from `run`'s `--mount-file`/`--net
+  private` — the internal stop/snapshot/reboot cycle now re-emits a checkpointed
+  sandbox's own `withCopyFileToContainer()` mounts and `withNetworkDisabled()`
+  setting across the reboot through those flags, so both survive `checkpoint()`
+  the same as ports already did, instead of silently dropping.
 - **The MinIO module's default image moved to `quay.io/minio/minio:latest`.**
   Docker Hub's `minio/minio` repository has been removed upstream (`docker pull`
   now fails with "repository does not exist"); `quay.io/minio/minio` is MinIO's

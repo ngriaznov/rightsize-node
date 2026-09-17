@@ -718,6 +718,56 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
+  it("createCheckpoint's reboot re-emits the original sandbox's mounts and network-isolation flag, not just ports", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Mirrors `new GenericContainer(image).withCopyFileToContainer(...).withNetworkDisabled().start()`
+    // followed by `.checkpoint()`: the reboot's `handle.spec` is the ORIGINAL
+    // sandbox's own live mounts/networkDisabled, not anything carried over
+    // from a captured spec (see MsbCommands.restore's own doc) — so both
+    // must reach the reboot's `restore` call unchanged, the same way ports
+    // already do above, or a `.withNetworkDisabled()` sandbox would silently
+    // regain public network access, and a `.withCopyFileToContainer()`
+    // sandbox would either silently lose its mount or hard-fail under msb's
+    // own require-complete restore-resource check.
+    const spec = baseSpec("rz-testrun1-ckpt-mounts", {
+      ports: [{ hostPort: 15998, guestPort: 80 }],
+      mounts: [{ hostPath: "/host/config.json", guestPath: "/guest/config.json", readOnly: true }],
+      networkDisabled: true,
+    });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    await backend.createCheckpoint(handle, "rz-ckpt-mountsandnet");
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    const rebootCall = state.callLog.filter((c) => c.cmd === "restore").at(-1);
+    assert.ok(rebootCall !== undefined, "expected a reboot 'restore' call after the snapshot/rm cycle");
+    assert.deepEqual(
+      rebootCall?.args,
+      [
+        "restore",
+        "rz-ckpt-mountsandnet",
+        "--name",
+        handle.id,
+        "--disk-only",
+        "--no-net",
+        "-p",
+        "15998:80",
+        "--volume",
+        "/host/config.json:/guest/config.json:ro,nodev",
+      ],
+      "expected the reboot's restore to re-emit --no-net (networkDisabled) and --volume (mounts) from the " +
+        "original spec, exactly like it already does for ports and --disk-only",
+    );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
   it("createCheckpoint leaves the sandbox stopped when the snapshot step fails, without removing or rebooting it", async () => {
     if (skipOnWindows()) {
       return;

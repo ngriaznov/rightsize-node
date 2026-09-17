@@ -31,7 +31,7 @@ mechanisms:
 
 | | docker | microsandbox |
 |---|---|---|
-| Mechanism | Commit the running container to a new image | Stops the sandbox, snapshots its disk, and boots it back from that snapshot (`msb restore --disk-only`) under the same name and ports |
+| Mechanism | Commit the running container to a new image | Stops the sandbox, snapshots its disk, and boots it back from that snapshot (`msb restore --disk-only`) under the same name, ports, mounts, and network setting |
 | `capabilities.checkpoint` | `true` | `true` |
 | `capabilities.checkpointRestartsWorkload` | `false` — the container is undisturbed | `true` — the workload restarts |
 | Ref format | `rightsize/checkpoint:<12-hex>` (an image tag) | an absolute path, `<cacheDir>/checkpoints/rz-ckpt-<12-hex>` |
