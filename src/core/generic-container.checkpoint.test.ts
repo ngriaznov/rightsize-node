@@ -17,7 +17,8 @@ import type { ContainerSpec, ExecResult } from "./model.js";
 import { registerBackend, Backends, _resetRegistryForTests, _providersSnapshotForTests } from "./backends.js";
 import type { BackendProvider } from "./backend.js";
 import { readSandboxNames } from "./reaper/ledger.js";
-import { readCheckpointRegistry, listCheckpointNames } from "./checkpoint/registry.js";
+import { readCheckpointRegistry, listCheckpointNames, writeCheckpointRegistryAtomic, checkpointRegistryPath } from "./checkpoint/registry.js";
+import type { CheckpointRegistryEntry } from "./checkpoint/registry.js";
 import { liveContainers, _resetForTests } from "./cleanup.js";
 
 function instantReady(): WaitStrategy {
@@ -179,6 +180,29 @@ class FakeCapturingBackend extends FakeCheckpointBackend {
 
   capturedWorkloadCommand(handle: SandboxHandle): ReadonlyArray<string> | undefined {
     return this.capturedByHandle.get(handle.id);
+  }
+}
+
+/**
+ * Same fake, but its `createCheckpoint` returns an EFFECTIVE ref that
+ * differs from the nominal `ref` it's asked to checkpoint under — standing
+ * in for `MsbCliBackend`'s own real msb-0.7.1 content-addressed artifact
+ * path (a `snap_<digest>` this library's nominal ref never predicts; see
+ * that method's own doc) without a real msb binary. Every call mints a
+ * fresh suffix, so two checkpoints under the same NAME land at two
+ * different, both-real artifact refs — the exact shape the replace-
+ * semantics fix (looking up the prior EFFECTIVE ref via the registry,
+ * rather than recomputing the nominal one) exists to handle.
+ */
+class FakeContentAddressedBackend extends FakeCheckpointBackend {
+  private seq = 0;
+
+  override async createCheckpoint(_handle: SandboxHandle, nominalRef: string): Promise<string> {
+    this.seq += 1;
+    const effectiveRef = `${nominalRef}::effective-${this.seq}`;
+    this.calls.push(`createCheckpoint:${effectiveRef}`);
+    this.artifacts.add(effectiveRef);
+    return effectiveRef;
   }
 }
 
@@ -674,6 +698,129 @@ describe("GenericContainer.checkpoint(name) — named checkpoints", () => {
       assert.equal(read.kind, "found");
       if (read.kind === "found") {
         assert.equal(read.entry.ref, first.ref);
+      }
+
+      await container.stop();
+    });
+  });
+
+  it("the first-ever checkpoint under a name (no prior registry entry) best-effort removes only the nominal ref, matching pre-fix behavior", async () => {
+    await withTempCacheDirEnv(async () => {
+      const backend = new FakeCheckpointBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
+      const container = new GenericContainer("alpine:3.19").withBackend(backend).withCommand("sleep", "60").waitingFor(instantReady());
+      await container.start();
+      backend.calls.length = 0;
+
+      const cp = await container.checkpoint("brand-new");
+      assert.deepEqual(
+        backend.calls,
+        [`removeCheckpoint:${cp.ref}`, `createCheckpoint:${cp.ref}`],
+        "expected exactly one best-effort removeCheckpoint call, against the nominal ref, when nothing was ever registered under this name",
+      );
+
+      await container.stop();
+    });
+  });
+
+  it("on a backend whose EFFECTIVE ref differs from the nominal one (msb-shaped), re-checkpointing the same name removes the PRIOR entry's recorded effective ref, not the never-real nominal one", async () => {
+    await withTempCacheDirEnv(async (cacheDirPath) => {
+      const backend = new FakeContentAddressedBackend("microsandbox", {
+        hardwareIsolated: true,
+        checkpoint: true,
+        checkpointRestartsWorkload: true,
+      });
+      const container = new GenericContainer("alpine:3.19").withBackend(backend).withCommand("sleep", "60").waitingFor(instantReady());
+      await container.start();
+
+      const first = await container.checkpoint("seeded-db");
+      backend.calls.length = 0;
+
+      const second = await container.checkpoint("seeded-db");
+      assert.ok(second.ref !== first.ref, "expected a fresh effective ref on the second checkpoint too");
+
+      // The red-proof: unfixed code only ever best-effort-removes the
+      // freshly-minted NOMINAL ref (which this fake never puts in
+      // `artifacts` at all, since its `createCheckpoint` always returns a
+      // DIFFERENT, suffixed ref) — so `first.ref` itself would never appear
+      // as a `removeCheckpoint` argument, and the prior real artifact would
+      // never actually leave `backend.artifacts`.
+      assert.ok(
+        backend.calls.includes(`removeCheckpoint:${first.ref}`),
+        `expected removeCheckpoint to have been called with the PRIOR entry's recorded effective ref ${first.ref}; got calls: ${JSON.stringify(backend.calls)}`,
+      );
+      assert.equal(backend.artifacts.has(first.ref), false, "expected the first checkpoint's real artifact to actually be gone after the same-name re-checkpoint");
+
+      const read = await readCheckpointRegistry(cacheDirPath, "seeded-db");
+      assert.equal(read.kind, "found");
+      if (read.kind === "found") {
+        assert.equal(read.entry.ref, second.ref, "expected the registry to hold the latest checkpoint's effective ref");
+      }
+
+      await container.stop();
+    });
+  });
+
+  it("a registry entry recorded under a DIFFERENT backend is left untouched — only the nominal-ref fallback runs", async () => {
+    await withTempCacheDirEnv(async (cacheDirPath) => {
+      const foreignRef = "some-other-backend-artifact-must-never-be-touched";
+      const foreignEntry: CheckpointRegistryEntry = {
+        name: "cross-backend",
+        ref: foreignRef,
+        backend: "some-other-backend",
+        createdIso: new Date().toISOString(),
+        spec: { env: {}, command: null, exposedPorts: [], memoryLimitMb: null },
+      };
+      await writeCheckpointRegistryAtomic(cacheDirPath, "cross-backend", foreignEntry);
+
+      const backend = new FakeCheckpointBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
+      const container = new GenericContainer("alpine:3.19").withBackend(backend).withCommand("sleep", "60").waitingFor(instantReady());
+      await container.start();
+      backend.calls.length = 0;
+
+      const cp = await container.checkpoint("cross-backend");
+
+      assert.deepEqual(
+        backend.calls,
+        [`removeCheckpoint:${cp.ref}`, `createCheckpoint:${cp.ref}`],
+        "expected the foreign-backend entry's real ref to never reach this backend's removeCheckpoint — nominal-ref fallback only",
+      );
+      assert.ok(!backend.calls.includes(`removeCheckpoint:${foreignRef}`));
+
+      const read = await readCheckpointRegistry(cacheDirPath, "cross-backend");
+      assert.equal(read.kind, "found");
+      if (read.kind === "found") {
+        assert.equal(read.entry.backend, "docker", "expected the registry entry to now be overwritten under the currently active backend");
+      }
+
+      await container.stop();
+    });
+  });
+
+  it("a corrupt/unreadable registry entry for the name is treated as 'no entry' — the checkpoint still succeeds via nominal-ref fallback", async () => {
+    await withTempCacheDirEnv(async (cacheDirPath) => {
+      const registryPath = checkpointRegistryPath(cacheDirPath, "corrupt-entry");
+      await fs.mkdir(path.dirname(registryPath), { recursive: true });
+      await fs.writeFile(registryPath, "{ not actually valid JSON");
+
+      const backend = new FakeCheckpointBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
+      const container = new GenericContainer("alpine:3.19").withBackend(backend).withCommand("sleep", "60").waitingFor(instantReady());
+      await container.start();
+      backend.calls.length = 0;
+
+      let thrown: unknown;
+      let cp: Awaited<ReturnType<typeof container.checkpoint>> | undefined;
+      try {
+        cp = await container.checkpoint("corrupt-entry");
+      } catch (err) {
+        thrown = err;
+      }
+      assert.equal(thrown, undefined, `expected checkpoint() to succeed despite the corrupt registry file, got: ${String(thrown)}`);
+      assert.ok(cp !== undefined);
+      if (cp !== undefined) {
+        assert.deepEqual(backend.calls, [`removeCheckpoint:${cp.ref}`, `createCheckpoint:${cp.ref}`]);
+
+        const read = await readCheckpointRegistry(cacheDirPath, "corrupt-entry");
+        assert.equal(read.kind, "found", "expected the corrupt file to have been overwritten with a fresh, valid entry");
       }
 
       await container.stop();

@@ -267,6 +267,26 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   process) it accumulated across test files and broke unrelated assertions
   that the live-container registry (`liveContainers()`, `diagnostics()`'s own
   data source) starts empty.
+- **Re-checkpointing under the same name now reliably clears the prior
+  checkpoint's artifact on microsandbox too, not just on docker.**
+  `GenericContainer.checkpoint(name)`'s replace-semantics pre-removal step
+  used to best-effort remove only the freshly-minted NOMINAL ref
+  (`checkpointRef(backend.name, name)`), which is deterministic — and
+  therefore correct — on docker, but since msb 0.7.1 no longer corresponds
+  to where microsandbox actually puts the artifact (a content-addressed
+  `snap_<digest>` path — see the ref-layout entry above); the pre-removal
+  call was a no-op against a path that was never real, so the prior
+  checkpoint's real artifact was silently orphaned on every same-name
+  re-checkpoint on that backend. `checkpoint(name)` now looks up the name's
+  EXISTING registry entry first (the same lookup `Checkpoints.remove(name)`
+  itself uses) and, when one exists for the currently active backend,
+  removes the artifact at that entry's own recorded ref — the prior
+  checkpoint's actual location, on either backend — before also
+  best-effort clearing the nominal ref as before (a harmless no-op on
+  docker, where the two refs are the same value). `Checkpoints.remove(name)`
+  is no longer required as a manual workaround before re-checkpointing under
+  the same name on microsandbox. No public API changes: `checkpoint()`'s
+  signature, return type, and error surface are all unchanged.
 
 ## [0.7.9] - 2026-09-10
 

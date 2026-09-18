@@ -259,18 +259,25 @@ name do NOT get the same ref.
 Checkpointing under a name that's already taken REPLACES the REGISTRY
 entry either way: the new checkpoint's ref overwrites the old one, so
 `Checkpoints.find(name)` and `fromCheckpoint()` always see the latest
-checkpoint under that name. On docker, the deterministic ref also means
-the OLD artifact under that same name is reliably best-effort cleared
-before the new one lands. On microsandbox, `checkpoint(name)` best-effort
-attempts to clear whatever sat under the previous NOMINAL ref before
-creating the new one, but since that nominal ref no longer corresponds to
-a real artifact on disk (see above), this does not reliably remove a prior
-msb checkpoint's artifact — it can be left as an orphan. To remove a prior
-named msb checkpoint reliably, call `Checkpoints.remove(name)` first (it
-reads the registry's own recorded ref, not a recomputed one) before
-checkpointing again under the same name. Omitting `name` keeps
-`checkpoint()`'s original behavior exactly: an ephemeral checkpoint with no
-registry entry.
+checkpoint under that name. `checkpoint(name)` also reliably clears the OLD
+artifact under that same name first, on both backends: it looks up the
+name's existing registry entry (the same lookup `Checkpoints.remove(name)`
+itself uses) and removes the artifact at that entry's own recorded ref —
+which is exactly where the prior checkpoint actually put it, whether that's
+docker's deterministic `rightsize/checkpoint:<name>` or microsandbox's
+content-addressed `snap_<hex-digest>` path from the previous call. The
+freshly-minted nominal ref is best-effort cleared too, for the cases the
+registry lookup can't cover on its own (nothing was ever checkpointed under
+this name yet, or the existing entry was written by a different backend);
+on docker this is simply the same ref, already removed. Omitting `name`
+keeps `checkpoint()`'s original behavior exactly: an ephemeral checkpoint
+with no registry entry.
+
+`Checkpoints.remove(name)` remains available as an explicit, standalone
+cleanup affordance — call it directly when you want a named checkpoint gone
+without immediately replacing it — but it is no longer REQUIRED before
+re-checkpointing under the same name on microsandbox; `checkpoint(name)`
+now does that lookup itself.
 
 ### The registry
 

@@ -615,6 +615,76 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     }
   });
 
+  it("GenericContainer.checkpoint(name) re-checkpointing the same name on msb actually removes the PRIOR checkpoint's real content-addressed artifact, not just the never-real nominal ref", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const cacheDirPath = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-replace-artifact-test-"));
+    const savedCacheDir = process.env["RIGHTSIZE_CACHE_DIR"];
+    process.env["RIGHTSIZE_CACHE_DIR"] = cacheDirPath;
+    try {
+      const container = new GenericContainer("fake:latest")
+        .withBackend(backend)
+        .withCommand("sleep", "60")
+        .waitingFor(instantReady());
+      await container.start();
+
+      const first = await container.checkpoint("seeded");
+      assert.equal(await backend.hasCheckpoint(first.ref), true, "expected the first checkpoint's artifact to exist");
+
+      // The nominal ref this same name would mint is never where msb 0.7.1
+      // actually put the artifact — see checkpoint/ref.ts and
+      // MsbCliBackend.createCheckpoint's own doc — so this is the ref the
+      // UNFIXED pre-removal step would have (uselessly) targeted instead.
+      const nominalRef = path.join(cacheDirPath, "checkpoints", "rz-ckpt-seeded");
+      assert.ok(first.ref !== nominalRef, "expected the msb-shaped effective ref to differ from the nominal one");
+
+      // Re-checkpointing under the SAME name mints a second, different
+      // content-addressed artifact (a fresh snap_<digest> each time — see
+      // the fake fixture's own snapshot-create branch).
+      const second = await container.checkpoint("seeded");
+      assert.ok(second.ref !== first.ref, "expected a fresh effective ref on the second checkpoint too");
+
+      // The actual fix, end to end: the FIRST checkpoint's real artifact is
+      // gone — both from msb's own index and from disk — not merely
+      // orphaned. This is the assertion that fails against the pre-fix
+      // code, which only ever best-effort-removed `nominalRef` (a path that
+      // was never real on this backend).
+      assert.equal(
+        await backend.hasCheckpoint(first.ref),
+        false,
+        "expected the prior checkpoint's real artifact to be gone after a same-name re-checkpoint",
+      );
+      await assert.rejects(fs.access(first.ref), "expected the prior checkpoint's artifact directory to have been deleted from disk");
+
+      const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+        snapshots?: Record<string, unknown>;
+        callLog: Array<{ cmd: string; args: string[] }>;
+      };
+      assert.equal(first.ref in (state.snapshots ?? {}), false, "expected msb's own index to no longer carry the prior artifact");
+      const removalCall = state.callLog.find((c) => c.cmd === "snapshotRemove" && c.args.includes(first.ref));
+      assert.ok(removalCall !== undefined, "expected an 'msb snapshot rm' call against the PRIOR entry's recorded effective ref");
+
+      // The SECOND checkpoint's own artifact must survive untouched.
+      assert.equal(await backend.hasCheckpoint(second.ref), true, "expected the latest checkpoint's own artifact to remain");
+
+      const read = await readCheckpointRegistry(cacheDirPath, "seeded");
+      assert.equal(read.kind, "found");
+      if (read.kind === "found") {
+        assert.equal(read.entry.ref, second.ref, "expected the registry to hold the latest checkpoint's ref");
+      }
+
+      await container.stop();
+    } finally {
+      if (savedCacheDir === undefined) {
+        delete process.env["RIGHTSIZE_CACHE_DIR"];
+      } else {
+        process.env["RIGHTSIZE_CACHE_DIR"] = savedCacheDir;
+      }
+      await fs.rm(cacheDirPath, { recursive: true, force: true });
+    }
+  });
+
   it("createCheckpoint's reboot polls past an install-lock refusal instead of failing the checkpoint", async () => {
     if (skipOnWindows()) {
       return;
