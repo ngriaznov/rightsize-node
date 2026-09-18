@@ -1049,28 +1049,79 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
-  // FRESH-NAME RED-PROOF (c): createCheckpoint's own reboot retries msb's
-  // "sandbox already exists" refusal ON THE FRESH NAME (fake-forced 5 times
-  // in a row) on a bounded budget (rebootRetryingAlreadyExists) — this retry
-  // machinery is now dormant defense on the ordinary path (see that
-  // method's own doc), but it must still work when actually triggered: 5
-  // failures (more than the single retry this backend had before this
-  // budget existed, i.e. more than the OLD behavior could ever absorb) then
-  // success must still let the checkpoint succeed, with the exact
-  // restore-invocation count asserted.
-  it("createCheckpoint's reboot retries msb's 'sandbox already exists' refusal on the fresh name — succeeds with exactly 6 restore invocations after 5 failures", async () => {
+  // FRESH-NAME RED-PROOF (e): unlike the ordinary start() path above (which
+  // retries a Windows access-denied refusal under the SAME name, since the
+  // caller-supplied name is not this backend's own to change),
+  // createCheckpoint's own reboot treats that SAME classified failure the
+  // way it treats "already exists" — mint a NEW name, best-effort `msb rm`
+  // the failed one, never a same-name retry — because the live-verified
+  // dossier this policy is built from is precisely this signature: a
+  // restore that fails PAST msb's own validation leaves its `--name` behind
+  // as a stopped sandbox record a same-name retry would only collide with.
+  it("createCheckpoint's reboot treats a Windows access-denied refusal the same as 'already exists' — a fresh name per attempt, with a best-effort rm of the failed one", async () => {
     if (skipOnWindows()) {
       return;
     }
-    // Shrink the retry budget/delay so 5 failures-then-success runs in
-    // milliseconds instead of the real ~30s — the same unsafe-cast seam
-    // this suite already uses elsewhere in this file to reach other private
-    // state (`handles`/`startedNames`).
+    const spec = baseSpec("rz-testrun1-ckpt-accessdenied", { command: ["sleep", "60"] });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+    const originalName = handle.id;
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.createCheckpoint(handle, "rz-ckpt-accessdenied1");
+    const freshName = handle.id;
+    assert.ok(freshName !== originalName, "expected a fresh name even on a checkpoint whose reboot hit access-denied");
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    assert.equal(state.sandboxes[freshName]?.status, "Running", "expected the retried reboot to bring the FRESH-name sandbox up");
+    const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
+    assert.equal(restoreCalls.length, 2, "expected the access-denied attempt plus exactly one succeeding retry");
+    const restoreNames = restoreCalls.map((c) => c.args[3]);
+    assert.ok(
+      restoreNames[0] !== restoreNames[1],
+      "expected the retried attempt to target a DIFFERENT name, not the one that just hit access-denied",
+    );
+    assert.equal(restoreNames[1], freshName, "expected the WINNING attempt's own name to end up as the handle's new id");
+
+    const rmCalls = state.callLog.filter((c) => c.cmd === "rm");
+    assert.ok(
+      rmCalls.some((c) => c.args[1] === restoreNames[0]),
+      "expected a best-effort 'msb rm' of the access-denied attempt's own failed name",
+    );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  // FRESH-NAME RED-PROOF (c): createCheckpoint's own reboot retries msb's
+  // "sandbox already exists" refusal (fake-forced 5 times in a row) on a
+  // bounded budget (rebootUnderFreshName) — per the fresh-naming policy, EACH
+  // attempt (the 5 failures and the succeeding retry) must mint and restore
+  // under its OWN, never-before-used name, with a best-effort `msb rm` of
+  // every failed attempt's own name — never a same-name retry, which is
+  // exactly the shape that collided for the whole budget on live Windows CI.
+  it("createCheckpoint's reboot retries msb's 'sandbox already exists' refusal, minting a NEW name and rm'ing the failed one on each attempt — succeeds with exactly 6 restore invocations after 5 failures", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Shrink the retry budget/delay so 5 failures-then-success runs in a few
+    // seconds instead of the real ~30s — the same unsafe-cast seam this
+    // suite already uses elsewhere in this file to reach other private state
+    // (`handles`/`startedNames`). Generous relative to the 6 real child
+    // processes (5 failed restores + the succeeding one, each now paired
+    // with its own best-effort `rm`) this drives, so a loaded machine still
+    // reaches attempt 6 well inside the budget.
     const seam = backend as unknown as {
       checkpointRebootAlreadyExistsRetryBudgetMs: number;
       checkpointRebootAlreadyExistsRetryDelayMs: number;
     };
-    seam.checkpointRebootAlreadyExistsRetryBudgetMs = 2_000;
+    seam.checkpointRebootAlreadyExistsRetryBudgetMs = 4_000;
     seam.checkpointRebootAlreadyExistsRetryDelayMs = 20;
 
     const spec = baseSpec("rz-testrun1-ckpt-alreadyexists", { command: ["sleep", "60"] });
@@ -1093,10 +1144,23 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.equal(state.sandboxes[freshName]?.status, "Running", "expected the retried reboot to bring the FRESH-name sandbox up");
     const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
     assert.equal(restoreCalls.length, 6, "expected the 5 refused reboots plus exactly one succeeding retry");
-    assert.ok(
-      restoreCalls.every((c) => c.args[3] === freshName),
-      "expected every retried restore attempt to target the SAME fresh name, not a new one per attempt",
+    const restoreNames = restoreCalls.map((c) => c.args[3]);
+    assert.equal(
+      new Set(restoreNames).size,
+      6,
+      "expected every attempt — each of the 5 failures and the succeeding retry — to target its OWN name, never a reused one",
     );
+    assert.equal(restoreNames.at(-1), freshName, "expected the WINNING attempt's own name to end up as the handle's new id");
+
+    const rmCalls = state.callLog.filter((c) => c.cmd === "rm");
+    const failedNames = restoreNames.slice(0, -1);
+    assert.equal(failedNames.length, 5);
+    for (const failedName of failedNames) {
+      assert.ok(
+        rmCalls.some((c) => c.args[1] === failedName),
+        `expected a best-effort 'msb rm ${failedName}' for the failed attempt's own name`,
+      );
+    }
 
     await backend.stop(handle);
     await backend.remove(handle);
@@ -1109,14 +1173,18 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     if (skipOnWindows()) {
       return;
     }
-    // Shrink the budget so exhausting it runs in well under a second
-    // instead of the real ~30s — same seam as the success-path red-proof
-    // above.
+    // Shrink the budget so exhausting it runs in a few seconds instead of
+    // the real ~30s — same seam as the success-path red-proof above. Each
+    // attempt now spawns TWO real child processes (the failed `restore` plus
+    // its best-effort `rm`), not just one, so the budget needs enough room
+    // for at least a couple of full attempts even on a loaded machine —
+    // too tight a budget makes this a flaky "gave up after exactly one
+    // attempt" failure instead of a genuine retry-then-exhaust proof.
     const seam = backend as unknown as {
       checkpointRebootAlreadyExistsRetryBudgetMs: number;
       checkpointRebootAlreadyExistsRetryDelayMs: number;
     };
-    seam.checkpointRebootAlreadyExistsRetryBudgetMs = 150;
+    seam.checkpointRebootAlreadyExistsRetryBudgetMs = 3_000;
     seam.checkpointRebootAlreadyExistsRetryDelayMs = 20;
 
     const spec = baseSpec("rz-testrun1-ckpt-alreadyexists-stuck", { command: ["sleep", "60"] });
@@ -1152,6 +1220,19 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.equal(state.sandboxes[handle.id], undefined, "expected the sandbox to have been removed, not restored");
     const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
     assert.ok(restoreCalls.length >= 2, `expected more than one retried restore attempt before giving up, got ${restoreCalls.length}`);
+    const restoreNames = restoreCalls.map((c) => c.args[3]);
+    assert.equal(
+      new Set(restoreNames).size,
+      restoreNames.length,
+      "expected every exhausted attempt to have targeted its own name — never a reused one, even while giving up",
+    );
+    const rmCalls = state.callLog.filter((c) => c.cmd === "rm");
+    for (const failedName of restoreNames) {
+      assert.ok(
+        rmCalls.some((c) => c.args[1] === failedName),
+        `expected a best-effort 'msb rm ${failedName}' for every exhausted attempt's own name, not just the original sandbox`,
+      );
+    }
   });
 
   // FRESH-NAME RED-PROOF (b): the fresh reboot name is appended to the reaper ledger

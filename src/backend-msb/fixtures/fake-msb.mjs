@@ -173,9 +173,14 @@ if (cmd === "run") {
   if ((state.failRestoreWithAccessDenied ?? 0) > 0) {
     // Reproduces the Windows file-handle-release-lag failure on the
     // just-written snapshot artifact (see isRestoreAccessDeniedFailure) so a
-    // test can drive MsbCliBackend.bootClassified's bounded restore retry
-    // without a real Windows host underneath. Never touches sandbox state,
-    // matching a real activation failure that never created anything.
+    // test can drive this backend's bounded restore retry without a real
+    // Windows host underneath — MsbCliBackend.bootClassified's own same-name
+    // retry on the ordinary start()/fromCheckpoint() path, or
+    // MsbCliBackend.rebootUnderFreshName's fresh-name-per-attempt retry when
+    // it fires from createCheckpoint's own reboot instead (see that
+    // method's own doc on why the two paths treat this differently). Never
+    // touches sandbox state, matching a real activation failure that never
+    // created anything.
     state.failRestoreWithAccessDenied -= 1;
     writeState(state);
     process.stderr.write("error: io error: Access is denied. (os error 5)\n");
@@ -184,14 +189,24 @@ if (cmd === "run") {
   if ((state.failRestoresWithAlreadyExists ?? 0) > 0) {
     // Reproduces msb's own sandbox-name-collision refusal (see
     // isSandboxAlreadyExistsFailure) so a test can drive
-    // MsbCliBackend.rebootRetryingAlreadyExists' bounded checkpoint-reboot
-    // retry without a real Windows host underneath — see that function's own
-    // doc on why the checkpoint cycle's rm-then-restore of the same name can
-    // race msb's own deferred DB-record/on-disk-directory release into this.
+    // MsbCliBackend.rebootUnderFreshName's bounded checkpoint-reboot retry
+    // without a real Windows host underneath — see that function's own doc
+    // on the fresh-naming policy this refusal (and its access-denied
+    // sibling, failRestoreWithAccessDenied above) drives: a name that just
+    // hit either classified failure is never retried under the same name
+    // again, so this fixture does not need to simulate the underlying
+    // "stopped sandbox record left behind" shape itself — a bare decrementing
+    // counter that fails unconditionally, regardless of which `--name` was
+    // passed, already reproduces N consecutive per-attempt refusals, and the
+    // production code's own fresh naming is what a test asserts on (a
+    // DIFFERENT `--name` per attempt, recovered from this fixture's own
+    // callLog).
     // Verbatim msb wording (a decrementing counter, unlike restoreSettlesAsStopped
     // below, so a test can arm N failures then let a later restore succeed).
     // Never touches sandbox state, matching a real activation failure that
-    // never created anything.
+    // never created anything — the failed attempt's own best-effort `msb rm`
+    // (see rebootUnderFreshName) is therefore a no-op here too, exactly like
+    // "not found" on a real binary.
     state.failRestoresWithAlreadyExists -= 1;
     writeState(state);
     process.stderr.write(`error: sandbox '${name}' already exists\n`);

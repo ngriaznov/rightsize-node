@@ -180,6 +180,49 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   application code should need to change, but anything that greps `msb ls`
   output for a specific sandbox name across a checkpoint should expect the
   new one.
+- **`createCheckpoint`'s reboot now mints a FRESH sandbox name on every retry
+  attempt, never reusing one that just failed.** LIVE-VERIFIED against a real
+  msb 0.7.1 binary: `msb restore --name X` validates the snapshot artifact
+  FIRST — an integrity failure exits 1 and leaves no sandbox record at all —
+  but a failure AFTER validation (its Windows access-denied signature in
+  particular, `RestoreAccessDeniedError`) leaves `X` behind as a STOPPED
+  SANDBOX RECORD visible in `msb ls`, and any retry of `restore --name X`
+  then fails outright with msb's own "already exists" refusal. Both the
+  already-exists retry and the Windows access-denied retry previously kept
+  retrying under the exact fresh name that had just failed — confirmed on
+  Windows CI as the root cause of five checkpoint tests colliding on their
+  own reboot names for the entire retry budget the moment the first attempt
+  hit that access-denied failure. Each retry attempt now mints a brand-new
+  name from the same generator instead of reusing the failed one, tracks it
+  in the reaper ledger before that attempt's own restore runs, and
+  best-effort `msb rm`s the failed attempt's name (result ignored — cheap
+  cleanup that correctness no longer depends on, now that the next attempt
+  never reuses that name) before advancing. The overall retry budget and
+  delay between attempts are unchanged, only what happens on each individual
+  retry. No public API changes: the WINNING attempt's name is still the one
+  `GenericContainer.checkpoint()`'s returned `Checkpoint` and every
+  subsequent call against the container transparently target, exactly as
+  before.
+
+### Fixed
+
+- **Checkpointing a container whose backend renames the sandbox mid-reboot no
+  longer leaks its exit-path cleanup registration.** `GenericContainer
+  .checkpoint()` on the microsandbox backend mutates the live handle's own id
+  to the fresh post-reboot sandbox name (see the fresh-name reboot entry
+  above); the process-exit cleanup registry (`core/cleanup.ts`) keys its
+  entry by the id a container had at `start()` time, so a later `stop()` —
+  looking itself up by the handle's CURRENT, renamed id — could never find
+  and remove that original entry, leaking it for the rest of the process.
+  `checkpoint()` now re-keys its own registration whenever the backend
+  renames the handle during the call, mirroring the same `keepAlive`
+  exclusion `start()` already applies before registering in the first place.
+  Harmless on docker (which never renames a handle), but on microsandbox this
+  leaked one stale entry per checkpoint — invisible in an ordinary process
+  lifetime, but under Bun (which runs an entire test suite in one shared
+  process) it accumulated across test files and broke unrelated assertions
+  that the live-container registry (`liveContainers()`, `diagnostics()`'s own
+  data source) starts empty.
 
 ## [0.7.9] - 2026-09-10
 

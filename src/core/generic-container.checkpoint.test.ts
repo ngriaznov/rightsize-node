@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, it, assert } from "../../test/harness.js";
+import { describe, it, assert, afterEach } from "../../test/harness.js";
 import { GenericContainer } from "./generic-container.js";
 import { Network } from "./network.js";
 import {
@@ -18,6 +18,7 @@ import { registerBackend, Backends, _resetRegistryForTests, _providersSnapshotFo
 import type { BackendProvider } from "./backend.js";
 import { readSandboxNames } from "./reaper/ledger.js";
 import { readCheckpointRegistry, listCheckpointNames } from "./checkpoint/registry.js";
+import { liveContainers, _resetForTests } from "./cleanup.js";
 
 function instantReady(): WaitStrategy {
   return {
@@ -1066,5 +1067,69 @@ describe("GenericContainer.checkpoint() — network links across a workload-rest
 
     await container.stop();
     await sibling.stop();
+  });
+});
+
+/**
+ * Same fake as `FakeCheckpointBackend`, but ALSO mutates `handle.id`/
+ * `handle.spec` in place on a successful `createCheckpoint()` — standing in
+ * for `MsbCliBackend`'s own reboot-under-a-fresh-name rename (see that
+ * method's own doc) so the cleanup-registry re-keying `GenericContainer
+ * .checkpoint()` itself owns can be exercised without a real msb binary.
+ */
+class FakeRenamingCheckpointBackend extends FakeCheckpointBackend {
+  private renameSeq = 0;
+
+  override async createCheckpoint(handle: SandboxHandle, ref: string): Promise<string> {
+    const effectiveRef = await super.createCheckpoint(handle, ref);
+    this.renameSeq += 1;
+    const freshId = `fake-renamed-${this.renameSeq}`;
+    const mutableHandle = handle as { id: string; spec: ContainerSpec };
+    mutableHandle.id = freshId;
+    mutableHandle.spec = { ...handle.spec, name: freshId };
+    return effectiveRef;
+  }
+}
+
+describe("GenericContainer.checkpoint() — cleanup-registry re-keying", () => {
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  // Regression test for the cleanup-registry leak: cleanup.ts's `registered`
+  // map is keyed by `handle.id` AT REGISTRATION TIME (start()'s own
+  // registerSyncCleanup call), but a backend whose checkpoint reboots under a
+  // fresh identity (msb's own createCheckpoint, see its own doc) mutates
+  // `handle.id` in place once that reboot succeeds. stop()'s own
+  // unregisterSyncCleanup(handle.id) then looks the entry up under the NEW
+  // id, missing the entry still sitting under the OLD one — which leaks
+  // forever, exactly the shape that broke diagnostics.test.ts's own
+  // liveContainers()-starts-empty assertion under bun (every test file
+  // shares one process there). start() -> checkpoint() -> stop() must leave
+  // liveContainers() empty, same as the plain start()/stop() case.
+  it("start() -> checkpoint() -> stop() leaves liveContainers() empty even when checkpoint() renames the handle", async () => {
+    const backend = new FakeRenamingCheckpointBackend("fake-renaming", {
+      hardwareIsolated: true,
+      checkpoint: true,
+      checkpointRestartsWorkload: false,
+    });
+    const container = new GenericContainer("alpine:3.19")
+      .withBackend(backend)
+      .withCommand("sleep", "60")
+      .waitingFor(instantReady());
+
+    assert.equal(liveContainers().length, 0);
+    await container.start();
+    assert.equal(liveContainers().length, 1);
+
+    await container.checkpoint();
+    assert.equal(
+      liveContainers().length,
+      1,
+      "expected the rename to re-key the existing registry entry, not duplicate or drop it",
+    );
+
+    await container.stop();
+    assert.equal(liveContainers().length, 0, "expected stop() to unregister the RENAMED entry, leaving none behind");
   });
 });

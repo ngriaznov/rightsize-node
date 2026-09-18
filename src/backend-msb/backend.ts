@@ -82,23 +82,27 @@ const RESTORE_ACCESS_DENIED_RETRY_DELAY_MS = 500;
 
 /**
  * How long `createCheckpoint`'s own reboot step keeps retrying msb's
- * "sandbox already exists" refusal (see `isSandboxAlreadyExistsFailure`),
- * and the pause between attempts — the same install-lock-poll shape
- * `INSTALL_LOCK_RETRY_BUDGET_MS`/`INSTALL_LOCK_RETRY_DELAY_MS` already use.
- * EMPIRICALLY VERIFIED against msb 0.7.1's own source
- * (`prepare_create_target` in `sdk/rust/lib/backend/local/sandbox/create.rs`:
- * `existing.is_some() || dir_exists`): the checkpoint cycle's `rm` can
- * return once the sandbox's database record clears, well before its
- * on-disk directory actually releases on Windows — observed on CI exceeding
- * 3.5s under load — so the very next `restore` under the same name can race
- * that lingering directory into this refusal. A few hundred milliseconds
- * (this backend's earlier retry shape, before this budget existed) is
- * nowhere near enough to outlast that; ~30s at 2s intervals comfortably
- * does, while a refusal that outlives even that still fails clearly instead
- * of hanging. `createCheckpoint`'s reboot now restores under a FRESH name
- * rather than the same one (see its own doc), which avoids this exact race
- * structurally — this budget stays live as dormant defense rather than
- * being removed. See `rebootRetryingAlreadyExists`.
+ * "sandbox already exists" refusal (see `isSandboxAlreadyExistsFailure`) and
+ * its Windows access-denied refusal on the just-written snapshot artifact
+ * (see `isRestoreAccessDeniedFailure`), and the pause between attempts — the
+ * same install-lock-poll shape `INSTALL_LOCK_RETRY_BUDGET_MS`/
+ * `INSTALL_LOCK_RETRY_DELAY_MS` already use. EMPIRICALLY VERIFIED against a
+ * real msb 0.7.1 binary (an isolated `MSB_HOME` testbed): `msb restore
+ * --name X` validates the artifact FIRST — an integrity failure exits 1 and
+ * leaves NO sandbox record — but a failure AFTER validation (matching either
+ * classified signature above) leaves `X` behind as a STOPPED SANDBOX RECORD
+ * visible in `msb ls`, and msb's own restore-time collision check
+ * (`existing.is_some() || dir_exists`, `prepare_create_target` in
+ * `sdk/rust/lib/backend/local/sandbox/create.rs`) then refuses any retry
+ * under that SAME name — on Windows CI this refusal has been observed
+ * holding for the whole span of a same-name retry loop under load. Each
+ * retry attempt therefore mints a BRAND NEW name rather than reusing the one
+ * that just failed (see `rebootUnderFreshName`), which sidesteps that exact
+ * collision structurally — a name nothing else has ever used cannot collide
+ * with a record or a lingering on-disk directory belonging to a name nothing
+ * will ever restore under again. This budget bounds how long that
+ * fresh-name retry loop as a whole keeps advancing before giving up, not a
+ * single name's own collision.
  */
 const CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS = 30_000;
 const CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_DELAY_MS = 2_000;
@@ -188,9 +192,11 @@ class RestoreAccessDeniedError extends Error {
  * `start()` path (a `GenericContainer.fromCheckpoint(cp).start()` restore
  * of a name that turns out to still be live) surfaces it immediately, a
  * real error. Only `createCheckpoint`'s own reboot step, via
- * `rebootRetryingAlreadyExists`, retries it — a caller reusing a live name
- * is never this backend's own race to hide, but the checkpoint cycle's own
- * `rm`-then-restore of the SAME name is exactly that race.
+ * `rebootUnderFreshName`, retries it — under a NEWLY minted name each time,
+ * never the one that just collided (see that method's own doc) — a caller
+ * reusing a live name is never this backend's own race to hide, but the
+ * checkpoint cycle's own historical `rm`-then-restore of the SAME name was
+ * exactly that race.
  */
 class SandboxAlreadyExistsError extends Error {
   constructor(readonly output: string) {
@@ -476,7 +482,7 @@ export class MsbCliBackend implements SandboxBackend {
   // anything) has a best-effort synchronous read of it. Never written to
   // except by this one .then() below; never awaited anywhere else.
   private resolvedMsbPath: string | undefined;
-  // Test-only override seam for rebootRetryingAlreadyExists' own budget/delay
+  // Test-only override seam for rebootUnderFreshName's own budget/delay
   // — defaults to the real CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS/
   // _DELAY_MS constants so production behavior is unchanged. Without this, a
   // budget-exhaustion red-proof would mean a unit test actually blocking for
@@ -560,8 +566,30 @@ export class MsbCliBackend implements SandboxBackend {
    * "image" — never a real OCI reference `msb image remove` can act on
    * meaningfully; this predates the 0.7.1 migration (the same was true of
    * `--from-snapshot` boots) and is unchanged here.
+   *
+   * `retryAccessDenied` (default `true`) gates ONLY the
+   * `RestoreAccessDeniedError` branch below — every other classified retry
+   * always runs regardless. The ordinary `start()` path (including a plain
+   * `GenericContainer.fromCheckpoint(cp).start()` restore) leaves it at the
+   * default: that access-denied transient is a brief file-handle release lag
+   * on msb's own just-written artifact, unrelated to the sandbox's name, so
+   * retrying under the SAME name/handle is correct there. `createCheckpoint`'s
+   * own reboot (`rebootUnderFreshName`) passes `false`: per the fresh-naming
+   * policy (see that method's own doc), a restore that fails PAST msb's own
+   * validation — which is exactly what this access-denied signature is, per
+   * the live-verified dossier this backend's fresh-naming behavior is built
+   * from — can leave the attempted name behind as a stopped sandbox record,
+   * so a retry there must mint a NEW name rather than reuse the one that just
+   * failed; `rebootUnderFreshName` owns that retry itself, one layer up, and
+   * needs this error to propagate on the first hit rather than being
+   * absorbed here under the same name.
    */
-  private async bootClassified(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
+  private async bootClassified(
+    msbPath: string,
+    handle: SandboxHandle,
+    state: HandleState,
+    options: { retryAccessDenied: boolean } = { retryAccessDenied: true },
+  ): Promise<void> {
     let firstOutput: string;
     try {
       await this.bootOnce(msbPath, handle, state);
@@ -618,6 +646,13 @@ export class MsbCliBackend implements SandboxBackend {
         }
       }
       if (first instanceof RestoreAccessDeniedError) {
+        if (!options.retryAccessDenied) {
+          // The checkpoint reboot's own fresh-naming retry
+          // (`rebootUnderFreshName`) owns this error class itself, one layer
+          // up — see this method's own doc on `retryAccessDenied`. Propagate
+          // immediately rather than retrying it here under the same name.
+          throw first;
+        }
         // Windows-only in practice (see isRestoreAccessDeniedFailure's own
         // doc): a brief file-handle release lag on the just-written snapshot
         // artifact right after the source sandbox's own teardown. A short,
@@ -1222,67 +1257,113 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
-   * `createCheckpoint`'s own reboot step, with msb's "sandbox already
-   * exists" refusal (`SandboxAlreadyExistsError`, see
-   * `isSandboxAlreadyExistsFailure`'s own doc) retried on a bounded budget
-   * instead of surfaced immediately. Originally written because the
-   * checkpoint cycle's `rm` right before this can return once the sandbox's
-   * database record clears, well before its on-disk directory actually
-   * releases on a loaded Windows host, so a `restore` under the SAME name
-   * could race that lingering directory straight into msb's own refusal —
-   * see `CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS`'s own doc. The
-   * reboot this now guards restores under a FRESH name instead (see
-   * `createCheckpoint`'s own doc), which sidesteps that exact race
-   * structurally — a name nothing else has ever used cannot collide with a
-   * lingering directory belonging to a name nothing will ever restore under
-   * again. This retry stays as DORMANT DEFENSE regardless: it is cheap,
-   * still correct if `SandboxAlreadyExistsError` were ever hit for some
-   * other reason, and simply will not trigger on the ordinary path anymore.
+   * `createCheckpoint`'s own reboot step. Mints a NEW sandbox name from
+   * `nextSandboxName()` (the same generator `GenericContainer.start()`'s own
+   * boot loop uses) for EVERY attempt, tracks it in the reaper ledger BEFORE
+   * that attempt's restore runs (mirroring `GenericContainer.start()`'s own
+   * `trackSandbox` call, keepAlive-excluded the same way), and retries two
+   * classified failure signatures on that basis instead of surfacing either
+   * immediately: msb's "sandbox already exists" refusal
+   * (`SandboxAlreadyExistsError`, see `isSandboxAlreadyExistsFailure`'s own
+   * doc) and its Windows access-denied refusal on the just-written snapshot
+   * artifact (`RestoreAccessDeniedError`, see `isRestoreAccessDeniedFailure`'s
+   * own doc — retried here rather than inside `bootClassified` itself, via
+   * that method's own `retryAccessDenied: false`, see its doc).
+   *
+   * LIVE-VERIFIED POLICY this retry is built from: `msb restore --name X`
+   * validates the artifact FIRST — an integrity failure exits 1 and leaves NO
+   * sandbox record — but a failure AFTER validation (a block-device open
+   * PermissionDenied on unix; `RestoreAccessDeniedError`'s own signature on
+   * Windows) leaves `X` behind as a STOPPED SANDBOX RECORD visible in `msb
+   * ls`, and any retry of `restore --name X` then fails with msb's own
+   * "already exists" refusal — so a same-name retry of EITHER classified
+   * failure only ever collides with itself. Reusing a failed attempt's name
+   * is therefore never safe (`msb rm` alone is not reliably enough either: on
+   * Windows it frees only the DB record, not the on-disk directory, which can
+   * outlive it well past this budget — see the fresh-name reboot's own doc on
+   * `createCheckpoint`) — the only universally safe policy is a NEW name per
+   * attempt, same as this backend's ordinary `start()` boot loop already uses
+   * for its own, unrelated port-conflict retries. On a classified failure
+   * this best-effort `msb rm`'s the failed attempt's own name anyway (result
+   * ignored — cheap cleanup, and correctness no longer depends on it now
+   * that the next attempt never reuses that name) and untracks it from the
+   * ledger, before advancing to a freshly minted name for the next attempt.
    *
    * `this.checkpointRebootAlreadyExistsRetryBudgetMs`/`_RetryDelayMs` back
-   * this loop rather than the bare module constants directly, so a
-   * budget-exhaustion test can shrink them to milliseconds instead of
-   * actually blocking for the real ~30s — see those fields' own doc.
+   * this loop's overall deadline/delay rather than the bare
+   * `CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS`/`_DELAY_MS` constants
+   * directly, so a budget-exhaustion test can shrink them to milliseconds
+   * instead of actually blocking for the real ~30s — see those fields' own
+   * doc. Only `SandboxAlreadyExistsError`/`RestoreAccessDeniedError` are
+   * retried here; any other failure `bootClassified` throws (on the first
+   * attempt or a later one) propagates immediately, unretried, WITHOUT
+   * advancing to a new name — `createCheckpoint`'s own caller untracks that
+   * attempt's name on this path (see its own catch block). Never reached by
+   * the ordinary `start()` path: a `GenericContainer.fromCheckpoint(cp)
+   * .start()` restore of a fresh name calls `bootClassified` directly (its
+   * default `retryAccessDenied: true`), whose own catch chain has never
+   * caught `SandboxAlreadyExistsError` and still doesn't — an already-exists
+   * failure there (only reachable if a caller reuses a name that is still
+   * live) keeps propagating as-is, a real error rather than this backend's
+   * own release race to paper over; a `RestoreAccessDeniedError` there is
+   * retried under the SAME name, since that transient is unrelated to naming
+   * and the caller-supplied name is not this backend's own to change.
    *
-   * Only `SandboxAlreadyExistsError` is retried here; any other failure
-   * `bootClassified` throws (on the first attempt or a later one) propagates
-   * immediately, unretried — this exists for exactly the one known-transient
-   * signature, not as a generic reboot retry. Never reached by the ordinary
-   * `start()` path: a `GenericContainer.fromCheckpoint(cp).start()` restore
-   * of a fresh name calls `bootClassified` directly, whose own catch chain
-   * has never caught `SandboxAlreadyExistsError` and still doesn't — an
-   * already-exists failure there (only reachable if a caller reuses a name
-   * that is still live) keeps propagating as-is, a real error rather than
-   * this backend's own release race to paper over.
+   * Returns the WINNING attempt's own `SandboxHandle` (a fresh object, never
+   * `undefined`) — `createCheckpoint` re-keys its runtime registries and the
+   * caller's live handle from this, not from a name minted up front.
    */
-  private async rebootRetryingAlreadyExists(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
-    try {
-      await this.bootClassified(msbPath, handle, state);
-      return;
-    } catch (first) {
-      if (!(first instanceof SandboxAlreadyExistsError)) {
-        throw first;
+  private async rebootUnderFreshName(
+    msbPath: string,
+    sourceSpec: ContainerSpec,
+    effectiveRef: string,
+    capturedCommand: ReadonlyArray<string> | undefined,
+    state: HandleState,
+  ): Promise<SandboxHandle> {
+    const deadline = Date.now() + this.checkpointRebootAlreadyExistsRetryBudgetMs;
+    let attempt = 0;
+    let last: SandboxAlreadyExistsError | RestoreAccessDeniedError | undefined;
+    for (;;) {
+      attempt += 1;
+      const name = nextSandboxName();
+      if (!sourceSpec.keepAlive) {
+        await trackSandbox(name);
       }
-      const deadline = Date.now() + this.checkpointRebootAlreadyExistsRetryBudgetMs;
-      let last = first;
-      while (Date.now() < deadline) {
-        await sleep(this.checkpointRebootAlreadyExistsRetryDelayMs);
-        try {
-          await this.bootClassified(msbPath, handle, state);
-          return;
-        } catch (again) {
-          if (!(again instanceof SandboxAlreadyExistsError)) {
-            throw again;
+      const rebootHandle: SandboxHandle = {
+        id: name,
+        spec: { ...sourceSpec, name, checkpointRef: effectiveRef, command: sourceSpec.command ?? capturedCommand },
+      };
+      try {
+        await this.bootClassified(msbPath, rebootHandle, state, { retryAccessDenied: false });
+        return rebootHandle;
+      } catch (err) {
+        const classified = err instanceof SandboxAlreadyExistsError || err instanceof RestoreAccessDeniedError;
+        if (!classified) {
+          if (!sourceSpec.keepAlive) {
+            await untrackSandbox(name);
           }
-          last = again;
+          throw err;
         }
+        // Best-effort: ignore the result either way — a "not found" is as
+        // fine as an actual removal, and this is cleanup, not something the
+        // next attempt (a brand-new name) depends on for correctness.
+        await invoke(msbPath, MsbCommands.rm(name), STOP_TIMEOUT_MS).catch(() => {});
+        if (!sourceSpec.keepAlive) {
+          await untrackSandbox(name);
+        }
+        last = err;
+        if (Date.now() >= deadline) {
+          throw new BackendError(
+            `msb restore kept hitting msb's "sandbox already exists"/access-denied refusal for ` +
+              `${this.checkpointRebootAlreadyExistsRetryBudgetMs / 1000}s across ${attempt} attempt` +
+              `${attempt === 1 ? "" : "s"}, each under a freshly minted name — msb's own on-disk sandbox ` +
+              `directory can lag its database record's own release on a loaded Windows host well past a short ` +
+              `wait, but a refusal held this long looks like a genuinely stuck host rather than a release ` +
+              `race.\nlast attempt ('${name}'):\n${last.output}`,
+          );
+        }
+        await sleep(this.checkpointRebootAlreadyExistsRetryDelayMs);
       }
-      throw new BackendError(
-        `msb restore for sandbox ${handle.id} kept hitting msb's "sandbox already exists" refusal for ` +
-          `${this.checkpointRebootAlreadyExistsRetryBudgetMs / 1000}s — msb's own on-disk sandbox directory ` +
-          `can lag its database record's own release on a loaded Windows host well past a short wait, but a ` +
-          `refusal held this long looks like a genuinely stuck sandbox rather than a release race.\n${last.output}`,
-      );
     }
   }
 
@@ -1294,19 +1375,27 @@ export class MsbCliBackend implements SandboxBackend {
    * EFFECTIVE checkpoint ref this method returns; see
    * `parseSnapshotCreateArtifactPath`), then `msb rm <name>` followed by
    * `msb restore <effective-ref> --name <fresh-name>` of a FRESH name from
-   * that snapshot (via `bootRestoreOnce`, see `MsbCommands.restore`'s own
-   * doc — no `--disk-only`, which a disk-scope snapshot rejects) — never
-   * `msb start`. The fresh name — never the original — is minted by
-   * `nextSandboxName()` (the same generator `GenericContainer.start()`'s own
-   * ordinary boot loop uses; see `core/sandbox-name.ts`) because msb's own
-   * restore-time collision check (`existing.is_some() || dir_exists`) can
-   * still see the just-`rm`-ed sandbox's on-disk directory as present for a
-   * window after `msb rm` returns — EMPIRICALLY VERIFIED on Windows CI, that
-   * directory has outlived the database record by more than 3.5 seconds
-   * under load (see `CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS`'s own
-   * doc). A same-name restore only ever RETRIES through that race; a
-   * different name sidesteps it structurally — a name nothing else is using
-   * can never collide with a lingering directory. On success, this method
+   * that snapshot (via `rebootUnderFreshName`/`bootRestoreOnce`, see
+   * `MsbCommands.restore`'s own doc — no `--disk-only`, which a disk-scope
+   * snapshot rejects) — never `msb start`. The fresh name — never the
+   * original — is minted by `nextSandboxName()` (the same generator
+   * `GenericContainer.start()`'s own ordinary boot loop uses; see
+   * `core/sandbox-name.ts`), and a NEW one is minted for EVERY attempt, never
+   * just once for the whole reboot: EMPIRICALLY VERIFIED against a real msb
+   * 0.7.1 binary, a restore that fails PAST msb's own artifact validation
+   * (its Windows access-denied signature, `RestoreAccessDeniedError`) leaves
+   * its `--name` behind as a STOPPED SANDBOX RECORD, and any retry under that
+   * SAME name then collides with msb's own restore-time collision check
+   * (`existing.is_some() || dir_exists`) immediately — CONFIRMED on Windows
+   * CI, where five checkpoint tests collided on their fresh reboot names for
+   * the retry loop's ENTIRE budget once the first attempt hit that
+   * access-denied failure (see `CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS`'s
+   * own doc). A same-name retry therefore only ever retries through a race of
+   * its own making; a NEW name per attempt sidesteps it structurally — a name
+   * nothing else has ever used can never collide with a record or a lingering
+   * directory left by a name nothing will ever restore under again (see
+   * `rebootUnderFreshName`'s own doc for the full retry policy, including its
+   * best-effort `msb rm` of each failed attempt's own name). On success, this method
    * mutates `handle.id` and `handle.spec` (name only — see below) IN PLACE
    * on the caller's own `handle`, so every subsequent operation against it
    * (exec/logs/stop/rm, and — one layer up, via the SAME `SandboxHandle`
@@ -1347,10 +1436,12 @@ export class MsbCliBackend implements SandboxBackend {
    * `MsbCommands.restore`) reproduces the exact same observable contract
    * MODULO the name itself, which was always an implementation detail, not
    * part of what a checkpoint promises to preserve. This backend's own
-   * `handles`/`startedNames` registries ARE re-keyed from the old name to
-   * the new one (see below), and the fresh name is tracked in the reaping
-   * ledger before the restore is even attempted, exactly like an ordinary
-   * `create()` — the old name's own ledger entry is deliberately left alone,
+   * `handles`/`startedNames` registries ARE re-keyed from the original name
+   * to the WINNING attempt's name (see below), and each attempt's own fresh
+   * name is tracked in the reaping ledger before that attempt's restore is
+   * even attempted, exactly like an ordinary `create()` — a failed attempt's
+   * name is untracked again by `rebootUnderFreshName` itself, while the
+   * original name's own ledger entry is deliberately left alone throughout,
    * for the ledger's existing not-found-tolerant sweep to find (it was
    * already `msb rm`-ed above). Its workload restarts from scratch (the VM
    * reboots), which is why `capabilities.checkpointRestartsWorkload` is
@@ -1465,72 +1556,51 @@ export class MsbCliBackend implements SandboxBackend {
 
     await invoke(msbPath, MsbCommands.rm(originalName), STOP_TIMEOUT_MS).catch(() => {});
 
-    // A FRESH sandbox name for the reboot — never `originalName` — from the
-    // SAME generator every ordinary GenericContainer.start() boot uses (see
-    // core/sandbox-name.ts's own doc on why this is the one, shared counter).
-    // See this method's own doc for why: msb's own restore-time collision
-    // check can still see the just-`rm`-ed sandbox's on-disk directory as
-    // present for a window after `msb rm` returns, on a loaded Windows host,
-    // and a fresh name sidesteps that race structurally rather than merely
-    // retrying through it.
-    const freshName = nextSandboxName();
-
-    // Tracked in the reaping ledger BEFORE the restore is even attempted —
-    // exactly like an ordinary create() (see GenericContainer.start()'s own
-    // trackSandbox call) — so a process that dies mid-reboot still leaves
-    // the ledger a superset of this run's live sandboxes. `originalName`'s
-    // own ledger entry is deliberately left alone: it was already `msb
-    // rm`-ed above, and the ledger's sweep is already not-found-tolerant for
-    // exactly this shape (a name the ledger still lists but msb itself has
-    // no record of).
-    if (!handle.spec.keepAlive) {
-      await trackSandbox(freshName);
-    }
-
     // `command` resolves the same way `fromCheckpointRegistryEntry` resolves
     // it for a later, registry-mediated restore: the source's own explicit
     // command first, the guest cmdline just captured above as the fallback —
     // so `reviveWorkload`, inside the reboot this triggers next, already has
     // the fully-resolved workload argv without any restore-time lookup. This
-    // merged `command` (and `checkpointRef`) live ONLY on `rebootHandle`,
-    // never on the caller's own `handle.spec` (mutated below) — that spec
-    // must keep reading back exactly what the SOURCE container's own
-    // `spec.command` was (`undefined` when there was none), since
-    // `GenericContainer.checkpoint()` reads `handle.spec` again right after
-    // this returns to build the named-checkpoint registry entry, which
-    // pins that same "explicit command vs. captured fallback" distinction
-    // as two separate fields (see `CheckpointRegistryEntry`'s own doc).
-    const rebootHandle: SandboxHandle = {
-      id: freshName,
-      spec: { ...handle.spec, name: freshName, checkpointRef: effectiveRef, command: handle.spec.command ?? capturedCommand },
-    };
+    // merged `command` (and `checkpointRef`) live ONLY on each attempt's own
+    // handle inside `rebootUnderFreshName`, never on the caller's own
+    // `handle.spec` (mutated below) — that spec must keep reading back
+    // exactly what the SOURCE container's own `spec.command` was (`undefined`
+    // when there was none), since `GenericContainer.checkpoint()` reads
+    // `handle.spec` again right after this returns to build the
+    // named-checkpoint registry entry, which pins that same "explicit
+    // command vs. captured fallback" distinction as two separate fields (see
+    // `CheckpointRegistryEntry`'s own doc).
+    //
+    // `rebootUnderFreshName` owns minting a NEW name per attempt (never
+    // `originalName`, never a prior failed attempt's own name), tracking each
+    // one in the reaping ledger before that attempt's restore runs, and —
+    // per attempt — best-effort `msb rm`-ing and untracking a failed name
+    // before advancing to another fresh one (see that method's own doc for
+    // the full policy). `originalName`'s own ledger entry is deliberately
+    // left alone throughout: it was already `msb rm`-ed above, and the
+    // ledger's sweep is already not-found-tolerant for exactly this shape (a
+    // name the ledger still lists but msb itself has no record of).
+    let rebootHandle: SandboxHandle;
     try {
-      await this.rebootRetryingAlreadyExists(msbPath, rebootHandle, state);
+      rebootHandle = await this.rebootUnderFreshName(msbPath, handle.spec, effectiveRef, capturedCommand, state);
     } catch (err) {
-      // The fresh name never came up — untrack it again rather than leaving
-      // a permanently-stale ledger entry for a name this method will never
-      // retry under (mirrors GenericContainer.start()'s own untrackSandbox
-      // call on a failed attempt).
-      if (!handle.spec.keepAlive) {
-        await untrackSandbox(freshName);
-      }
       const detail = err instanceof Error ? err.message : String(err);
       throw new BackendError(
         `sandbox '${originalName}' was removed after a successful checkpoint snapshot, but booting a fresh ` +
-          `sandbox back up from that snapshot under the new name '${freshName}' failed: ${detail} — the ` +
-          `sandbox's disk state is preserved in checkpoint '${effectiveRef}', restorable via ` +
-          `GenericContainer.fromCheckpoint().`,
+          `sandbox back up from that snapshot failed: ${detail} — the sandbox's disk state is preserved in ` +
+          `checkpoint '${effectiveRef}', restorable via GenericContainer.fromCheckpoint().`,
       );
     }
+    const freshName = rebootHandle.id;
 
-    // The reboot succeeded under `freshName`, not `originalName` — re-key
-    // this backend's own runtime registries (see class doc on `handles`),
-    // then publish the new identity onto the CALLER's own handle object, IN
-    // PLACE, so every subsequent operation on it targets the sandbox
-    // actually running now (see this method's own doc). Only `id`/`spec.name`
-    // change on the live handle — `spec.command`/`spec.checkpointRef` stay
-    // exactly as they were on the SOURCE spec; see the comment on
-    // `rebootHandle` above for why.
+    // The reboot succeeded under `freshName` — the WINNING attempt's own
+    // name, not `originalName` — re-key this backend's own runtime
+    // registries (see class doc on `handles`), then publish the new identity
+    // onto the CALLER's own handle object, IN PLACE, so every subsequent
+    // operation on it targets the sandbox actually running now (see this
+    // method's own doc). Only `id`/`spec.name` change on the live handle —
+    // `spec.command`/`spec.checkpointRef` stay exactly as they were on the
+    // SOURCE spec; see the comment above for why.
     this.handles.delete(originalName);
     this.handles.set(freshName, state);
     this.startedNames.delete(originalName);

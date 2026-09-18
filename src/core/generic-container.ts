@@ -1167,7 +1167,30 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     // `createCheckpoint` discovered from `msb snapshot create`'s own stdout
     // — never necessarily `ref`. Everything downstream (the registry entry,
     // the returned `Checkpoint`) uses this, not the working `ref`.
+    //
+    // Captured BEFORE the call: a backend whose checkpoint reboots the
+    // workload under a fresh identity (msb's `createCheckpoint`, see its own
+    // doc) mutates `handle.id` IN PLACE once that reboot succeeds — the same
+    // carve-out `SandboxBackend.createCheckpoint`'s own interface doc
+    // documents. `registerSyncCleanup` (see start(), above) keyed its exit-path
+    // teardown entry by the OLD id; if the id just changed, that registration
+    // must be re-keyed to the new one too, or the old entry leaks in
+    // `cleanup.ts`'s registry forever (stop() below only ever unregisters by
+    // the CURRENT `handle.id`, which after a rename no longer matches what
+    // was registered) — silently breaking both the exit-path teardown for
+    // this container AND `liveContainers()`/diagnostics, which read that same
+    // registry.
+    const preCheckpointHandleId = handle.id;
     const effectiveRef = await backend.createCheckpoint(handle, ref);
+    if (handle.id !== preCheckpointHandleId && !handle.spec.keepAlive) {
+      // Mirrors start()'s own keepAlive exclusion: a keepAlive container was
+      // never registered in the first place, so there is nothing to re-key.
+      // The cleanup closure below reads `handle.id` dynamically (see
+      // start()'s own registerSyncCleanup call), so re-registering it under
+      // the new id is automatically correct without capturing anything else.
+      unregisterSyncCleanup(preCheckpointHandleId);
+      registerSyncCleanup(handle, backend, () => backend.cleanupSync(handle.id));
+    }
     if (backend.capabilities.checkpointRestartsWorkload) {
       // The backend checkpoint call above already succeeded — the artifact
       // exists — but the reboot it triggered can still leave this container
