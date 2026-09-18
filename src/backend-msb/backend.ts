@@ -571,18 +571,18 @@ export class MsbCliBackend implements SandboxBackend {
    * `RestoreAccessDeniedError` branch below — every other classified retry
    * always runs regardless. The ordinary `start()` path (including a plain
    * `GenericContainer.fromCheckpoint(cp).start()` restore) leaves it at the
-   * default: that access-denied transient is a brief file-handle release lag
-   * on msb's own just-written artifact, unrelated to the sandbox's name, so
-   * retrying under the SAME name/handle is correct there. `createCheckpoint`'s
-   * own reboot (`rebootUnderFreshName`) passes `false`: per the fresh-naming
-   * policy (see that method's own doc), a restore that fails PAST msb's own
-   * validation — which is exactly what this access-denied signature is, per
-   * the live-verified dossier this backend's fresh-naming behavior is built
-   * from — can leave the attempted name behind as a stopped sandbox record,
-   * so a retry there must mint a NEW name rather than reuse the one that just
-   * failed; `rebootUnderFreshName` owns that retry itself, one layer up, and
-   * needs this error to propagate on the first hit rather than being
-   * absorbed here under the same name.
+   * default, delegating to `retryRestoreAfterAccessDenied` — see that
+   * method's own doc for why it, like `createCheckpoint`'s own reboot, must
+   * mint a fresh name for every retry rather than reusing the one that just
+   * failed: the live-verified dossier this backend's fresh-naming behavior
+   * is built from says a restore that fails PAST msb's own artifact
+   * validation (this access-denied signature included) leaves the attempted
+   * name behind as a stopped sandbox record, so a same-name retry only ever
+   * collides with that record instead of retrying the actual transient.
+   * `createCheckpoint`'s own reboot (`rebootUnderFreshName`) passes `false`:
+   * it owns this error class itself, one layer up, via its own fresh-naming
+   * loop, and needs this error to propagate on the first hit rather than
+   * being retried here at all.
    */
   private async bootClassified(
     msbPath: string,
@@ -650,34 +650,11 @@ export class MsbCliBackend implements SandboxBackend {
           // The checkpoint reboot's own fresh-naming retry
           // (`rebootUnderFreshName`) owns this error class itself, one layer
           // up — see this method's own doc on `retryAccessDenied`. Propagate
-          // immediately rather than retrying it here under the same name.
+          // immediately rather than retrying it here at all.
           throw first;
         }
-        // Windows-only in practice (see isRestoreAccessDeniedFailure's own
-        // doc): a brief file-handle release lag on the just-written snapshot
-        // artifact right after the source sandbox's own teardown. A short,
-        // bounded number of retries covers it without masking a genuinely
-        // stuck lock — only ever reached from bootRestoreOnce, since this
-        // signature is specific to a restore invocation's own artifact read.
-        let last = first;
-        for (let attempt = 1; attempt <= RESTORE_ACCESS_DENIED_RETRY_LIMIT; attempt++) {
-          await sleep(RESTORE_ACCESS_DENIED_RETRY_DELAY_MS);
-          try {
-            await this.bootOnce(msbPath, handle, state);
-            return;
-          } catch (again) {
-            if (!(again instanceof RestoreAccessDeniedError)) {
-              throw again;
-            }
-            last = again;
-          }
-        }
-        throw new BackendError(
-          `msb restore for sandbox ${handle.id} hit a Windows access-denied failure on its just-written ` +
-            `snapshot artifact ${RESTORE_ACCESS_DENIED_RETRY_LIMIT} times in a row — this is normally a ` +
-            `brief file-handle release lag that clears within one retry, so a failure held this long looks ` +
-            `like a genuinely stuck lock on this host.\n${last.output}`,
-        );
+        await this.retryRestoreAfterAccessDenied(msbPath, handle, state, first);
+        return;
       }
       if (!(first instanceof ImageCacheCorruptionError)) {
         throw first;
@@ -1257,6 +1234,125 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
+   * `bootClassified`'s own retry for a `RestoreAccessDeniedError` hit on the
+   * ordinary `start()`/`fromCheckpoint().start()` path (its default
+   * `retryAccessDenied: true`) — the sibling of `rebootUnderFreshName`
+   * (`createCheckpoint`'s own reboot retry) for the SAME classified failure,
+   * built from the SAME live-verified policy: `msb restore --name X`
+   * validates the artifact FIRST — an integrity failure exits 1 and leaves
+   * NO sandbox record — but a failure AFTER validation (this access-denied
+   * signature included) leaves `X` behind as a STOPPED SANDBOX RECORD, and
+   * any retry of `restore --name X` then fails outright with msb's own
+   * "already exists" refusal rather than hitting the transient a second
+   * time. A same-name retry (what this method replaces) therefore only ever
+   * proves that collision — never the actual transient — so this mints a
+   * NEW name from `nextSandboxName()` for every retry instead, the same
+   * generator `GenericContainer.start()`'s own boot loop and
+   * `rebootUnderFreshName` both use, tracking it in the reaper ledger BEFORE
+   * that attempt's restore runs and best-effort `msb rm`-ing (then
+   * untracking) a failed attempt's own name before advancing — identical
+   * per-attempt bookkeeping to `rebootUnderFreshName`, just owned one layer
+   * lower.
+   *
+   * The difference from `rebootUnderFreshName` is entirely about WHO owns
+   * the re-keying, not the retry policy itself: `createCheckpoint` calls
+   * `rebootUnderFreshName` with no live sandbox left at all (the source was
+   * already stopped and removed as part of the snapshot step), so EVERY
+   * attempt — including the first — mints a fresh name, and the winning
+   * handle is handed back for `createCheckpoint` itself to re-key. Here,
+   * `handle` is already live under its own name when `first` (the initial
+   * `RestoreAccessDeniedError`) is caught, and `bootClassified`'s caller
+   * (`start()`) has no re-keying step of its own — it just awaits
+   * `bootClassified` and returns — so this method re-keys
+   * `this.handles`/`this.startedNames` AND mutates the caller's own `handle`
+   * object IN PLACE itself on success, the same "one carve-out"
+   * `SandboxHandle`'s own interface doc allows for `createCheckpoint`'s
+   * reboot (see that method's own doc on `handle.id`/`handle.spec`
+   * mutation).
+   *
+   * `handle`'s own original name was already tracked in the reaper ledger by
+   * `GenericContainer.start()`'s own boot loop before `create()`/`start()`
+   * ever ran (mirroring `rebootUnderFreshName`'s treatment of the checkpoint
+   * reboot's own `originalName`) — this method best-effort `msb rm`'s it
+   * once `first` is confirmed retryable, but deliberately leaves its own
+   * ledger entry alone, for the same not-found-tolerant sweep to find,
+   * rather than untracking a name this method never tracked itself.
+   *
+   * Retries up to `RESTORE_ACCESS_DENIED_RETRY_LIMIT` times,
+   * `RESTORE_ACCESS_DENIED_RETRY_DELAY_MS` apart — unchanged from the
+   * same-name retry this replaces. Each attempt goes through
+   * `bootClassified` itself with `retryAccessDenied: false` (so a
+   * `StateDbError`/`InstallLockActiveError`/`ImageCacheCorruptionError` hit
+   * mid-retry still gets its own ordinary classified handling; only
+   * `RestoreAccessDeniedError`'s own retry is owned here) and treats either
+   * `RestoreAccessDeniedError` or `SandboxAlreadyExistsError` as retryable —
+   * a freshly minted name should never collide, but `rebootUnderFreshName`'s
+   * own live-CI evidence says a loaded host can still refuse one, and the
+   * SAME fresh-naming response (rm the failed name, mint another) covers
+   * both signatures identically. Anything else propagates immediately,
+   * unretried.
+   */
+  private async retryRestoreAfterAccessDenied(
+    msbPath: string,
+    handle: SandboxHandle,
+    state: HandleState,
+    first: RestoreAccessDeniedError,
+  ): Promise<void> {
+    const originalName = handle.id;
+    // Best-effort: `first` may have left a stopped sandbox record behind
+    // under `originalName` (see this method's own doc) — cheap cleanup, and
+    // correctness never depends on it, since no retry below ever reuses this
+    // name. Its own ledger entry is deliberately left alone; see this
+    // method's own doc.
+    await invoke(msbPath, MsbCommands.rm(originalName), STOP_TIMEOUT_MS).catch(() => {});
+
+    let last: RestoreAccessDeniedError | SandboxAlreadyExistsError = first;
+    for (let attempt = 1; attempt <= RESTORE_ACCESS_DENIED_RETRY_LIMIT; attempt++) {
+      await sleep(RESTORE_ACCESS_DENIED_RETRY_DELAY_MS);
+      const name = nextSandboxName();
+      if (!handle.spec.keepAlive) {
+        await trackSandbox(name);
+      }
+      const candidate: SandboxHandle = { id: name, spec: { ...handle.spec, name } };
+      try {
+        await this.bootClassified(msbPath, candidate, state, { retryAccessDenied: false });
+        // Success under `name` — re-key this backend's own runtime
+        // registries (see class doc on `handles`) and publish the new
+        // identity onto the CALLER's own handle object, IN PLACE, exactly
+        // like `createCheckpoint`'s own reboot does (see its own doc).
+        this.handles.delete(originalName);
+        this.handles.set(name, state);
+        this.startedNames.delete(originalName);
+        const mutableHandle = handle as { id: string; spec: ContainerSpec };
+        mutableHandle.id = name;
+        mutableHandle.spec = candidate.spec;
+        return;
+      } catch (err) {
+        const classified = err instanceof RestoreAccessDeniedError || err instanceof SandboxAlreadyExistsError;
+        if (!classified) {
+          if (!handle.spec.keepAlive) {
+            await untrackSandbox(name);
+          }
+          throw err;
+        }
+        // Best-effort, result ignored either way — see this method's own
+        // doc on why correctness no longer depends on it.
+        await invoke(msbPath, MsbCommands.rm(name), STOP_TIMEOUT_MS).catch(() => {});
+        if (!handle.spec.keepAlive) {
+          await untrackSandbox(name);
+        }
+        last = err;
+      }
+    }
+    throw new BackendError(
+      `msb restore for sandbox ${originalName} kept hitting msb's Windows access-denied/"sandbox already ` +
+        `exists" refusal across ${RESTORE_ACCESS_DENIED_RETRY_LIMIT} retries, each under a freshly minted ` +
+        `name — this is normally a brief file-handle release lag that clears within one retry, so a failure ` +
+        `held this long looks like a genuinely stuck lock on this host.\n${last.output}`,
+    );
+  }
+
+  /**
    * `createCheckpoint`'s own reboot step. Mints a NEW sandbox name from
    * `nextSandboxName()` (the same generator `GenericContainer.start()`'s own
    * boot loop uses) for EVERY attempt, tracks it in the reaper ledger BEFORE
@@ -1298,16 +1394,12 @@ export class MsbCliBackend implements SandboxBackend {
    * retried here; any other failure `bootClassified` throws (on the first
    * attempt or a later one) propagates immediately, unretried, WITHOUT
    * advancing to a new name — `createCheckpoint`'s own caller untracks that
-   * attempt's name on this path (see its own catch block). Never reached by
+   * attempt's name on this path (see its own catch block). Not reached by
    * the ordinary `start()` path: a `GenericContainer.fromCheckpoint(cp)
-   * .start()` restore of a fresh name calls `bootClassified` directly (its
-   * default `retryAccessDenied: true`), whose own catch chain has never
-   * caught `SandboxAlreadyExistsError` and still doesn't — an already-exists
-   * failure there (only reachable if a caller reuses a name that is still
-   * live) keeps propagating as-is, a real error rather than this backend's
-   * own release race to paper over; a `RestoreAccessDeniedError` there is
-   * retried under the SAME name, since that transient is unrelated to naming
-   * and the caller-supplied name is not this backend's own to change.
+   * .start()` restore's own `RestoreAccessDeniedError` is retried by its own
+   * sibling, `retryRestoreAfterAccessDenied` (see that method's own doc) —
+   * same fresh-naming policy, applied one layer lower since that path has no
+   * separate caller left to hand a replacement handle to for re-keying.
    *
    * Returns the WINNING attempt's own `SandboxHandle` (a fresh object, never
    * `undefined`) — `createCheckpoint` re-keys its runtime registries and the

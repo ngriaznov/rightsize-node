@@ -13,12 +13,25 @@
  * Observed on Windows CI immediately after the source sandbox's own
  * teardown in the stop/snapshot/reboot checkpoint cycle — msb's docs
  * describe deferred file-handle release on Windows, and the just-written
- * snapshot artifact can still be mid-release by the OS for a brief window
- * right after the process that wrote it (or the one that just stopped the
- * source sandbox) exits. `MsbCliBackend.bootClassified` retries a restore
- * that hits this a bounded number of times with a short backoff (see
- * `RESTORE_ACCESS_DENIED_RETRY_LIMIT`/`RESTORE_ACCESS_DENIED_RETRY_DELAY_MS`)
- * rather than surfacing it as an ordinary restore failure on the first hit.
+ * snapshot artifact (or the block device backing the restored sandbox
+ * itself — unix's twin of this same class of failure is a block-device open
+ * `PermissionDenied`, os error 13) can still be mid-release by the OS for a
+ * brief window right after the process that wrote it (or the one that just
+ * stopped the source sandbox) exits. Retrying the SAME `--name` does not
+ * simply wait that lag out, though: EMPIRICALLY VERIFIED against a real msb
+ * 0.7.1 binary, this failure happens AFTER msb's own artifact validation —
+ * which leaves `--name` behind as a STOPPED SANDBOX RECORD — so a same-name
+ * retry collides with msb's own restore-time collision check immediately,
+ * rather than ever getting a second shot at the transient (see
+ * `MsbCliBackend`'s own doc on `CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS`
+ * for the full live-verified account). `MsbCliBackend.retryRestoreAfterAccessDenied`
+ * (the ordinary `start()`/`fromCheckpoint().start()` path) and
+ * `MsbCliBackend.rebootUnderFreshName` (`createCheckpoint`'s own reboot)
+ * both retry a restore that hits this a bounded number of times, each under
+ * a FRESH name rather than the one that just failed (see
+ * `RESTORE_ACCESS_DENIED_RETRY_LIMIT`/`RESTORE_ACCESS_DENIED_RETRY_DELAY_MS`
+ * for the former's own budget/delay) rather than surfacing it as an
+ * ordinary restore failure on the first hit.
  *
  * Matches CONSERVATIVELY — both `"Access is denied"` (Windows' own
  * `FormatMessage` text for `ERROR_ACCESS_DENIED`, present regardless of the

@@ -180,29 +180,34 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   application code should need to change, but anything that greps `msb ls`
   output for a specific sandbox name across a checkpoint should expect the
   new one.
-- **`createCheckpoint`'s reboot now mints a FRESH sandbox name on every retry
-  attempt, never reusing one that just failed.** LIVE-VERIFIED against a real
-  msb 0.7.1 binary: `msb restore --name X` validates the snapshot artifact
-  FIRST — an integrity failure exits 1 and leaves no sandbox record at all —
-  but a failure AFTER validation (its Windows access-denied signature in
-  particular, `RestoreAccessDeniedError`) leaves `X` behind as a STOPPED
-  SANDBOX RECORD visible in `msb ls`, and any retry of `restore --name X`
-  then fails outright with msb's own "already exists" refusal. Both the
-  already-exists retry and the Windows access-denied retry previously kept
-  retrying under the exact fresh name that had just failed — confirmed on
-  Windows CI as the root cause of five checkpoint tests colliding on their
-  own reboot names for the entire retry budget the moment the first attempt
-  hit that access-denied failure. Each retry attempt now mints a brand-new
-  name from the same generator instead of reusing the failed one, tracks it
-  in the reaper ledger before that attempt's own restore runs, and
-  best-effort `msb rm`s the failed attempt's name (result ignored — cheap
-  cleanup that correctness no longer depends on, now that the next attempt
-  never reuses that name) before advancing. The overall retry budget and
-  delay between attempts are unchanged, only what happens on each individual
-  retry. No public API changes: the WINNING attempt's name is still the one
-  `GenericContainer.checkpoint()`'s returned `Checkpoint` and every
-  subsequent call against the container transparently target, exactly as
-  before.
+- **Every msb restore retry — `createCheckpoint`'s own reboot AND the
+  ordinary `GenericContainer.fromCheckpoint().start()` path — now mints a
+  FRESH sandbox name on every attempt, never reusing one that just
+  failed.** LIVE-VERIFIED against a real msb 0.7.1 binary: `msb restore
+  --name X` validates the snapshot artifact FIRST — an integrity failure
+  exits 1 and leaves no sandbox record at all — but a failure AFTER
+  validation (its Windows access-denied signature in particular,
+  `RestoreAccessDeniedError`) leaves `X` behind as a STOPPED SANDBOX RECORD
+  visible in `msb ls`, and any retry of `restore --name X` then fails
+  outright with msb's own "already exists" refusal. Every restore retry
+  this library performs previously kept retrying under the exact name that
+  had just failed — confirmed on Windows CI as the root cause of five
+  checkpoint-reboot tests colliding on their own reboot names for the
+  entire retry budget the moment the first attempt hit that access-denied
+  failure, and the same shape awaited a first Windows access-denied hit on
+  a plain `fromCheckpoint().start()` restore, one layer down. Every retry
+  attempt (checkpoint reboot or ordinary restore alike) now mints a
+  brand-new name from the same generator instead of reusing the failed one,
+  tracks it in the reaper ledger before that attempt's own restore runs,
+  and best-effort `msb rm`s the failed attempt's name (result ignored —
+  cheap cleanup that correctness no longer depends on, now that the next
+  attempt never reuses that name) before advancing. The overall retry
+  budget/count and delay between attempts are unchanged for both paths,
+  only what happens on each individual retry. No public API changes: the
+  WINNING attempt's name is still the one `GenericContainer.checkpoint()`'s
+  returned `Checkpoint`, `fromCheckpoint().start()`'s own resolved
+  container, and every subsequent call against either transparently
+  target, exactly as before.
 
 ### Fixed
 

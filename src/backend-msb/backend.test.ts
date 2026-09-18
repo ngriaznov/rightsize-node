@@ -1020,8 +1020,14 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
   });
 
   // RED-PROOF (d): restore access-denied once then success => boot succeeds
-  // with exactly 2 restore invocations.
-  it("msb restore's Windows access-denied failure on its own snapshot artifact is retried — boot succeeds with exactly 2 restore invocations", async () => {
+  // with exactly 2 restore invocations, each under a DIFFERENT `--name` (the
+  // ordinary start()/fromCheckpoint() path's own fresh-naming retry,
+  // MsbCliBackend.retryRestoreAfterAccessDenied — see its own doc on why a
+  // same-name retry would instead collide with the stopped record the first
+  // attempt leaves behind). `handle.id`/`handle.spec.name` must end up
+  // mutated to the WINNING attempt's own name, and the failed first
+  // attempt's name must get a best-effort `msb rm`.
+  it("msb restore's Windows access-denied failure on its own snapshot artifact is retried under a fresh name — boot succeeds with exactly 2 restore invocations", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -1030,34 +1036,49 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       command: ["sleep", "60"],
     });
     const handle = await backend.create(spec);
+    const originalName = handle.id;
 
     const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
     seeded.failRestoreWithAccessDenied = 1;
     await fs.writeFile(statePath, JSON.stringify(seeded));
 
     await backend.start(handle);
+    const freshName = handle.id;
+    assert.ok(freshName !== originalName, "expected the retry to mint a fresh sandbox name, not reuse the one that hit access-denied");
 
     const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
       sandboxes: Record<string, { status: string }>;
       callLog: Array<{ cmd: string; args: string[] }>;
     };
-    assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the retried restore to bring the sandbox up");
+    assert.equal(state.sandboxes[freshName]?.status, "Running", "expected the retried restore to bring the FRESH-name sandbox up");
     const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
     assert.equal(restoreCalls.length, 2, "expected the refused restore plus exactly one retried restore");
+    const restoreNames = restoreCalls.map((c) => c.args[3]);
+    assert.ok(
+      restoreNames[0] !== restoreNames[1],
+      "expected the retried attempt to target a DIFFERENT name, not the one that just hit access-denied",
+    );
+    assert.equal(restoreNames[0], originalName, "expected the first (failed) attempt to target the original name");
+    assert.equal(restoreNames[1], freshName, "expected the WINNING attempt's own name to end up as the handle's new id");
+
+    const rmCalls = state.callLog.filter((c) => c.cmd === "rm");
+    assert.ok(
+      rmCalls.some((c) => c.args[1] === originalName),
+      "expected a best-effort 'msb rm' of the access-denied attempt's own failed (original) name",
+    );
 
     await backend.stop(handle);
     await backend.remove(handle);
   });
 
-  // FRESH-NAME RED-PROOF (e): unlike the ordinary start() path above (which
-  // retries a Windows access-denied refusal under the SAME name, since the
-  // caller-supplied name is not this backend's own to change),
-  // createCheckpoint's own reboot treats that SAME classified failure the
-  // way it treats "already exists" — mint a NEW name, best-effort `msb rm`
-  // the failed one, never a same-name retry — because the live-verified
-  // dossier this policy is built from is precisely this signature: a
-  // restore that fails PAST msb's own validation leaves its `--name` behind
-  // as a stopped sandbox record a same-name retry would only collide with.
+  // FRESH-NAME RED-PROOF (e): createCheckpoint's own reboot treats a
+  // Windows access-denied refusal the same way retryRestoreAfterAccessDenied
+  // (the ordinary start() path's own retry, exercised above) does — mint a
+  // NEW name, best-effort `msb rm` the failed one, never a same-name retry —
+  // because the live-verified dossier this policy is built from is
+  // precisely this signature: a restore that fails PAST msb's own
+  // validation leaves its `--name` behind as a stopped sandbox record a
+  // same-name retry would only collide with.
   it("createCheckpoint's reboot treats a Windows access-denied refusal the same as 'already exists' — a fresh name per attempt, with a best-effort rm of the failed one", async () => {
     if (skipOnWindows()) {
       return;
