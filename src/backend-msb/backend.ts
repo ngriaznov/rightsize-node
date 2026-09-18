@@ -33,6 +33,12 @@ import { requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript 
 import { ExecTunnel } from "./exec-tunnel.js";
 import { isRestoreAccessDeniedFailure } from "./restore-access-denied.js";
 import { isSandboxAlreadyExistsFailure } from "./sandbox-already-exists.js";
+import {
+  realRestoreBroker,
+  type RestoreBrokerCompleted,
+  type RestoreBrokerLauncher,
+  type RestoreBrokerResult,
+} from "./restore-broker.js";
 
 const FIRST_RUN_PULL_TIMEOUT_MS = 600_000; // a cold pull can be slow
 const READINESS_POLL_MS = 300;
@@ -371,6 +377,23 @@ function drainTail(stream: NodeJS.ReadableStream, tail: string[]): Promise<void>
 }
 
 /**
+ * `drainTail`'s sibling for text this backend already has in hand rather
+ * than a live stream — a brokered restore's own combined output
+ * (`launchRestoreViaBroker`), or a diagnostic note about the broker itself.
+ * Same `TAIL_LINES` cap, same shift-oldest behavior, so a brokered attempt's
+ * pre-Running diagnostics tail looks exactly like a direct attempt's
+ * regardless of which path produced it.
+ */
+function pushLinesToTail(tail: string[], text: string): void {
+  for (const line of text.split("\n")) {
+    tail.push(line);
+    if (tail.length > TAIL_LINES) {
+      tail.shift();
+    }
+  }
+}
+
+/**
  * Busybox-ash-compatible: finds the first non-kernel child of PID 1 in the
  * guest and prints its `/proc/<pid>/cmdline` RAW — NUL-separated with a
  * trailing NUL, the kernel's own on-disk shape, never re-encoded by this
@@ -441,6 +464,41 @@ function parseCapturedWorkloadCmdline(stdout: string): string[] | undefined {
 }
 
 /**
+ * Which spawn path a restore attempt takes — `bootOnce`/`bootRestoreOnce`'s
+ * own dispatch key, threaded down from `bootClassified`'s options. `"direct"`
+ * is the ordinary, unconditional child-process spawn every restore attempt
+ * has always used; `"broker"` routes through the injected `restoreBroker`
+ * seam instead (POLICY v2 — see `restore-broker.ts`'s own module doc for the
+ * Windows job-object root cause this exists for). Never selected by
+ * `bootOnce`/`bootRestoreOnce` themselves: only `rebootUnderFreshName` and
+ * `retryRestoreAfterAccessDenied` ever decide to escalate to `"broker"`, and
+ * only after a `RestoreAccessDeniedError` on a Windows host (see
+ * `MsbCliBackend.isWindowsPlatform`) — the first attempt of any reboot is
+ * always `"direct"`.
+ */
+type RestoreLaunchMode = "direct" | "broker";
+
+/**
+ * Constructor options for {@link MsbCliBackend}. Every field is optional so
+ * every existing `new MsbCliBackend(msbPathPromise)` call site keeps
+ * compiling and behaving unchanged.
+ */
+export interface MsbCliBackendOptions {
+  /**
+   * The launcher POLICY v2's broker escalation calls through for every
+   * brokered restore attempt (see `RestoreLaunchMode`/`restore-broker.ts`).
+   * Defaults to `realRestoreBroker`, the real `powershell.exe`/WMI
+   * implementation — production code never needs to pass this. Tests inject
+   * a fake here instead of driving a real `powershell.exe`, the same role
+   * `checkpointRebootAlreadyExistsRetryBudgetMs` already plays for the
+   * retry budget itself, just as a constructor option rather than an
+   * unsafe-cast field, since production code (not only tests) needs a way to
+   * supply it.
+   */
+  restoreBroker?: RestoreBrokerLauncher;
+}
+
+/**
  * The attached-mode CLI driver: every sandbox this backend starts runs as a
  * held child process (`msb run`, no `-d`) because detached mode never
  * executes the image's own ENTRYPOINT/CMD — only attached mode does.
@@ -491,8 +549,21 @@ export class MsbCliBackend implements SandboxBackend {
   // shrink them to milliseconds instead.
   private checkpointRebootAlreadyExistsRetryBudgetMs = CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS;
   private checkpointRebootAlreadyExistsRetryDelayMs = CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_DELAY_MS;
+  // POLICY v2's broker escalation — see `RestoreLaunchMode`/`restore-broker.ts`.
+  private readonly restoreBroker: RestoreBrokerLauncher;
+  // Test-only override for the Windows-only escalation gate
+  // (`isWindowsPlatform`) — `undefined` in production, where the real
+  // `process.platform` always decides. Reached the same unsafe-cast way this
+  // suite already reaches `checkpointRebootAlreadyExistsRetryBudgetMs`
+  // above, so both the escalation trigger AND the "non-Windows never
+  // brokers" invariant are exercisable without an actual Windows host.
+  private platformOverrideForTests: NodeJS.Platform | undefined = undefined;
 
-  constructor(private readonly msbPathPromise: Promise<string>) {
+  constructor(
+    private readonly msbPathPromise: Promise<string>,
+    options: MsbCliBackendOptions = {},
+  ) {
+    this.restoreBroker = options.restoreBroker ?? realRestoreBroker;
     this.msbPathPromise.then(
       (p) => {
         this.resolvedMsbPath = p;
@@ -503,6 +574,20 @@ export class MsbCliBackend implements SandboxBackend {
         // when it awaits msbPathPromise itself.
       },
     );
+  }
+
+  /**
+   * Whether this process should treat itself as running on Windows for
+   * POLICY v2's broker-escalation gate — `process.platform === "win32"` in
+   * production, or `platformOverrideForTests` when a test has set it. The
+   * ONLY thing this gates is whether `rebootUnderFreshName`/
+   * `retryRestoreAfterAccessDenied` ever set `RestoreLaunchMode` to
+   * `"broker"`; `bootOnce`/`bootRestoreOnce` themselves stay platform-
+   * agnostic dispatchers on whatever mode they're handed, so the broker path
+   * itself is exercisable on any host once a test picks it explicitly.
+   */
+  private isWindowsPlatform(): boolean {
+    return (this.platformOverrideForTests ?? process.platform) === "win32";
   }
 
   private async msbPath(): Promise<string> {
@@ -583,16 +668,27 @@ export class MsbCliBackend implements SandboxBackend {
    * it owns this error class itself, one layer up, via its own fresh-naming
    * loop, and needs this error to propagate on the first hit rather than
    * being retried here at all.
+   *
+   * `restoreLaunchMode` (default `"direct"`) is threaded straight down to
+   * every `bootOnce` call this method makes, including its own internal
+   * install-lock/state-db/image-cache retries — POLICY v2's broker
+   * escalation, once triggered by the caller (`rebootUnderFreshName`/
+   * `retryRestoreAfterAccessDenied`), applies to EVERY remaining attempt of
+   * that reboot, not just the ones those callers themselves loop over, so an
+   * install-lock hit mid-brokered-attempt must retry brokered too rather
+   * than silently reverting to a direct spawn. See `RestoreLaunchMode`'s own
+   * doc.
    */
   private async bootClassified(
     msbPath: string,
     handle: SandboxHandle,
     state: HandleState,
-    options: { retryAccessDenied: boolean } = { retryAccessDenied: true },
+    options: { retryAccessDenied: boolean; restoreLaunchMode?: RestoreLaunchMode } = { retryAccessDenied: true },
   ): Promise<void> {
+    const restoreLaunchMode = options.restoreLaunchMode ?? "direct";
     let firstOutput: string;
     try {
-      await this.bootOnce(msbPath, handle, state);
+      await this.bootOnce(msbPath, handle, state, restoreLaunchMode);
       return;
     } catch (first) {
       if (first instanceof InstallLockActiveError) {
@@ -608,7 +704,7 @@ export class MsbCliBackend implements SandboxBackend {
         while (Date.now() < deadline) {
           await sleep(INSTALL_LOCK_RETRY_DELAY_MS);
           try {
-            await this.bootOnce(msbPath, handle, state);
+            await this.bootOnce(msbPath, handle, state, restoreLaunchMode);
             return;
           } catch (again) {
             if (!(again instanceof InstallLockActiveError)) {
@@ -631,7 +727,7 @@ export class MsbCliBackend implements SandboxBackend {
         // image-cache heal below.
         await sleep(STATE_DB_RETRY_DELAY_MS);
         try {
-          await this.bootOnce(msbPath, handle, state);
+          await this.bootOnce(msbPath, handle, state, restoreLaunchMode);
           return;
         } catch (second) {
           if (!(second instanceof StateDbError)) {
@@ -667,7 +763,7 @@ export class MsbCliBackend implements SandboxBackend {
       STOP_TIMEOUT_MS,
     ).catch((e: unknown) => e);
     try {
-      await this.bootOnce(msbPath, handle, state);
+      await this.bootOnce(msbPath, handle, state, restoreLaunchMode);
     } catch (second) {
       if (!(second instanceof ImageCacheCorruptionError)) {
         throw second;
@@ -689,13 +785,21 @@ export class MsbCliBackend implements SandboxBackend {
    * fundamentally different DETACHED shape (`bootRestoreOnce`) — see each
    * method's own doc. Resets the per-attempt diagnostics tail before either:
    * a retried boot must not blend its tail with the failed attempt's.
+   * `restoreLaunchMode` is passed straight through to `bootRestoreOnce`
+   * (irrelevant to `bootRunOnce`'s own ordinary `run` path, which never
+   * brokers — see `RestoreLaunchMode`'s own doc).
    */
-  private async bootOnce(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
+  private async bootOnce(
+    msbPath: string,
+    handle: SandboxHandle,
+    state: HandleState,
+    restoreLaunchMode: RestoreLaunchMode = "direct",
+  ): Promise<void> {
     state.logTail = [];
     state.attachedExited = false;
 
     if (handle.spec.checkpointRef !== undefined) {
-      await this.bootRestoreOnce(msbPath, handle, state);
+      await this.bootRestoreOnce(msbPath, handle, state, restoreLaunchMode);
       return;
     }
     await this.bootRunOnce(msbPath, handle, state);
@@ -865,68 +969,67 @@ export class MsbCliBackend implements SandboxBackend {
    * child. See `reviveWorkload`'s own doc for the full revival contract,
    * including the typed error a checkpoint predating workload-cmdline
    * capture throws instead of booting silently idle.
+   *
+   * Phase 1 (spawning the restore itself and reading back its own exit code
+   * + combined output) is dispatched by `launchMode` to either
+   * `launchRestoreDirect` (the unconditional spawn this method has always
+   * used) or `launchRestoreViaBroker` (POLICY v2's Windows job-object
+   * escape hatch — see `RestoreLaunchMode`/`restore-broker.ts`'s own doc).
+   * Both return the exact same shape, classified identically right below —
+   * a brokered attempt's output goes through the SAME predicates
+   * (`isImageCacheCorruption`, `isRestoreAccessDeniedFailure`, ...) a direct
+   * attempt's always has, since the underlying `msb restore` invocation and
+   * its failure signatures are identical either way; only how its stdout/
+   * stderr and exit code got back to this process differs. A broker launch
+   * can also come back `"unconfirmed"` (its own `ecFile` never appeared
+   * within its bound) — see `RestoreBrokerUnconfirmed`'s own doc — which
+   * skips classification entirely and falls straight through to phase 2
+   * exactly as a confirmed exit 0 does, since that phase's own `msb ls` poll
+   * is activation-gated and settles the question on its own regardless.
    */
-  private async bootRestoreOnce(msbPath: string, handle: SandboxHandle, state: HandleState): Promise<void> {
-    const argv = MsbCommands.restore(handle.spec);
-    const child = spawn(msbPath, argv, { stdio: [CLOSED_STDIN, "pipe", "pipe"] });
-    const stdoutDone = drainTail(child.stdout, state.logTail);
-    const stderrDone = drainTail(child.stderr, state.logTail);
+  private async bootRestoreOnce(
+    msbPath: string,
+    handle: SandboxHandle,
+    state: HandleState,
+    launchMode: RestoreLaunchMode = "direct",
+  ): Promise<void> {
+    const launch =
+      launchMode === "broker"
+        ? await this.launchRestoreViaBroker(msbPath, handle, state)
+        : await this.launchRestoreDirect(msbPath, handle, state);
 
-    const exitCode = await new Promise<number>((resolveExit, rejectExit) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        child.kill("SIGKILL");
-        rejectExit(
-          new BackendError(
-            `msb restore for sandbox ${handle.id} did not exit within ${FIRST_RUN_PULL_TIMEOUT_MS / 1000}s — ` +
-              `msb itself may be unresponsive; last output:\n${state.logTail.join("\n")}`,
-          ),
+    if (launch.kind === "completed") {
+      const { exitCode, output } = launch;
+      if (isImageCacheCorruption(output)) {
+        throw new ImageCacheCorruptionError(output);
+      }
+      if (isMsbStateDbError(output)) {
+        throw new StateDbError(output);
+      }
+      if (isMsbInstallLockActive(output)) {
+        throw new InstallLockActiveError(output);
+      }
+      if (isPortBindConflictOutput(output)) {
+        throw new PortBindConflictError(`msb restore for sandbox ${handle.id} could not bind a host port: ${output}`);
+      }
+      if (isRestoreAccessDeniedFailure(output)) {
+        throw new RestoreAccessDeniedError(output);
+      }
+      if (isSandboxAlreadyExistsFailure(output)) {
+        throw new SandboxAlreadyExistsError(output);
+      }
+      if (exitCode !== 0) {
+        throw new BackendError(
+          `msb restore for sandbox ${handle.id} exited (code ${exitCode}) — check the snapshot ref and ` +
+            `'msb restore' output below:\n${output}`,
         );
-      }, FIRST_RUN_PULL_TIMEOUT_MS);
-      child.once("exit", (code) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timer);
-        resolveExit(code ?? -1);
-      });
-    });
-
-    await Promise.all([stdoutDone, stderrDone]);
-    const output = state.logTail.join("\n");
-    if (isImageCacheCorruption(output)) {
-      throw new ImageCacheCorruptionError(output);
+      }
     }
-    if (isMsbStateDbError(output)) {
-      throw new StateDbError(output);
-    }
-    if (isMsbInstallLockActive(output)) {
-      throw new InstallLockActiveError(output);
-    }
-    if (isPortBindConflictOutput(output)) {
-      throw new PortBindConflictError(`msb restore for sandbox ${handle.id} could not bind a host port: ${output}`);
-    }
-    if (isRestoreAccessDeniedFailure(output)) {
-      throw new RestoreAccessDeniedError(output);
-    }
-    if (isSandboxAlreadyExistsFailure(output)) {
-      throw new SandboxAlreadyExistsError(output);
-    }
-    if (exitCode !== 0) {
-      throw new BackendError(
-        `msb restore for sandbox ${handle.id} exited (code ${exitCode}) — check the snapshot ref and ` +
-          `'msb restore' output below:\n${output}`,
-      );
-    }
-
-    // Exit 0: the restore CLI's own task is done and it has already
-    // detached (see this method's own doc) — poll for Running the same way
-    // bootRunOnce does, under a fresh instance of the identical budget.
+    // Exit 0 (direct or brokered), or the broker's own "unconfirmed" outcome
+    // — the restore CLI's own task is done, or close enough to trust `msb
+    // ls` to settle it (see this method's own doc) — poll for Running the
+    // same way bootRunOnce does, under a fresh instance of the identical
+    // budget.
     const readyDeadline = Date.now() + FIRST_RUN_PULL_TIMEOUT_MS;
     let lastSeenStatus: string | undefined;
     for (;;) {
@@ -964,6 +1067,105 @@ export class MsbCliBackend implements SandboxBackend {
       }
       await sleep(READINESS_POLL_MS);
     }
+  }
+
+  /**
+   * `bootRestoreOnce`'s own DIRECT launch — the unconditional child-process
+   * spawn every restore attempt used before POLICY v2's broker escalation
+   * existed, extracted unchanged from that method's own former body so the
+   * two `RestoreLaunchMode`s share one classification point (see
+   * `bootRestoreOnce`'s own doc). Bounded by the same `FIRST_RUN_PULL_TIMEOUT_MS`
+   * budget `bootRunOnce` polls against, and always resolves `"completed"` —
+   * a direct spawn has no analog of the broker's own `"unconfirmed"` outcome,
+   * since this process reads the child's real exit code directly.
+   */
+  private async launchRestoreDirect(
+    msbPath: string,
+    handle: SandboxHandle,
+    state: HandleState,
+  ): Promise<RestoreBrokerCompleted> {
+    const argv = MsbCommands.restore(handle.spec);
+    const child = spawn(msbPath, argv, { stdio: [CLOSED_STDIN, "pipe", "pipe"] });
+    const stdoutDone = drainTail(child.stdout, state.logTail);
+    const stderrDone = drainTail(child.stderr, state.logTail);
+
+    const exitCode = await new Promise<number>((resolveExit, rejectExit) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        child.kill("SIGKILL");
+        rejectExit(
+          new BackendError(
+            `msb restore for sandbox ${handle.id} did not exit within ${FIRST_RUN_PULL_TIMEOUT_MS / 1000}s — ` +
+              `msb itself may be unresponsive; last output:\n${state.logTail.join("\n")}`,
+          ),
+        );
+      }, FIRST_RUN_PULL_TIMEOUT_MS);
+      child.once("exit", (code) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolveExit(code ?? -1);
+      });
+    });
+
+    await Promise.all([stdoutDone, stderrDone]);
+    return { kind: "completed", exitCode, output: state.logTail.join("\n") };
+  }
+
+  /**
+   * `bootRestoreOnce`'s own BROKERED launch — POLICY v2's Windows job-object
+   * escape hatch (see `RestoreLaunchMode`/`restore-broker.ts`'s own module
+   * doc on the root cause and the live-validated WMI mitigation). Calls the
+   * injected `restoreBroker` seam with the exact same argv a direct attempt
+   * would spawn (`MsbCommands.restore`, unmodified) and the same
+   * `FIRST_RUN_PULL_TIMEOUT_MS` budget.
+   *
+   * The broker's own result is either passed straight through
+   * (`"completed"`/`"unconfirmed"`, both appended to `state.logTail` for the
+   * same pre-Running diagnostics purpose `drainTail` serves on the direct
+   * path) or, if the broker call itself REJECTS — broker infrastructure
+   * failing (a missing `powershell.exe`, a script-file write failure, WMI
+   * refusing to even create the process; see `RestoreBrokerLauncher`'s own
+   * doc on what counts as this vs. an ordinary brokered-restore failure) —
+   * caught here and turned into a one-attempt fallback to
+   * `launchRestoreDirect` instead (POLICY v2 point 5: the broker must never
+   * become a new single point of failure). That fallback is scoped to THIS
+   * attempt only; it does not touch the caller's own `RestoreLaunchMode` for
+   * whatever attempt comes after it.
+   */
+  private async launchRestoreViaBroker(
+    msbPath: string,
+    handle: SandboxHandle,
+    state: HandleState,
+  ): Promise<RestoreBrokerCompleted | { kind: "unconfirmed" }> {
+    const argv = MsbCommands.restore(handle.spec);
+    let result: RestoreBrokerResult;
+    try {
+      result = await this.restoreBroker(msbPath, argv, FIRST_RUN_PULL_TIMEOUT_MS);
+    } catch (err) {
+      pushLinesToTail(
+        state.logTail,
+        `[restore broker] broker infrastructure failed for sandbox ${handle.id}, falling back to a direct ` +
+          `attempt: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return this.launchRestoreDirect(msbPath, handle, state);
+    }
+    if (result.kind === "unconfirmed") {
+      pushLinesToTail(
+        state.logTail,
+        `[restore broker] its own exit-code file never appeared within its wait bound for sandbox ` +
+          `${handle.id} — proceeding to the ls-poll phase rather than guessing an outcome.`,
+      );
+      return { kind: "unconfirmed" };
+    }
+    pushLinesToTail(state.logTail, result.output);
+    return { kind: "completed", exitCode: result.exitCode, output: result.output };
   }
 
   /**
@@ -1291,6 +1493,16 @@ export class MsbCliBackend implements SandboxBackend {
    * SAME fresh-naming response (rm the failed name, mint another) covers
    * both signatures identically. Anything else propagates immediately,
    * unretried.
+   *
+   * POLICY v2's broker escalation applies here too, on the exact same terms
+   * as `rebootUnderFreshName`'s own (see that method's own doc): this
+   * method is only ever entered once the reboot's first, always-direct
+   * attempt has already hit `RestoreAccessDeniedError` (`first`), so on a
+   * Windows host (`isWindowsPlatform()`) every retry THIS method itself
+   * performs is, by construction, an attempt after that trigger — there is
+   * no "first attempt still direct" sub-case to preserve inside this loop
+   * the way `rebootUnderFreshName` has to across its own. `launchMode` is
+   * therefore decided once, before the loop, not re-evaluated per attempt.
    */
   private async retryRestoreAfterAccessDenied(
     msbPath: string,
@@ -1306,6 +1518,8 @@ export class MsbCliBackend implements SandboxBackend {
     // method's own doc.
     await invoke(msbPath, MsbCommands.rm(originalName), STOP_TIMEOUT_MS).catch(() => {});
 
+    const launchMode: RestoreLaunchMode = this.isWindowsPlatform() ? "broker" : "direct";
+
     let last: RestoreAccessDeniedError | SandboxAlreadyExistsError = first;
     for (let attempt = 1; attempt <= RESTORE_ACCESS_DENIED_RETRY_LIMIT; attempt++) {
       await sleep(RESTORE_ACCESS_DENIED_RETRY_DELAY_MS);
@@ -1315,7 +1529,7 @@ export class MsbCliBackend implements SandboxBackend {
       }
       const candidate: SandboxHandle = { id: name, spec: { ...handle.spec, name } };
       try {
-        await this.bootClassified(msbPath, candidate, state, { retryAccessDenied: false });
+        await this.bootClassified(msbPath, candidate, state, { retryAccessDenied: false, restoreLaunchMode: launchMode });
         // Success under `name` — re-key this backend's own runtime
         // registries (see class doc on `handles`) and publish the new
         // identity onto the CALLER's own handle object, IN PLACE, exactly
@@ -1404,6 +1618,19 @@ export class MsbCliBackend implements SandboxBackend {
    * Returns the WINNING attempt's own `SandboxHandle` (a fresh object, never
    * `undefined`) — `createCheckpoint` re-keys its runtime registries and the
    * caller's live handle from this, not from a name minted up front.
+   *
+   * POLICY v2's broker escalation (see `RestoreLaunchMode`/`restore-broker.ts`'s
+   * own module doc on the Windows job-object root cause and the live-
+   * validated WMI mitigation) lives here: `launchMode` starts `"direct"` —
+   * the first attempt of ANY reboot is always a direct spawn, unconditionally,
+   * even on Windows — and flips to `"broker"` the moment an attempt hits
+   * `RestoreAccessDeniedError` on a Windows host (`isWindowsPlatform()`);
+   * every attempt from then on, for the rest of THIS reboot, launches
+   * brokered instead, never downgrading back to direct even if a later
+   * attempt's own failure is only `SandboxAlreadyExistsError` (still
+   * retried, but no longer the trigger — only access-denied escalates).
+   * Off Windows, `launchMode` never leaves `"direct"` at all — this reboot's
+   * whole retry loop behaves exactly as it did before this policy existed.
    */
   private async rebootUnderFreshName(
     msbPath: string,
@@ -1415,6 +1642,7 @@ export class MsbCliBackend implements SandboxBackend {
     const deadline = Date.now() + this.checkpointRebootAlreadyExistsRetryBudgetMs;
     let attempt = 0;
     let last: SandboxAlreadyExistsError | RestoreAccessDeniedError | undefined;
+    let launchMode: RestoreLaunchMode = "direct";
     for (;;) {
       attempt += 1;
       const name = nextSandboxName();
@@ -1426,7 +1654,7 @@ export class MsbCliBackend implements SandboxBackend {
         spec: { ...sourceSpec, name, checkpointRef: effectiveRef, command: sourceSpec.command ?? capturedCommand },
       };
       try {
-        await this.bootClassified(msbPath, rebootHandle, state, { retryAccessDenied: false });
+        await this.bootClassified(msbPath, rebootHandle, state, { retryAccessDenied: false, restoreLaunchMode: launchMode });
         return rebootHandle;
       } catch (err) {
         const classified = err instanceof SandboxAlreadyExistsError || err instanceof RestoreAccessDeniedError;
@@ -1435,6 +1663,11 @@ export class MsbCliBackend implements SandboxBackend {
             await untrackSandbox(name);
           }
           throw err;
+        }
+        if (err instanceof RestoreAccessDeniedError && this.isWindowsPlatform()) {
+          // POLICY v2: escalate for every remaining attempt of this reboot —
+          // see this method's own doc on `launchMode`.
+          launchMode = "broker";
         }
         // Best-effort: ignore the result either way — a "not found" is as
         // fine as an actual removal, and this is cleanup, not something the

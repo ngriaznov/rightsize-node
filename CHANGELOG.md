@@ -208,6 +208,45 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   returned `Checkpoint`, `fromCheckpoint().start()`'s own resolved
   container, and every subsequent call against either transparently
   target, exactly as before.
+- **A restore retry on Windows now escalates to a job-free launch after its
+  first, always-direct attempt hits msb's access-denied refusal — dormant
+  defense for callers whose test/CI harness wraps its worker processes in a
+  Windows job object.** A four-round live diagnostic campaign traced the
+  access-denied signature the two entries above already retry
+  (`RestoreAccessDeniedError`) to something other than a file-handle release
+  lag: `msb restore` is detached by design and always spawns a brand-new
+  `msb.exe` to supervise the restored sandbox, and on Windows that spawn
+  unconditionally requests job-breakaway (`CREATE_BREAKAWAY_FROM_JOB`). When
+  the CALLING `msb.exe` itself sits inside a job object that was never
+  granted `JOB_OBJECT_LIMIT_BREAKAWAY_OK` — exactly what Gradle test workers
+  and cargo-test binaries do, and what Jest/Vitest workers and several CI
+  systems do too — Windows refuses the spawn outright with
+  `ERROR_ACCESS_DENIED`, which is the same "Access is denied. (os error 5)"
+  text this library was already retrying, just misattributed. This
+  repository's own Windows CI lane is unaffected either way (node's test
+  workers add no such job object, which is why it has stayed green), but the
+  sibling rust/kotlin libraries hit it deterministically, and a fix is also
+  being reported upstream. The mitigation, live-validated against the exact
+  environment where a direct spawn is denied: launching the identical
+  `msb restore` through Windows Management Instrumentation
+  (`Invoke-CimMethod -ClassName Win32_Process -MethodName Create`) runs the
+  new process under `WmiPrvSE`, outside the caller's job hierarchy
+  entirely, and succeeds every time. The fresh-name retry loops in both
+  entries above now carry this as an escalation, not a replacement: the
+  FIRST attempt of any restore retry is always the ordinary direct spawn,
+  unconditionally, on every platform — nothing changes for a healthy
+  environment. Only once an attempt hits `RestoreAccessDeniedError` on a
+  Windows host does every REMAINING attempt of that same retry loop switch
+  to launching through this WMI broker instead, and it stays on the broker
+  for the rest of that loop even if a later attempt's own failure is
+  merely "already exists" rather than access-denied again. Off Windows, or
+  on a Windows host that never hits the access-denied signature in the
+  first place, this new code path is never reached at all. If the broker
+  mechanism itself fails to run (no `powershell.exe` on the host, or
+  Windows refuses to even create the brokered process) that one attempt
+  falls back to an ordinary direct spawn and the retry loop keeps going —
+  the broker is defense-in-depth, never a new way for a restore to fail
+  outright. No public API changes.
 
 ### Fixed
 

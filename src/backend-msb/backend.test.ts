@@ -18,6 +18,8 @@ import { cacheDir } from "../core/cache-dir.js";
 import type { WaitStrategy } from "../core/wait.js";
 import { ensureReaperInitialized, trackSandbox, _resetReaperForTests } from "../core/reaper/init.js";
 import { readSandboxNames } from "../core/reaper/ledger.js";
+import { invoke } from "./invoke.js";
+import type { RestoreBrokerLauncher } from "./restore-broker.js";
 
 /** A no-op readiness check — this suite never runs a real workload, only the fake-msb double. */
 function instantReady(): WaitStrategy {
@@ -2104,5 +2106,375 @@ describe("MsbCliBackend.capabilities", () => {
     // the promise it's constructed with.
     const backend = new MsbCliBackend(Promise.resolve("/unused/msb"));
     assert.deepEqual(backend.capabilities, { hardwareIsolated: true, checkpoint: true, checkpointRestartsWorkload: true });
+  });
+});
+
+// POLICY v2: the Windows job-free restore broker escalation
+// (`rebootUnderFreshName`/`retryRestoreAfterAccessDenied`'s own
+// `RestoreLaunchMode` dispatch — see backend.ts's own doc and
+// restore-broker.ts's module doc on the Windows job-object root cause this
+// exists for). Own describe block, own beforeEach, rather than reusing the
+// outer suite's — these tests each construct their OWN `MsbCliBackend` (to
+// inject a stubbed `restoreBroker` per test), so there is no shared
+// `backend` instance to hang off of, only the same fake-msb-double
+// plumbing (statePath/cacheDir env) the outer suite's own beforeEach sets
+// up identically.
+describe("MsbCliBackend's Windows job-free restore broker escalation (POLICY v2)", () => {
+  let statePath: string;
+
+  beforeEach(async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-broker-test-"));
+    statePath = path.join(tmpDir, "state.json");
+    await fs.writeFile(statePath, JSON.stringify({ sandboxes: {} }));
+    process.env["RIGHTSIZE_FAKE_MSB_STATE"] = statePath;
+    process.env["RIGHTSIZE_CACHE_DIR"] = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-broker-cache-test-"));
+  });
+
+  after(async () => {
+    delete process.env["RIGHTSIZE_FAKE_MSB_STATE"];
+    delete process.env["RIGHTSIZE_CACHE_DIR"];
+  });
+
+  // Mirrors the outer suite's own skip: fake-msb-wrapper.sh is a POSIX `sh`
+  // script spawned directly, which fails structurally (EFTYPE) on a native
+  // Windows runner independent of anything the escalation logic itself
+  // does — see that suite's own doc on `skipOnWindows`. These tests force
+  // `isWindowsPlatform()` true via the seam below instead, which is what
+  // actually exercises the escalation on any host.
+  function skipOnWindows(): boolean {
+    return process.platform === "win32";
+  }
+
+  function forcePlatform(backend: MsbCliBackend, platform: NodeJS.Platform): void {
+    (backend as unknown as { platformOverrideForTests: NodeJS.Platform }).platformOverrideForTests = platform;
+  }
+
+  /**
+   * A `RestoreBrokerLauncher` that performs the REAL restore against the
+   * same fake msb double a direct attempt would spawn (via `invoke`,
+   * exactly the way `realRestoreBroker`'s own WMI-launched process would
+   * eventually reach a real `msb.exe`), and reports back its real exit
+   * code/combined output — so a test can drive the exact same fixture
+   * failure knobs (`failRestoreWithAccessDenied`, `failRestoresWithAlreadyExists`,
+   * ...) through the BROKERED path that the existing suite already drives
+   * through the direct one, proving brokered-output classification against
+   * real classified text rather than a hand-typed fake. `calls` records
+   * every argv this launcher was actually invoked with, for a test to
+   * assert against directly (attempt count, the exact fresh name targeted,
+   * argv shape).
+   */
+  function passthroughBroker(calls: Array<{ argv: readonly string[] }>): RestoreBrokerLauncher {
+    return async (msbPath, argv, timeoutMs) => {
+      calls.push({ argv });
+      const result = await invoke(msbPath, argv, timeoutMs);
+      const output = result.stderr.length > 0 ? `${result.stdout}\n${result.stderr}` : result.stdout;
+      return { kind: "completed", exitCode: result.exitCode, output };
+    };
+  }
+
+  it("retryRestoreAfterAccessDenied escalates to the broker only after its always-direct first attempt hits Windows access-denied, and the brokered attempt's own argv matches a direct restore's shape", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: passthroughBroker(brokerCalls) });
+    forcePlatform(backend, "win32");
+
+    const spec = baseSpec("rz-testrun1-broker-trigger", {
+      checkpointRef: "/fake/checkpoints/snap_brokertrigger",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+    const originalName = handle.id;
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.start(handle);
+    const freshName = handle.id;
+
+    assert.ok(freshName !== originalName, "expected the retry to mint a fresh sandbox name");
+    assert.equal(brokerCalls.length, 1, "expected exactly one brokered attempt — the retry after the always-direct first one");
+    const brokeredCall = brokerCalls[0];
+    assert.ok(brokeredCall !== undefined, "expected the recorded brokered call to exist");
+    assert.equal(brokeredCall?.argv[0], "restore", "expected the brokered attempt's argv to be an ordinary restore invocation");
+    const nameIdx = brokeredCall?.argv.indexOf("--name") ?? -1;
+    assert.equal(
+      brokeredCall?.argv[nameIdx + 1],
+      freshName,
+      "expected the brokered attempt's own argv to target the winning fresh name",
+    );
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    assert.equal(state.sandboxes[freshName]?.status, "Running");
+    const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
+    assert.equal(restoreCalls.length, 2, "expected the direct first attempt plus exactly one brokered retry");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("rebootUnderFreshName (createCheckpoint's own reboot) escalates to the broker the same way, after its own always-direct first attempt", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: passthroughBroker(brokerCalls) });
+    forcePlatform(backend, "win32");
+
+    const spec = baseSpec("rz-testrun1-broker-ckpt-trigger", { command: ["sleep", "60"] });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+    const originalName = handle.id;
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.createCheckpoint(handle, "rz-ckpt-broker-trigger1");
+    const freshName = handle.id;
+
+    assert.ok(freshName !== originalName, "expected a fresh name even on a checkpoint whose reboot escalated to the broker");
+    assert.equal(brokerCalls.length, 1, "expected exactly one brokered attempt — the retry after the always-direct first one");
+    const brokeredCall = brokerCalls[0];
+    assert.ok(brokeredCall !== undefined, "expected the recorded brokered call to exist");
+    const nameIdx = brokeredCall?.argv.indexOf("--name") ?? -1;
+    assert.equal(brokeredCall?.argv[nameIdx + 1], freshName);
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    assert.equal(state.sandboxes[freshName]?.status, "Running");
+    const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
+    assert.equal(restoreCalls.length, 2);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("once escalated, a brokered 'already exists' refusal is retried under yet another fresh name, still brokered — never downgrading back to direct", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: passthroughBroker(brokerCalls) });
+    forcePlatform(backend, "win32");
+    const seam = backend as unknown as {
+      checkpointRebootAlreadyExistsRetryBudgetMs: number;
+      checkpointRebootAlreadyExistsRetryDelayMs: number;
+    };
+    seam.checkpointRebootAlreadyExistsRetryBudgetMs = 5_000;
+    seam.checkpointRebootAlreadyExistsRetryDelayMs = 20;
+
+    const spec = baseSpec("rz-testrun1-broker-ckpt-alreadyexists", { command: ["sleep", "60"] });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    // attempt 1 (direct) hits access-denied — triggers the escalation.
+    seeded.failRestoreWithAccessDenied = 1;
+    // attempts 2 and 3 (both now brokered) hit "already exists"; attempt 4
+    // (still brokered) succeeds.
+    seeded.failRestoresWithAlreadyExists = 2;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.createCheckpoint(handle, "rz-ckpt-broker-alreadyexists1");
+    const freshName = handle.id;
+
+    assert.equal(brokerCalls.length, 3, "expected 3 brokered attempts: the 2 'already exists' failures plus the succeeding one");
+    assert.equal(
+      new Set(brokerCalls.map((c) => c.argv[c.argv.indexOf("--name") + 1])).size,
+      3,
+      "expected every brokered attempt to target its own freshly minted name",
+    );
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    assert.equal(state.sandboxes[freshName]?.status, "Running");
+    const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
+    assert.equal(restoreCalls.length, 4, "expected the direct first attempt plus the 3 brokered attempts");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("a brokered attempt that itself hits Windows access-denied again is retried under a fresh name, still brokered", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: passthroughBroker(brokerCalls) });
+    forcePlatform(backend, "win32");
+
+    const spec = baseSpec("rz-testrun1-broker-accessdenied-again", {
+      checkpointRef: "/fake/checkpoints/snap_brokeraccessdeniedagain",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+    const originalName = handle.id;
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    // attempt 1 (direct) and attempt 2 (brokered, after escalation) both hit
+    // access-denied; attempt 3 (still brokered) succeeds.
+    seeded.failRestoreWithAccessDenied = 2;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.start(handle);
+    const freshName = handle.id;
+
+    assert.ok(freshName !== originalName);
+    assert.equal(brokerCalls.length, 2, "expected 2 brokered attempts: the access-denied-again failure plus the succeeding retry");
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    assert.equal(state.sandboxes[freshName]?.status, "Running");
+    const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
+    assert.equal(restoreCalls.length, 3, "expected the direct first attempt plus the 2 brokered attempts");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("a brokered 'unconfirmed' outcome (its own exit-code file never read back) still succeeds once the ls-poll phase confirms Running", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const unconfirmedBroker: RestoreBrokerLauncher = async (msbPath, argv, timeoutMs) => {
+      brokerCalls.push({ argv });
+      // Performs the REAL restore as a side effect — exactly what a real
+      // WMI-launched process would do — but deliberately reports
+      // "unconfirmed" regardless of that real outcome, exercising
+      // bootRestoreOnce's own "fall through to the ls-poll phase instead of
+      // guessing" branch (see RestoreBrokerUnconfirmed's own doc).
+      await invoke(msbPath, argv, timeoutMs);
+      return { kind: "unconfirmed" };
+    };
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: unconfirmedBroker });
+    forcePlatform(backend, "win32");
+
+    const spec = baseSpec("rz-testrun1-broker-unconfirmed", {
+      checkpointRef: "/fake/checkpoints/snap_brokerunconfirmed",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+    const originalName = handle.id;
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.start(handle);
+    const freshName = handle.id;
+
+    assert.ok(freshName !== originalName);
+    assert.equal(brokerCalls.length, 1, "expected exactly one brokered (unconfirmed) attempt");
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { sandboxes: Record<string, { status: string }> };
+    assert.equal(
+      state.sandboxes[freshName]?.status,
+      "Running",
+      "expected the ls-poll phase to confirm Running despite the broker's own unconfirmed report",
+    );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("falls back to a direct attempt for that one retry when the real broker's own infrastructure fails (no powershell.exe on this host)", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // No `restoreBroker` override: exercises the REAL `realRestoreBroker`
+    // default. This suite's own outer skip guarantees this test never runs
+    // on an actual Windows host, so `powershell.exe` genuinely does not
+    // exist on PATH here — `realRestoreBroker`'s own spawn fails with
+    // ENOENT, which is exactly the "broker infrastructure failure" this
+    // test means to exercise, through real production code rather than a
+    // stub.
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB));
+    forcePlatform(backend, "win32");
+
+    const spec = baseSpec("rz-testrun1-broker-infra-fallback", {
+      checkpointRef: "/fake/checkpoints/snap_brokerinfra",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+    const originalName = handle.id;
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.start(handle);
+    const freshName = handle.id;
+
+    assert.ok(freshName !== originalName);
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    assert.equal(state.sandboxes[freshName]?.status, "Running", "expected the direct fallback to have succeeded");
+    const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
+    assert.equal(
+      restoreCalls.length,
+      2,
+      "expected the direct first attempt plus a direct-fallback retry — never a third attempt, since the " +
+        "fallback itself succeeded",
+    );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("never escalates to the broker on a non-Windows host, even after a classified access-denied hit", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: passthroughBroker(brokerCalls) });
+    // Explicit, even though it matches this dev/CI host's own default
+    // platform — the point is that the escalation gate itself must read
+    // "not Windows" and never call the broker seam at all, not merely that
+    // nobody happened to flip it to "win32" here.
+    forcePlatform(backend, "linux");
+
+    const spec = baseSpec("rz-testrun1-broker-nonwindows", {
+      checkpointRef: "/fake/checkpoints/snap_brokernonwindows",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+    const originalName = handle.id;
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.start(handle);
+    const freshName = handle.id;
+
+    assert.ok(freshName !== originalName, "expected the ordinary fresh-name retry to still happen");
+    assert.equal(brokerCalls.length, 0, "expected the broker seam to never be called on a non-Windows host");
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    assert.equal(state.sandboxes[freshName]?.status, "Running");
+    const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
+    assert.equal(restoreCalls.length, 2);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
   });
 });
