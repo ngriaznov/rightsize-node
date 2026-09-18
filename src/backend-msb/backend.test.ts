@@ -685,6 +685,77 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     }
   });
 
+  it("GenericContainer.checkpoint(name) on msb: a FAILED same-name re-checkpoint leaves the PRIOR checkpoint's real content-addressed artifact and registry entry completely untouched", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const cacheDirPath = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-replace-failure-test-"));
+    const savedCacheDir = process.env["RIGHTSIZE_CACHE_DIR"];
+    process.env["RIGHTSIZE_CACHE_DIR"] = cacheDirPath;
+    try {
+      const container = new GenericContainer("fake:latest")
+        .withBackend(backend)
+        .withCommand("sleep", "60")
+        .waitingFor(instantReady());
+      await container.start();
+
+      // Seed a real, restorable checkpoint under "seeded" first.
+      const first = await container.checkpoint("seeded");
+      assert.equal(await backend.hasCheckpoint(first.ref), true, "expected the seeded checkpoint's artifact to exist");
+
+      // Arm the fake fixture's own `msb snapshot create` failure knob, then
+      // re-checkpoint under the SAME name. This is the exact regression
+      // window the fix closes: the PRIOR entry's real recorded ref must
+      // never be removed until the fresh checkpoint is confirmed to
+      // actually exist, so a failed replace must leave the prior,
+      // still-good checkpoint fully intact and restorable.
+      const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+      seeded.failSnapshotCreate = 1;
+      await fs.writeFile(statePath, JSON.stringify(seeded));
+
+      let thrown: unknown;
+      try {
+        await container.checkpoint("seeded");
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof BackendError, `expected the backend failure to propagate, got: ${String(thrown)}`);
+
+      // The red-proof for this fix: pre-fix code removed the prior entry's
+      // real recorded ref BEFORE createCheckpoint ran, so a failure here
+      // would have already destroyed it by this point.
+      assert.equal(
+        await backend.hasCheckpoint(first.ref),
+        true,
+        "expected the PRIOR checkpoint's real artifact to still exist after a FAILED same-name re-checkpoint",
+      );
+      await fs.access(first.ref); // must not throw — the artifact directory must still be on disk
+
+      const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+        snapshots?: Record<string, unknown>;
+        callLog: Array<{ cmd: string; args: string[] }>;
+      };
+      assert.ok(first.ref in (state.snapshots ?? {}), "expected msb's own index to still carry the prior artifact");
+      const removalCall = state.callLog.find((c) => c.cmd === "snapshotRemove" && c.args.includes(first.ref));
+      assert.equal(removalCall, undefined, "expected no 'msb snapshot rm' call against the prior real ref before the new checkpoint was confirmed to exist");
+
+      const read = await readCheckpointRegistry(cacheDirPath, "seeded");
+      assert.equal(read.kind, "found", "expected the prior registry entry to still be there after a failed re-checkpoint");
+      if (read.kind === "found") {
+        assert.equal(read.entry.ref, first.ref, "expected the registry to still point at the PRIOR checkpoint's real, still-restorable artifact");
+      }
+
+      await container.stop();
+    } finally {
+      if (savedCacheDir === undefined) {
+        delete process.env["RIGHTSIZE_CACHE_DIR"];
+      } else {
+        process.env["RIGHTSIZE_CACHE_DIR"] = savedCacheDir;
+      }
+      await fs.rm(cacheDirPath, { recursive: true, force: true });
+    }
+  });
+
   it("createCheckpoint's reboot polls past an install-lock refusal instead of failing the checkpoint", async () => {
     if (skipOnWindows()) {
       return;

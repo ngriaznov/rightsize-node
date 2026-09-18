@@ -260,18 +260,36 @@ Checkpointing under a name that's already taken REPLACES the REGISTRY
 entry either way: the new checkpoint's ref overwrites the old one, so
 `Checkpoints.find(name)` and `fromCheckpoint()` always see the latest
 checkpoint under that name. `checkpoint(name)` also reliably clears the OLD
-artifact under that same name first, on both backends: it looks up the
-name's existing registry entry (the same lookup `Checkpoints.remove(name)`
-itself uses) and removes the artifact at that entry's own recorded ref —
-which is exactly where the prior checkpoint actually put it, whether that's
-docker's deterministic `rightsize/checkpoint:<name>` or microsandbox's
+artifact under that same name, on both backends: it looks up the name's
+existing registry entry (the same lookup `Checkpoints.remove(name)` itself
+uses) and removes the artifact at that entry's own recorded ref — which is
+exactly where the prior checkpoint actually put it, whether that's docker's
+deterministic `rightsize/checkpoint:<name>` or microsandbox's
 content-addressed `snap_<hex-digest>` path from the previous call. The
-freshly-minted nominal ref is best-effort cleared too, for the cases the
-registry lookup can't cover on its own (nothing was ever checkpointed under
-this name yet, or the existing entry was written by a different backend);
-on docker this is simply the same ref, already removed. Omitting `name`
-keeps `checkpoint()`'s original behavior exactly: an ephemeral checkpoint
-with no registry entry.
+freshly-minted nominal ref is best-effort cleared too, up front, for the
+cases the registry lookup can't cover on its own (nothing was ever
+checkpointed under this name yet, or the existing entry was written by a
+different backend); on docker this is simply the prior checkpoint's own
+real, deterministic ref. Omitting `name` keeps `checkpoint()`'s original
+behavior exactly: an ephemeral checkpoint with no registry entry.
+
+That old-artifact removal is ordered around FAILURE, not just success: the
+prior entry's real recorded ref is only ever removed once the fresh
+checkpoint is confirmed to actually exist — `createCheckpoint` succeeded,
+and on microsandbox (whose checkpoint reboots the workload) the
+post-checkpoint re-wait succeeded too — never before. So a FAILED same-name
+re-checkpoint always leaves the PRIOR checkpoint's artifact and registry
+entry exactly as they were, on either backend, and `Checkpoints.find(name)`
+after a failed replace still resolves to the last one that actually
+succeeded. The one narrower exception is docker's own freshly-minted nominal
+ref, cleared up front as described above: since that ref IS the prior
+checkpoint's own deterministic tag there, and the upcoming `createCheckpoint`
+call is about to reuse that exact tag regardless, clearing it any later
+would mean clearing the tag out from under the checkpoint that just
+succeeded instead. This narrow docker-only window (a failed commit after
+that tag has already been cleared) is not new — it predates named
+checkpoints ever reading the registry at all — and is unrelated to the
+fix described here.
 
 `Checkpoints.remove(name)` remains available as an explicit, standalone
 cleanup affordance — call it directly when you want a named checkpoint gone

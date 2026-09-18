@@ -1087,21 +1087,36 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * `InvalidCheckpointNameError` before any backend call. Checkpointing under
    * a name that already has a registry entry REPLACES it: this best-effort
    * clears whatever artifact the PRIOR checkpoint under `name` actually left
-   * behind before creating the new one, then overwrites the registry entry
-   * with the BACKEND'S OWN EFFECTIVE ref for the fresh checkpoint — the
-   * latest checkpoint under a name always wins. The prior artifact's real
-   * location comes from the existing registry entry itself (when one exists
-   * for a backend matching the currently active one) rather than a
-   * recomputed nominal ref: on docker the two are always the same
-   * deterministic value anyway, but on microsandbox (since 0.7.1) the
-   * effective ref is a content-addressed artifact path the nominal one never
-   * predicts (see `SandboxBackend.createCheckpoint`'s own doc), so reading it
-   * back from the registry is what makes this reliable there too — the same
-   * lookup `Checkpoints.remove(name)` itself uses. The freshly-minted nominal
-   * ref is best-effort cleared as well regardless (harmless on docker, where
-   * it's the same ref; a no-op on microsandbox when no matching registry
-   * entry exists to have pointed elsewhere). Omitting `name` keeps the
-   * original behavior byte-for-byte: an ephemeral checkpoint with no
+   * behind, then overwrites the registry entry with the BACKEND'S OWN
+   * EFFECTIVE ref for the fresh checkpoint — the latest checkpoint under a
+   * name always wins. The prior artifact's real location comes from the
+   * existing registry entry itself (when one exists for a backend matching
+   * the currently active one) rather than a recomputed nominal ref: on
+   * docker the two are always the same deterministic value anyway, but on
+   * microsandbox (since 0.7.1) the effective ref is a content-addressed
+   * artifact path the nominal one never predicts (see
+   * `SandboxBackend.createCheckpoint`'s own doc), so reading it back from the
+   * registry is what makes this reliable there too — the same lookup
+   * `Checkpoints.remove(name)` itself uses.
+   *
+   * The PRIOR entry's real ref is only ever removed once the fresh
+   * checkpoint below has actually been created successfully (and, on a
+   * backend whose checkpoint reboots the workload, once the post-checkpoint
+   * re-wait below has succeeded too) — never before. When the prior ref and
+   * the freshly-minted nominal one are the SAME deterministic value (always
+   * true on docker), removing it earlier would just be removing the nominal
+   * ref that `createCheckpoint` is about to reuse anyway, so this method
+   * best-effort clears the nominal ref up front instead (a harmless no-op on
+   * microsandbox, where a name never predicts a real artifact); when the two
+   * differ (microsandbox's content-addressed case, or the rare coincidence
+   * of the two colliding on any backend), the prior ref is left completely
+   * untouched until the new one is confirmed both real and reachable. That
+   * ordering is what keeps a FAILED same-name re-checkpoint from destroying
+   * an otherwise-good, previously-restorable checkpoint: on any backend, a
+   * `createCheckpoint()` (or post-checkpoint re-wait) that throws leaves both
+   * the prior artifact and its registry entry completely untouched, exactly
+   * as if the failed call had never been attempted. Omitting `name` keeps
+   * the original behavior byte-for-byte: an ephemeral checkpoint with no
    * registry entry, whose `Checkpoint.ref` is always the backend's own
    * effective ref.
    *
@@ -1150,25 +1165,28 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       throw new TmpfsRootCheckpointError();
     }
     const ref = checkpointRef(backend.name, name);
+    // Replace semantics: a prior checkpoint under this same name — if any —
+    // is cleared once the new one is confirmed to actually exist (see the
+    // deferred removal after `createCheckpoint`/the post-checkpoint re-wait
+    // below), never before — a failed re-checkpoint must never cost this
+    // container its previously-good, restorable checkpoint. The RELIABLE way
+    // to find where the prior checkpoint actually lives is the registry's
+    // own recorded entry (the same lookup `Checkpoints.remove(name)` uses),
+    // not a freshly-minted nominal ref: on docker the ref is deterministic
+    // from `name`, so the registry entry's `ref` and the nominal one below
+    // are always the same value anyway, but on microsandbox (since 0.7.1)
+    // the EFFECTIVE ref `createCheckpoint` returns is a content-addressed
+    // artifact path the nominal one never determines (see
+    // `SandboxBackend.createCheckpoint`'s own doc) — only the registry's
+    // recorded ref points at the real artifact there. Only consulted when
+    // the entry's own recorded backend matches the CURRENTLY active one — a
+    // foreign-backend ref means nothing to this backend's `removeCheckpoint`,
+    // same gate `find`/`remove` apply to the same mismatch. A missing or
+    // corrupt registry read is treated the same as "no entry" (best-effort:
+    // this must never fail the checkpoint itself), leaving only the
+    // nominal-ref removal below to run.
+    let priorRealRef: string | undefined;
     if (name !== undefined) {
-      // Replace semantics: a prior checkpoint under this same name — if any
-      // — is cleared before the new one is created. The RELIABLE way to find
-      // where it actually lives is the registry's own recorded entry (the
-      // same lookup `Checkpoints.remove(name)` uses), not a freshly-minted
-      // nominal ref: on docker the ref is deterministic from `name`, so the
-      // registry entry's `ref` and the nominal one below are always the same
-      // value anyway, but on microsandbox (since 0.7.1) the EFFECTIVE ref
-      // `createCheckpoint` returns is a content-addressed artifact path the
-      // nominal one never determines (see `SandboxBackend.createCheckpoint`'s
-      // own doc) — only the registry's recorded ref points at the real
-      // artifact there. Only consulted when the entry's own recorded backend
-      // matches the CURRENTLY active one — a foreign-backend ref means
-      // nothing to this backend's `removeCheckpoint`, same gate `find`/
-      // `remove` apply to the same mismatch. A missing or corrupt registry
-      // read is treated the same as "no entry" (best-effort: this must never
-      // fail the checkpoint itself), falling through to the nominal-ref-only
-      // removal below.
-      let priorRealRef: string | undefined;
       try {
         const registryRead = await readCheckpointRegistry(cacheDir(), name);
         if (registryRead.kind === "found" && registryRead.entry.backend === backend.name) {
@@ -1177,21 +1195,18 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       } catch {
         // Swallowed deliberately — see the comment above.
       }
-      if (priorRealRef !== undefined) {
-        const realRef = priorRealRef;
-        await swallow(() => backend.removeCheckpoint(realRef));
-      }
-      // The freshly-minted nominal ref is best-effort cleared too, regardless
-      // of whether the registry lookup above found anything: on docker this
-      // is the very same ref as `priorRealRef` (already removed above, so
-      // this second call is a harmless no-op against an artifact that's
-      // already gone); when no matching registry entry exists (nothing was
-      // ever checkpointed under this name, an entry from a different
-      // backend, or a corrupt/missing registry) this is the only removal
-      // that runs, matching the original behavior exactly.
-      if (priorRealRef !== ref) {
-        await swallow(() => backend.removeCheckpoint(ref));
-      }
+      // Best-effort clear the freshly-minted NOMINAL ref up front, before
+      // creating the new checkpoint — exactly what this method did before
+      // the registry lookup above existed. On docker this nominal ref IS the
+      // prior checkpoint's real recorded ref (deterministic from `name`), so
+      // this is the only removal that ever runs there, and it must run here:
+      // `createCheckpoint` is about to reuse this exact ref, so there is no
+      // "after" at which removing it wouldn't also remove the checkpoint
+      // just created. On microsandbox this is a no-op against a path that
+      // was never real, same as before this method ever read the registry —
+      // so nothing new is destroyed here before the new checkpoint's success
+      // is confirmed.
+      await swallow(() => backend.removeCheckpoint(ref));
     }
     // The EFFECTIVE ref: on docker this is always `ref` itself; on
     // microsandbox (since 0.7.1) it is whatever real artifact path
@@ -1250,6 +1265,23 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     // when the source container already carried an explicit command).
     const capturedCommand = backend.capturedWorkloadCommand?.(handle);
     if (name !== undefined) {
+      // Only reached once the fresh checkpoint above is confirmed both real
+      // (createCheckpoint succeeded) and reachable (the post-checkpoint
+      // re-wait above, when applicable, succeeded too) — a failure at either
+      // point already threw and returned above, before any of this ran. The
+      // PRIOR checkpoint's real recorded ref (see the registry lookup
+      // before createCheckpoint) is best-effort removed here, now that it is
+      // safe to: never when it's the SAME ref as the nominal one already
+      // cleared above (docker — clearing it again here would target the
+      // fresh checkpoint `createCheckpoint` just reused that exact ref for),
+      // and never when it happens to equal the fresh checkpoint's own
+      // EFFECTIVE ref (the rare case of two checkpoints content-addressing
+      // to the very same artifact on microsandbox — removing it would delete
+      // the checkpoint this call just created, not a prior one).
+      if (priorRealRef !== undefined && priorRealRef !== ref && priorRealRef !== effectiveRef) {
+        const realRef = priorRealRef;
+        await swallow(() => backend.removeCheckpoint(realRef));
+      }
       // Only after the backend checkpoint above has actually succeeded — a
       // failed createCheckpoint() already threw, so a registry entry is
       // never written for a checkpoint that doesn't exist.

@@ -193,6 +193,10 @@ class FakeCapturingBackend extends FakeCheckpointBackend {
  * different, both-real artifact refs — the exact shape the replace-
  * semantics fix (looking up the prior EFFECTIVE ref via the registry,
  * rather than recomputing the nominal one) exists to handle.
+ *
+ * Also honors the inherited `failNextCreateCheckpoint` seam (checked first,
+ * exactly like the base class), so a test can exercise a FAILED re-checkpoint
+ * on this msb-shaped backend without a real msb binary.
  */
 class FakeContentAddressedBackend extends FakeCheckpointBackend {
   private seq = 0;
@@ -201,6 +205,11 @@ class FakeContentAddressedBackend extends FakeCheckpointBackend {
     this.seq += 1;
     const effectiveRef = `${nominalRef}::effective-${this.seq}`;
     this.calls.push(`createCheckpoint:${effectiveRef}`);
+    if (this.failNextCreateCheckpoint !== undefined) {
+      const err = this.failNextCreateCheckpoint;
+      this.failNextCreateCheckpoint = undefined;
+      throw err;
+    }
     this.artifacts.add(effectiveRef);
     return effectiveRef;
   }
@@ -754,6 +763,84 @@ describe("GenericContainer.checkpoint(name) — named checkpoints", () => {
       assert.equal(read.kind, "found");
       if (read.kind === "found") {
         assert.equal(read.entry.ref, second.ref, "expected the registry to hold the latest checkpoint's effective ref");
+      }
+
+      await container.stop();
+    });
+  });
+
+  it("on msb-shaped content-addressed refs, a FAILED same-name re-checkpoint leaves the PRIOR checkpoint's real artifact and registry entry completely untouched", async () => {
+    await withTempCacheDirEnv(async (cacheDirPath) => {
+      const backend = new FakeContentAddressedBackend("microsandbox", {
+        hardwareIsolated: true,
+        checkpoint: true,
+        checkpointRestartsWorkload: true,
+      });
+      const container = new GenericContainer("alpine:3.19").withBackend(backend).withCommand("sleep", "60").waitingFor(instantReady());
+      await container.start();
+
+      // Seed a real, restorable checkpoint under "seeded-db" first.
+      const first = await container.checkpoint("seeded-db");
+      assert.ok(backend.artifacts.has(first.ref), "expected the seeded checkpoint's artifact to exist before the failing re-checkpoint attempt");
+      backend.calls.length = 0;
+
+      // Now re-checkpoint under the SAME name, but make the backend call
+      // itself fail — this is the exact regression window the fix closes:
+      // the PRIOR entry's real ref must never be removed until the fresh
+      // checkpoint is confirmed to actually exist.
+      backend.failNextCreateCheckpoint = new Error("msb snapshot create failed");
+      let thrown: unknown;
+      try {
+        await container.checkpoint("seeded-db");
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof Error, `expected the backend failure to propagate, got: ${String(thrown)}`);
+      assert.match((thrown as Error).message, /msb snapshot create failed/);
+
+      // The red-proof for this fix: pre-fix code removed the prior entry's
+      // real recorded ref BEFORE createCheckpoint ran, so a failure here
+      // would have already destroyed it by this point.
+      assert.ok(
+        backend.artifacts.has(first.ref),
+        `expected the PRIOR checkpoint's real artifact ${first.ref} to still exist after a FAILED same-name re-checkpoint, but it was removed (artifacts: ${JSON.stringify([...backend.artifacts])})`,
+      );
+      assert.ok(!backend.calls.includes(`removeCheckpoint:${first.ref}`), "expected no removeCheckpoint call against the prior real ref before the new checkpoint was confirmed to exist");
+
+      const read = await readCheckpointRegistry(cacheDirPath, "seeded-db");
+      assert.equal(read.kind, "found", "expected the prior registry entry to still be there after a failed re-checkpoint");
+      if (read.kind === "found") {
+        assert.equal(read.entry.ref, first.ref, "expected the registry to still point at the PRIOR checkpoint's real, still-restorable artifact");
+      }
+
+      await container.stop();
+    });
+  });
+
+  it("on docker, a FAILED same-name re-checkpoint leaves the PRIOR checkpoint's registry entry untouched (the prior image itself is a known, documented trade-off: docker reuses the same deterministic tag, so clearing it must happen before the commit that reuses it)", async () => {
+    await withTempCacheDirEnv(async (cacheDirPath) => {
+      const backend = new FakeCheckpointBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
+      const container = new GenericContainer("alpine:3.19").withBackend(backend).withCommand("sleep", "60").waitingFor(instantReady());
+      await container.start();
+
+      const first = await container.checkpoint("seeded-db");
+      backend.calls.length = 0;
+
+      backend.failNextCreateCheckpoint = new Error("commit failed");
+      let thrown: unknown;
+      try {
+        await container.checkpoint("seeded-db");
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof Error, `expected the backend failure to propagate, got: ${String(thrown)}`);
+
+      // The registry entry itself is never touched by a failed checkpoint —
+      // true on every backend, since it's only ever written after success.
+      const read = await readCheckpointRegistry(cacheDirPath, "seeded-db");
+      assert.equal(read.kind, "found");
+      if (read.kind === "found") {
+        assert.equal(read.entry.ref, first.ref);
       }
 
       await container.stop();
