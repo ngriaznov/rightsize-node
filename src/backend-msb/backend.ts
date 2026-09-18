@@ -11,6 +11,8 @@ import {
   CheckpointWorkloadCommandMissingError,
 } from "../core/errors.js";
 import { cacheDir } from "../core/cache-dir.js";
+import { nextSandboxName } from "../core/sandbox-name.js";
+import { trackSandbox, untrackSandbox } from "../core/reaper/init.js";
 import type { SandboxBackend, SandboxHandle, FollowHandle, NetworkLink, ReaperKillCommand, BackendCapabilities } from "../core/backend.js";
 import type { ContainerSpec, ExecResult } from "../core/model.js";
 import { MsbCommands } from "./commands.js";
@@ -93,7 +95,10 @@ const RESTORE_ACCESS_DENIED_RETRY_DELAY_MS = 500;
  * (this backend's earlier retry shape, before this budget existed) is
  * nowhere near enough to outlast that; ~30s at 2s intervals comfortably
  * does, while a refusal that outlives even that still fails clearly instead
- * of hanging. See `rebootRetryingAlreadyExists`.
+ * of hanging. `createCheckpoint`'s reboot now restores under a FRESH name
+ * rather than the same one (see its own doc), which avoids this exact race
+ * structurally — this budget stays live as dormant defense rather than
+ * being removed. See `rebootRetryingAlreadyExists`.
  */
 const CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS = 30_000;
 const CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_DELAY_MS = 2_000;
@@ -460,6 +465,10 @@ export class MsbCliBackend implements SandboxBackend {
     checkpointRestartsWorkload: true,
   };
 
+  // Both keyed by a sandbox's CURRENT name (== SandboxHandle.id) — normally
+  // stable for a handle's whole lifetime, except across createCheckpoint's
+  // own reboot, which re-keys both from the source sandbox's name to the
+  // fresh one it boots under (see that method's own doc).
   private readonly handles = new Map<string, HandleState>();
   private readonly startedNames = new Set<string>();
   // Mirrors msbPathPromise's eventual value as soon as it settles, purely so
@@ -1216,12 +1225,19 @@ export class MsbCliBackend implements SandboxBackend {
    * `createCheckpoint`'s own reboot step, with msb's "sandbox already
    * exists" refusal (`SandboxAlreadyExistsError`, see
    * `isSandboxAlreadyExistsFailure`'s own doc) retried on a bounded budget
-   * instead of surfaced immediately. The checkpoint cycle's `rm` right
-   * before this can return once the sandbox's database record clears, well
-   * before its on-disk directory actually releases on a loaded Windows
-   * host, so the very next `restore` under the same name can race that
-   * lingering directory straight into msb's own refusal — see
-   * `CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS`'s own doc.
+   * instead of surfaced immediately. Originally written because the
+   * checkpoint cycle's `rm` right before this can return once the sandbox's
+   * database record clears, well before its on-disk directory actually
+   * releases on a loaded Windows host, so a `restore` under the SAME name
+   * could race that lingering directory straight into msb's own refusal —
+   * see `CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS`'s own doc. The
+   * reboot this now guards restores under a FRESH name instead (see
+   * `createCheckpoint`'s own doc), which sidesteps that exact race
+   * structurally — a name nothing else has ever used cannot collide with a
+   * lingering directory belonging to a name nothing will ever restore under
+   * again. This retry stays as DORMANT DEFENSE regardless: it is cheap,
+   * still correct if `SandboxAlreadyExistsError` were ever hit for some
+   * other reason, and simply will not trigger on the ordinary path anymore.
    *
    * `this.checkpointRebootAlreadyExistsRetryBudgetMs`/`_RetryDelayMs` back
    * this loop rather than the bare module constants directly, so a
@@ -1277,9 +1293,31 @@ export class MsbCliBackend implements SandboxBackend {
    * (whose printed artifact path — never `ref` itself — becomes the
    * EFFECTIVE checkpoint ref this method returns; see
    * `parseSnapshotCreateArtifactPath`), then `msb rm <name>` followed by
-   * `msb restore <effective-ref> --name <name>` of the SAME name from that
-   * snapshot (via `bootRestoreOnce`, see `MsbCommands.restore`'s own doc — no
-   * `--disk-only`, which a disk-scope snapshot rejects) — never `msb start`.
+   * `msb restore <effective-ref> --name <fresh-name>` of a FRESH name from
+   * that snapshot (via `bootRestoreOnce`, see `MsbCommands.restore`'s own
+   * doc — no `--disk-only`, which a disk-scope snapshot rejects) — never
+   * `msb start`. The fresh name — never the original — is minted by
+   * `nextSandboxName()` (the same generator `GenericContainer.start()`'s own
+   * ordinary boot loop uses; see `core/sandbox-name.ts`) because msb's own
+   * restore-time collision check (`existing.is_some() || dir_exists`) can
+   * still see the just-`rm`-ed sandbox's on-disk directory as present for a
+   * window after `msb rm` returns — EMPIRICALLY VERIFIED on Windows CI, that
+   * directory has outlived the database record by more than 3.5 seconds
+   * under load (see `CHECKPOINT_REBOOT_ALREADY_EXISTS_RETRY_BUDGET_MS`'s own
+   * doc). A same-name restore only ever RETRIES through that race; a
+   * different name sidesteps it structurally — a name nothing else is using
+   * can never collide with a lingering directory. On success, this method
+   * mutates `handle.id` and `handle.spec` (name only — see below) IN PLACE
+   * on the caller's own `handle`, so every subsequent operation against it
+   * (exec/logs/stop/rm, and — one layer up, via the SAME `SandboxHandle`
+   * reference — `GenericContainer.checkpoint()`'s own post-reboot
+   * `installNetworkLinks`/wait-strategy re-run and `capturedWorkloadCommand()`
+   * call) targets the sandbox actually running now. `SandboxBackend`'s own
+   * interface doc calls `SandboxHandle` "immutable" — this is the one
+   * carve-out, and only this method makes it: a checkpoint reboot is the one
+   * operation that changes what sandbox a handle even refers to. `ports`,
+   * `env`, and `memoryLimitMb` are untouched by the rename — same ports, env,
+   * and memory ceiling as before the reboot, only the name differs.
    * Upstream's
    * detached-start path (`Sandbox::start_detached`) passes
    * `CREATE_BREAKAWAY_FROM_JOB` on Windows, which `ERROR_ACCESS_DENIED`s
@@ -1302,13 +1340,19 @@ export class MsbCliBackend implements SandboxBackend {
    * as an ordinary unclassified `BackendError` out of `bootRestoreOnce`
    * (deterministic exit-code failure, not one of the classified transients
    * above), the same shape a genuine breakaway denial always took.
-   * `rm`-ing the sandbox first and restoring a fresh one under the same
-   * name/ports/memory (via a spec identical to `handle.spec` except
-   * `checkpointRef` set to the EFFECTIVE ref this method discovers, below —
-   * env is no longer threaded through at all, see `MsbCommands.restore`)
-   * reproduces the exact same observable contract. Nothing about
-   * `this.handles`/`startedNames` or the reaping ledger changes, since the
-   * name never changed. Its workload restarts from scratch (the VM
+   * `rm`-ing the sandbox first and restoring a fresh one under a fresh
+   * name, same ports/memory (via a spec identical to `handle.spec` except
+   * `name`/`checkpointRef` set to the fresh name and the EFFECTIVE ref this
+   * method discovers, below — env is no longer threaded through at all, see
+   * `MsbCommands.restore`) reproduces the exact same observable contract
+   * MODULO the name itself, which was always an implementation detail, not
+   * part of what a checkpoint promises to preserve. This backend's own
+   * `handles`/`startedNames` registries ARE re-keyed from the old name to
+   * the new one (see below), and the fresh name is tracked in the reaping
+   * ledger before the restore is even attempted, exactly like an ordinary
+   * `create()` — the old name's own ledger entry is deliberately left alone,
+   * for the ledger's existing not-found-tolerant sweep to find (it was
+   * already `msb rm`-ed above). Its workload restarts from scratch (the VM
    * reboots), which is why `capabilities.checkpointRestartsWorkload` is
    * `true` here and the generic layer re-runs the wait strategy after this
    * returns — AFTER `bootRestoreOnce` has already revived the workload
@@ -1362,9 +1406,16 @@ export class MsbCliBackend implements SandboxBackend {
       throw new TmpfsRootCheckpointError();
     }
     const msbPath = await this.msbPath();
-    const state = this.handles.get(handle.id);
+    // Captured up front: `handle.id` itself is mutated in place, below, once
+    // the reboot under the fresh name has actually succeeded — every
+    // reference to the SOURCE sandbox's own name in this method (the
+    // stop/snapshot/rm steps, the pre-mutation error messages) goes through
+    // this local instead, never `handle.id` directly, so it stays correct
+    // regardless of when that mutation happens.
+    const originalName = handle.id;
+    const state = this.handles.get(originalName);
     if (state === undefined) {
-      throw new BackendError(`no handle state for sandbox '${handle.id}' — create() was never called for it`);
+      throw new BackendError(`no handle state for sandbox '${originalName}' — create() was never called for it`);
     }
 
     // Guest cmdline capture — BEFORE stopping the source sandbox (see
@@ -1373,9 +1424,10 @@ export class MsbCliBackend implements SandboxBackend {
     // capture failure never fails the checkpoint itself (captureGuestWorkloadCmdline
     // already swallows it into `undefined`); its absence only surfaces
     // later, at restore time, as CheckpointWorkloadCommandMissingError.
-    // Stashed on `state` (keyed by sandbox name, so it survives this
-    // method's own remove+reboot churn below) for `capturedWorkloadCommand()`
-    // to hand back to `GenericContainer.checkpoint()` afterward.
+    // Stashed on `state` (kept by reference across this method's own
+    // re-keying below, so it survives the remove+reboot churn) for
+    // `capturedWorkloadCommand()` to hand back to `GenericContainer.checkpoint()`
+    // afterward.
     const capturedCommand = handle.spec.command === undefined ? await this.captureGuestWorkloadCmdline(handle) : undefined;
     state.capturedCommand = capturedCommand;
 
@@ -1393,45 +1445,99 @@ export class MsbCliBackend implements SandboxBackend {
       await fs.mkdir(path.dirname(ref), { recursive: true });
     }
     const snapshotArgv = isPathRef
-      ? MsbCommands.snapshotCreate(handle.id, path.basename(ref), path.dirname(ref))
-      : MsbCommands.snapshotCreate(handle.id, ref);
+      ? MsbCommands.snapshotCreate(originalName, path.basename(ref), path.dirname(ref))
+      : MsbCommands.snapshotCreate(originalName, ref);
     const snap = await invoke(msbPath, snapshotArgv, CHECKPOINT_TIMEOUT_MS);
     if (snap.exitCode !== 0) {
       throw new BackendError(
-        `msb snapshot create --from ${handle.id} ${ref} failed (exit ${snap.exitCode}): ${snap.stderr.trim()} — ` +
-          `the sandbox is left stopped; run 'msb start ${handle.id}' by hand to bring it back up.`,
+        `msb snapshot create --from ${originalName} ${ref} failed (exit ${snap.exitCode}): ${snap.stderr.trim()} — ` +
+          `the sandbox is left stopped; run 'msb start ${originalName}' by hand to bring it back up.`,
       );
     }
     const effectiveRef = parseSnapshotCreateArtifactPath(snap.stdout);
     if (effectiveRef === undefined) {
       throw new BackendError(
-        `msb snapshot create --from ${handle.id} ${ref} did not print a recognizable artifact path as its ` +
-          `last line — the sandbox is left stopped; run 'msb start ${handle.id}' by hand to bring it back up. ` +
+        `msb snapshot create --from ${originalName} ${ref} did not print a recognizable artifact path as its ` +
+          `last line — the sandbox is left stopped; run 'msb start ${originalName}' by hand to bring it back up. ` +
           `Raw output:\n${snap.stdout}${snap.stderr}`,
       );
     }
 
-    await invoke(msbPath, MsbCommands.rm(handle.id), STOP_TIMEOUT_MS).catch(() => {});
+    await invoke(msbPath, MsbCommands.rm(originalName), STOP_TIMEOUT_MS).catch(() => {});
+
+    // A FRESH sandbox name for the reboot — never `originalName` — from the
+    // SAME generator every ordinary GenericContainer.start() boot uses (see
+    // core/sandbox-name.ts's own doc on why this is the one, shared counter).
+    // See this method's own doc for why: msb's own restore-time collision
+    // check can still see the just-`rm`-ed sandbox's on-disk directory as
+    // present for a window after `msb rm` returns, on a loaded Windows host,
+    // and a fresh name sidesteps that race structurally rather than merely
+    // retrying through it.
+    const freshName = nextSandboxName();
+
+    // Tracked in the reaping ledger BEFORE the restore is even attempted —
+    // exactly like an ordinary create() (see GenericContainer.start()'s own
+    // trackSandbox call) — so a process that dies mid-reboot still leaves
+    // the ledger a superset of this run's live sandboxes. `originalName`'s
+    // own ledger entry is deliberately left alone: it was already `msb
+    // rm`-ed above, and the ledger's sweep is already not-found-tolerant for
+    // exactly this shape (a name the ledger still lists but msb itself has
+    // no record of).
+    if (!handle.spec.keepAlive) {
+      await trackSandbox(freshName);
+    }
 
     // `command` resolves the same way `fromCheckpointRegistryEntry` resolves
     // it for a later, registry-mediated restore: the source's own explicit
     // command first, the guest cmdline just captured above as the fallback —
     // so `reviveWorkload`, inside the reboot this triggers next, already has
-    // the fully-resolved workload argv without any restore-time lookup.
+    // the fully-resolved workload argv without any restore-time lookup. This
+    // merged `command` (and `checkpointRef`) live ONLY on `rebootHandle`,
+    // never on the caller's own `handle.spec` (mutated below) — that spec
+    // must keep reading back exactly what the SOURCE container's own
+    // `spec.command` was (`undefined` when there was none), since
+    // `GenericContainer.checkpoint()` reads `handle.spec` again right after
+    // this returns to build the named-checkpoint registry entry, which
+    // pins that same "explicit command vs. captured fallback" distinction
+    // as two separate fields (see `CheckpointRegistryEntry`'s own doc).
     const rebootHandle: SandboxHandle = {
-      id: handle.id,
-      spec: { ...handle.spec, checkpointRef: effectiveRef, command: handle.spec.command ?? capturedCommand },
+      id: freshName,
+      spec: { ...handle.spec, name: freshName, checkpointRef: effectiveRef, command: handle.spec.command ?? capturedCommand },
     };
     try {
       await this.rebootRetryingAlreadyExists(msbPath, rebootHandle, state);
     } catch (err) {
+      // The fresh name never came up — untrack it again rather than leaving
+      // a permanently-stale ledger entry for a name this method will never
+      // retry under (mirrors GenericContainer.start()'s own untrackSandbox
+      // call on a failed attempt).
+      if (!handle.spec.keepAlive) {
+        await untrackSandbox(freshName);
+      }
       const detail = err instanceof Error ? err.message : String(err);
       throw new BackendError(
-        `sandbox '${handle.id}' was removed after a successful checkpoint snapshot, but booting a fresh ` +
-          `sandbox back up from that snapshot failed: ${detail} — the sandbox's disk state is preserved in ` +
-          `checkpoint '${effectiveRef}', restorable via GenericContainer.fromCheckpoint().`,
+        `sandbox '${originalName}' was removed after a successful checkpoint snapshot, but booting a fresh ` +
+          `sandbox back up from that snapshot under the new name '${freshName}' failed: ${detail} — the ` +
+          `sandbox's disk state is preserved in checkpoint '${effectiveRef}', restorable via ` +
+          `GenericContainer.fromCheckpoint().`,
       );
     }
+
+    // The reboot succeeded under `freshName`, not `originalName` — re-key
+    // this backend's own runtime registries (see class doc on `handles`),
+    // then publish the new identity onto the CALLER's own handle object, IN
+    // PLACE, so every subsequent operation on it targets the sandbox
+    // actually running now (see this method's own doc). Only `id`/`spec.name`
+    // change on the live handle — `spec.command`/`spec.checkpointRef` stay
+    // exactly as they were on the SOURCE spec; see the comment on
+    // `rebootHandle` above for why.
+    this.handles.delete(originalName);
+    this.handles.set(freshName, state);
+    this.startedNames.delete(originalName);
+    const mutableHandle = handle as { id: string; spec: ContainerSpec };
+    mutableHandle.id = freshName;
+    mutableHandle.spec = { ...handle.spec, name: freshName };
+
     return effectiveRef;
   }
 

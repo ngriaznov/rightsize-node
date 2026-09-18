@@ -385,7 +385,7 @@ describe("GenericContainer.checkpoint()", () => {
     );
   });
 
-  it("leaves the reaper ledger untouched across the msb stop/snapshot/reboot checkpoint cycle", async () => {
+  it("GenericContainer.checkpoint() never touches the reaper ledger itself — that bookkeeping is entirely the backend's own job", async () => {
     const savedProviders = _providersSnapshotForTests();
     const savedBackendEnv = process.env["RIGHTSIZE_BACKEND"];
     const savedReaperEnv = process.env["RIGHTSIZE_REAPER"];
@@ -398,11 +398,16 @@ describe("GenericContainer.checkpoint()", () => {
 
     // microsandbox, not docker: this is the backend whose createCheckpoint
     // actually runs a stop/snapshot/reboot cycle (see MsbCliBackend) rather
-    // than a plain image commit, so this fake stands in for that same
-    // shape via capabilities.checkpointRestartsWorkload — the ledger
-    // assertion below is about GenericContainer's own bookkeeping, which
-    // never calls trackSandbox/untrackSandbox from checkpoint() on either
-    // backend.
+    // than a plain image commit — but this is a plain FAKE, not the real
+    // MsbCliBackend, so it never mints a fresh reboot name and never tracks
+    // one either. The point of this test is one layer up: GenericContainer's
+    // OWN checkpoint() method never calls trackSandbox/untrackSandbox
+    // itself, on ANY backend — all ledger bookkeeping for a checkpoint
+    // reboot is the backend's own responsibility. (The REAL MsbCliBackend
+    // DOES track its fresh reboot name in the ledger, before restoring under
+    // it — see MsbCliBackend.createCheckpoint's own doc and the red-proof
+    // for it in backend-msb/backend.test.ts; that is backend-internal
+    // bookkeeping this generic layer never sees or needs to.)
     const backend = new FakeCheckpointBackend("microsandbox", {
       hardwareIsolated: true,
       checkpoint: true,
@@ -437,7 +442,8 @@ describe("GenericContainer.checkpoint()", () => {
         assert.deepEqual(
           after,
           before,
-          "the stop/snapshot/reboot checkpoint cycle must never touch the reaper ledger — same sandbox name, still owned by this run",
+          "GenericContainer.checkpoint() itself must never touch the reaper ledger — with this FAKE backend " +
+            "(which does no ledger bookkeeping of its own), the ledger stays exactly as it was",
         );
       }
 

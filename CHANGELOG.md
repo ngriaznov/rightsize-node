@@ -137,21 +137,49 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   retries it a bounded number of times with a short backoff, mirroring the
   install-lock and state-database retry policies this backend already has.
   The signature never occurs on unix, so this is a no-op there.
-- **`createCheckpoint`'s own reboot now retries msb's "sandbox already
-  exists" refusal on a genuine ~30-second budget (2-second intervals)
-  instead of failing the checkpoint outright on the first hit.** The
-  checkpoint cycle removes the source sandbox and immediately restores a
+- **`createCheckpoint`'s own reboot previously retried msb's "sandbox
+  already exists" refusal on a genuine ~30-second budget (2-second
+  intervals) instead of failing the checkpoint outright on the first hit.**
+  The checkpoint cycle removes the source sandbox and immediately restored a
   fresh one under the same name; on Windows, msb 0.7.1's own restore-time
   collision check (`existing.is_some() || dir_exists`) can still see either
   the just-removed sandbox's database record or its on-disk directory as
   present for a window after `msb rm` returns — the directory in particular
   has been observed on CI outliving the database record by more than 3.5
   seconds under load, well past what a handful of short retries could ever
-  outlast. The retry budget mirrors this backend's own install-lock poll
-  shape and applies only to this reboot — an ordinary
+  outlast. The retry budget mirrored this backend's own install-lock poll
+  shape and applied only to this reboot — an ordinary
   `GenericContainer.fromCheckpoint().start()` restoring a name that turns
   out to still be live keeps failing immediately, since reusing a live name
-  is a real error, not this backend's own release race.
+  is a real error, not this backend's own release race. Superseded by the
+  fresh-name reboot below, which sidesteps the Windows race structurally
+  rather than retrying through it — the budget itself is unchanged and
+  stays in place as dormant defense (see the next entry).
+- **`createCheckpoint`'s reboot now restores under a FRESH sandbox name,
+  never the source sandbox's own.** Previously the checkpoint cycle
+  (`msb stop` → `msb snapshot create` → `msb rm` → `msb restore`) restored
+  the new sandbox under the exact name it had just removed — the entry
+  above's retry budget existed only to paper over the Windows race that
+  same-name restore created. This reboot now mints a fresh name via the
+  same `rz-<runId>-<seq>` generator every ordinary `GenericContainer.start()`
+  boot already uses, and updates the live `SandboxHandle` in place (its
+  `id` and `spec.name`) so every subsequent call against it — `exec`,
+  `logs`, `stop`, `remove`, a later `checkpoint()` — transparently targets
+  the new sandbox; callers holding a `GenericContainer` see no difference at
+  all. Ports, env, memory limit, mounts, and network isolation all carry
+  over unchanged — only the underlying sandbox name differs, which was
+  always an implementation detail, never part of what a checkpoint promises
+  to preserve. The already-exists retry budget and the reaper ledger's
+  install-lock-style dormant defenses are unchanged and untouched — they
+  simply no longer trigger on the ordinary path, since a name nothing else
+  has ever used cannot collide with a lingering directory on a loaded
+  Windows host. The one place this IS observable: if you log or otherwise
+  surface a sandbox's name yourself (e.g. via `msb ls`), that name changes
+  across a `.checkpoint()` call — this was never part of this library's
+  public API (`GenericContainer` exposes no name/id getter), so no
+  application code should need to change, but anything that greps `msb ls`
+  output for a specific sandbox name across a checkpoint should expect the
+  new one.
 
 ## [0.7.9] - 2026-09-10
 

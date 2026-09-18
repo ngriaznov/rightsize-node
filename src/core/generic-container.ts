@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { FreePorts } from "./free-ports.js";
 import { RunId } from "./run-id.js";
+import { nextSandboxName } from "./sandbox-name.js";
 import { Network } from "./network.js";
 import type { NetworkMember } from "./network.js";
 import {
@@ -69,12 +70,6 @@ function envPairsEqual(a: ReadonlyArray<readonly [string, string]>, b: ReadonlyA
 }
 
 const MAX_START_ATTEMPTS = 5;
-
-let sequence = 0;
-function nextSequence(): number {
-  sequence += 1;
-  return sequence;
-}
 
 /** Typed-first, string-fallback classification: walk the cause chain for a typed conflict, else match the daemon's own wording. */
 function isPortBindConflict(err: unknown): boolean {
@@ -639,7 +634,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     try {
     for (let attempt = 0; attempt < MAX_START_ATTEMPTS; attempt++) {
       const ports = await this.allocatePorts();
-      const name = `rz-${RunId.value}-${nextSequence()}`;
+      const name = nextSandboxName();
       const spec = this.buildSpec(name, ports);
 
       // Appended BEFORE create() — the ledger's `.sandboxes` file is always

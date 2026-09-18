@@ -16,6 +16,8 @@ import {
 } from "../core/checkpoint/registry.js";
 import { cacheDir } from "../core/cache-dir.js";
 import type { WaitStrategy } from "../core/wait.js";
+import { ensureReaperInitialized, trackSandbox, _resetReaperForTests } from "../core/reaper/init.js";
+import { readSandboxNames } from "../core/reaper/ledger.js";
 
 /** A no-op readiness check — this suite never runs a real workload, only the fake-msb double. */
 function instantReady(): WaitStrategy {
@@ -658,6 +660,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       const spec = baseSpec("rz-testrun1-ckpt-pathref", { command: ["sleep", "60"] });
       const handle = await backend.create(spec);
       await backend.start(handle);
+      const originalName = handle.id;
 
       const effectiveRef = await backend.createCheckpoint(handle, ref);
 
@@ -682,12 +685,13 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
         "snapshot",
         "create",
         "--from-sandbox",
-        handle.id,
+        originalName,
         "rz-ckpt-pathref01",
         "--dest-dir",
         checkpointsDir,
       ]);
-      assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the sandbox to be running again after the cycle");
+      assert.ok(handle.id !== originalName, "expected the reboot to have rebooted under a FRESH name, in place on the handle");
+      assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the fresh-name sandbox to be running again after the cycle");
       assert.equal(
         await backend.hasCheckpoint(effectiveRef),
         true,
@@ -701,7 +705,10 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
         effectiveRef,
         "expected the reboot restore's positional to be the DISCOVERED artifact path, not the nominal ref",
       );
+      assert.equal(rebootCall?.args[3], handle.id, "expected the reboot restore's --name to be the fresh name, matching the mutated handle");
 
+      // Subsequent stop()/remove() must target the FRESH name — the same
+      // handle reference, mutated in place, is all a caller ever needs.
       await backend.stop(handle);
       await backend.remove(handle);
     } finally {
@@ -709,7 +716,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     }
   });
 
-  it("createCheckpoint drives exactly stop -> snapshot create -> rm -> a reboot run from the snapshot, in order, leaving the sandbox Running", async () => {
+  it("createCheckpoint drives exactly stop -> snapshot create -> rm -> a reboot run from the snapshot under a FRESH name, leaving the sandbox Running", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -720,16 +727,31 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     });
     const handle = await backend.create(spec);
     await backend.start(handle);
+    const originalName = handle.id;
 
     const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-abcdef012345");
+
+    // FRESH-NAME RED-PROOF (a) (distinct from this suite's other lettered
+    // reviveWorkload red-proofs below): the reboot happens under a
+    // DIFFERENT name than the original, and that new identity is published
+    // onto the SAME handle reference in place — a caller never needs a
+    // second handle.
+    const freshName = handle.id;
+    assert.ok(freshName !== originalName, "expected createCheckpoint's reboot to mint a FRESH sandbox name, not reuse the original");
+    // rz-<RunId.value>-<seq> — RunId.value is THIS PROCESS's own real run id
+    // (8 lowercase hex, see core/run-id.ts), never the fake spec's own
+    // `runId: "testrun1"` field (a label baseSpec sets for docker/msb
+    // diagnostics, unrelated to the name generator).
+    assert.match(freshName, /^rz-[0-9a-f]{8}-\d+$/, "expected the fresh name to follow the same rz-<RunId.value>-<seq> generator every ordinary boot uses");
 
     const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
       sandboxes: Record<string, { status: string }>;
       snapshots: Record<string, { from: string }>;
       callLog: Array<{ cmd: string; args: string[] }>;
     };
-    assert.equal(state.snapshots[effectiveRef]?.from, handle.id, "expected the snapshot recorded FROM this sandbox");
-    assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the sandbox to be running again after the cycle");
+    assert.equal(state.snapshots[effectiveRef]?.from, originalName, "expected the snapshot recorded FROM the original sandbox");
+    assert.equal(state.sandboxes[originalName], undefined, "expected the original name to have been rm'd, not left behind");
+    assert.equal(state.sandboxes[freshName]?.status, "Running", "expected the FRESH-name sandbox to be running again after the cycle");
 
     // The initial backend.start() above already logged its own "run" call;
     // only the last five calls belong to the checkpoint cycle itself — the
@@ -746,20 +768,32 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     );
     assert.deepEqual(
       cycle[3]?.args,
-      ["restore", effectiveRef, "--name", handle.id, "-p", "15999:80"],
-      "expected the reboot's restore to carry the DISCOVERED artifact ref positional and the ports from " +
-        "the original spec — never --disk-only (a disk-scope snapshot rejects it) and never -e: msb " +
-        "restore has no env flag at all (see MsbCommands.restore)",
+      ["restore", effectiveRef, "--name", freshName, "-p", "15999:80"],
+      "expected the reboot's restore to carry the DISCOVERED artifact ref positional, the FRESH name (never " +
+        "the original), and the ports from the original spec — never --disk-only (a disk-scope snapshot " +
+        "rejects it) and never -e: msb restore has no env flag at all (see MsbCommands.restore)",
     );
     assert.deepEqual(
       cycle[4]?.args,
-      ["exec", "-e", "FOO=bar", handle.id, "--", "sleep", "60"],
-      "expected the workload-revival exec to carry the original spec's env as -e pairs and its explicit " +
-        "command as the trailing argv",
+      ["exec", "-e", "FOO=bar", freshName, "--", "sleep", "60"],
+      "expected the workload-revival exec to target the FRESH name, carrying the original spec's env as -e " +
+        "pairs and its explicit command as the trailing argv",
     );
 
+    // FRESH-NAME RED-PROOF (a), continued: subsequent stop()/remove() — using the SAME
+    // handle reference createCheckpoint mutated in place — target the new
+    // name, never the original.
     await backend.stop(handle);
     await backend.remove(handle);
+    const afterTeardown = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+    const teardownTail = afterTeardown.callLog.slice(-2);
+    assert.deepEqual(
+      teardownTail.map((c) => c.cmd),
+      ["stop", "rm"],
+      "expected the final stop()/remove() to have driven exactly one more stop and one more rm",
+    );
+    assert.equal(teardownTail[0]?.args[1], freshName, "expected the final stop() to target the FRESH name");
+    assert.equal(teardownTail[1]?.args[1], freshName, "expected the final remove() to target the FRESH name");
   });
 
   it("createCheckpoint's reboot re-emits the original sandbox's mounts and network-isolation flag, not just ports", async () => {
@@ -783,8 +817,10 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     });
     const handle = await backend.create(spec);
     await backend.start(handle);
+    const originalName = handle.id;
 
     const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-mountsandnet");
+    assert.ok(handle.id !== originalName, "expected the reboot to have rebooted under a FRESH name, in place on the handle");
 
     const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
       callLog: Array<{ cmd: string; args: string[] }>;
@@ -1013,13 +1049,16 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
-  // RED-PROOF: createCheckpoint's own reboot retries msb's "sandbox already
-  // exists" refusal on a bounded budget (rebootRetryingAlreadyExists) — 5
+  // FRESH-NAME RED-PROOF (c): createCheckpoint's own reboot retries msb's
+  // "sandbox already exists" refusal ON THE FRESH NAME (fake-forced 5 times
+  // in a row) on a bounded budget (rebootRetryingAlreadyExists) — this retry
+  // machinery is now dormant defense on the ordinary path (see that
+  // method's own doc), but it must still work when actually triggered: 5
   // failures (more than the single retry this backend had before this
   // budget existed, i.e. more than the OLD behavior could ever absorb) then
   // success must still let the checkpoint succeed, with the exact
   // restore-invocation count asserted.
-  it("createCheckpoint's reboot retries msb's 'sandbox already exists' refusal — succeeds with exactly 6 restore invocations after 5 failures", async () => {
+  it("createCheckpoint's reboot retries msb's 'sandbox already exists' refusal on the fresh name — succeeds with exactly 6 restore invocations after 5 failures", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -1037,20 +1076,27 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     const spec = baseSpec("rz-testrun1-ckpt-alreadyexists", { command: ["sleep", "60"] });
     const handle = await backend.create(spec);
     await backend.start(handle);
+    const originalName = handle.id;
 
     const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
     seeded.failRestoresWithAlreadyExists = 5;
     await fs.writeFile(statePath, JSON.stringify(seeded));
 
     await backend.createCheckpoint(handle, "rz-ckpt-alreadyexists1");
+    const freshName = handle.id;
+    assert.ok(freshName !== originalName, "expected a fresh name even on a checkpoint whose reboot needed retries");
 
     const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
       sandboxes: Record<string, { status: string }>;
       callLog: Array<{ cmd: string; args: string[] }>;
     };
-    assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the retried reboot to bring the sandbox back up");
+    assert.equal(state.sandboxes[freshName]?.status, "Running", "expected the retried reboot to bring the FRESH-name sandbox up");
     const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
     assert.equal(restoreCalls.length, 6, "expected the 5 refused reboots plus exactly one succeeding retry");
+    assert.ok(
+      restoreCalls.every((c) => c.args[3] === freshName),
+      "expected every retried restore attempt to target the SAME fresh name, not a new one per attempt",
+    );
 
     await backend.stop(handle);
     await backend.remove(handle);
@@ -1106,6 +1152,118 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.equal(state.sandboxes[handle.id], undefined, "expected the sandbox to have been removed, not restored");
     const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
     assert.ok(restoreCalls.length >= 2, `expected more than one retried restore attempt before giving up, got ${restoreCalls.length}`);
+  });
+
+  // FRESH-NAME RED-PROOF (b): the fresh reboot name is appended to the reaper ledger
+  // BEFORE the restore is even attempted — exactly like an ordinary
+  // create() — and the OLD name's own ledger entry is left in place for the
+  // ledger's existing not-found-tolerant sweep, never removed by
+  // createCheckpoint itself. This suite drives MsbCliBackend directly (never
+  // through GenericContainer.start()), so the reaper is initialized by hand
+  // here, via the same test seams core/reaper/init.test.ts uses.
+  it("createCheckpoint's reboot tracks the fresh name in the reaper ledger before restoring, leaving the old name's entry for the sweep", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const savedReaperEnv = process.env["RIGHTSIZE_REAPER"];
+    // "sweep": exercises trackSandbox/untrackSandbox without also spawning a
+    // real watchdog child process against this test's fake msb binary.
+    process.env["RIGHTSIZE_REAPER"] = "sweep";
+    _resetReaperForTests();
+    try {
+      await ensureReaperInitialized(backend);
+      const runsDirEntries = await fs.readdir(path.join(cacheDir(), "runs"));
+      const jsonFile = runsDirEntries.find((f) => f.endsWith(".json"));
+      assert.ok(jsonFile !== undefined, "expected ensureReaperInitialized to have written a run record");
+      const runId = (jsonFile as string).slice(0, -".json".length);
+
+      const spec = baseSpec("rz-testrun1-ckpt-ledger", { command: ["sleep", "60"] });
+      const handle = await backend.create(spec);
+      await backend.start(handle);
+      const originalName = handle.id;
+
+      // What GenericContainer.start() itself does before backend.create() —
+      // done by hand here since this suite never goes through it — so the
+      // ledger is in the state createCheckpoint's own reboot expects to
+      // find it in.
+      await trackSandbox(originalName);
+      assert.deepEqual(await readSandboxNames(cacheDir(), runId), [originalName]);
+
+      await backend.createCheckpoint(handle, "rz-ckpt-ledger-entry");
+      const freshName = handle.id;
+      assert.ok(freshName !== originalName, "expected the reboot to have minted a fresh name");
+
+      assert.deepEqual(
+        await readSandboxNames(cacheDir(), runId),
+        [originalName, freshName],
+        "expected the fresh name appended alongside the old name's own entry, which createCheckpoint never " +
+          "removes — that's left for the ledger's existing not-found-tolerant sweep",
+      );
+
+      await backend.stop(handle);
+      await backend.remove(handle);
+    } finally {
+      _resetReaperForTests();
+      if (savedReaperEnv === undefined) {
+        delete process.env["RIGHTSIZE_REAPER"];
+      } else {
+        process.env["RIGHTSIZE_REAPER"] = savedReaperEnv;
+      }
+    }
+  });
+
+  // The failure-path sibling of the red-proof above: a reboot that never
+  // comes up must not leave the ledger permanently listing a name nothing
+  // will ever retry under.
+  it("createCheckpoint's reboot untracks the fresh name again if the reboot itself fails", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const savedReaperEnv = process.env["RIGHTSIZE_REAPER"];
+    process.env["RIGHTSIZE_REAPER"] = "sweep";
+    _resetReaperForTests();
+    try {
+      await ensureReaperInitialized(backend);
+      const runsDirEntries = await fs.readdir(path.join(cacheDir(), "runs"));
+      const jsonFile = runsDirEntries.find((f) => f.endsWith(".json"));
+      assert.ok(jsonFile !== undefined, "expected ensureReaperInitialized to have written a run record");
+      const runId = (jsonFile as string).slice(0, -".json".length);
+
+      const spec = baseSpec("rz-testrun1-ckpt-ledger-fail", { command: ["sleep", "60"] });
+      const handle = await backend.create(spec);
+      await backend.start(handle);
+      const originalName = handle.id;
+      await trackSandbox(originalName);
+
+      const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+      seeded.failRunsWithStateDbError = 2; // exhausts the boot classifier's one-shot state-db retry too
+      await fs.writeFile(statePath, JSON.stringify(seeded));
+
+      let thrown: unknown;
+      try {
+        await backend.createCheckpoint(handle, "rz-ckpt-ledger-fail-entry");
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+      assert.equal(handle.id, originalName, "expected a failed reboot to leave the handle's own identity untouched");
+
+      assert.deepEqual(
+        await readSandboxNames(cacheDir(), runId),
+        [originalName],
+        "expected the fresh name's own ledger entry to have been removed again after the reboot failed, " +
+          "leaving only the original name — never a permanently-stale entry for a name nothing will retry under",
+      );
+
+      await backend.remove(handle);
+    } finally {
+      _resetReaperForTests();
+      if (savedReaperEnv === undefined) {
+        delete process.env["RIGHTSIZE_REAPER"];
+      } else {
+        process.env["RIGHTSIZE_REAPER"] = savedReaperEnv;
+      }
+    }
   });
 
   // RED-PROOF (e): exec child early-nonzero => classified failure (plus the
