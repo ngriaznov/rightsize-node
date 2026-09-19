@@ -38,7 +38,11 @@ async function roundTrip(bootstrapServers: string): Promise<string | undefined> 
   try {
     await consumer.subscribe({ topic: "t1", fromBeginning: true });
     return await new Promise<string | undefined>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("timed out waiting for a message")), 20_000);
+      // 60s, not 20s: Kafka's consumer-group join + first fetch on a loaded CI
+      // runner (Windows especially) has twice burned a release re-roll at 20s —
+      // the message always arrives, just late. This bounds patience, it does
+      // not hide a failure: no message in 60s is still a hard timeout.
+      const timer = setTimeout(() => reject(new Error("timed out waiting for a message")), 60_000);
       consumer
         .run({
           eachMessage: async ({ message }) => {
