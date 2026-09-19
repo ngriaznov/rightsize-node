@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.11] - 2026-09-19
+
 ### Added
 
 - **UDP port exposure (Phase 1).** `PortBinding` gains a `protocol` field
