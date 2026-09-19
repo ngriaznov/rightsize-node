@@ -29,7 +29,7 @@ import { isSnapshotSaveAccessDeniedFailure, salvageStagedArchive } from "./snaps
 import { parseSnapshotCreateArtifactPath } from "./snapshot-create.js";
 import { isSnapshotHeadRemovalRefused } from "./snapshot-rm.js";
 import { undeliveredLines } from "./follow-replay.js";
-import { requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript } from "./network-links.js";
+import { requireNoUdpLinks, requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript } from "./network-links.js";
 import { ExecTunnel } from "./exec-tunnel.js";
 import { isRestoreAccessDeniedFailure } from "./restore-access-denied.js";
 import { isSandboxAlreadyExistsFailure } from "./sandbox-already-exists.js";
@@ -2406,15 +2406,18 @@ export class MsbCliBackend implements SandboxBackend {
   /**
    * Networks are emulated because there is no bridge/subnet the current
    * msb exposes on macOS — the only data path into a running sandbox is the
-   * exec channel. Four concerns, each its own guard: reject duplicate guest
-   * ports, validate every alias (they get shell-interpolated), probe for
-   * `nc`, then install `/etc/hosts` aliases and spawn one tunnel per link.
+   * exec channel. Five concerns, each its own guard: reject any UDP link
+   * outright (msb has no guest-to-guest UDP path at all — see
+   * `requireNoUdpLinks`'s own doc), reject duplicate guest ports, validate
+   * every alias (they get shell-interpolated), probe for `nc`, then install
+   * `/etc/hosts` aliases and spawn one tunnel per link.
    */
   async installNetworkLinks(handle: SandboxHandle, links: ReadonlyArray<NetworkLink>): Promise<void> {
     if (links.length === 0) {
       return;
     }
     const msbPath = await this.msbPath();
+    requireNoUdpLinks(links);
     requireNoDuplicateGuestPorts(links);
     requireAliasesAreValid(links);
 

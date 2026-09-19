@@ -33,6 +33,8 @@ class FakeBackend implements SandboxBackend {
   readonly calls: FakeCall[] = [];
   readonly createdHandles: SandboxHandle[] = [];
   readonly cleanupSyncCalls: string[] = [];
+  /** Every installNetworkLinks() call's own links array, in call order — a test seam distinct from `calls` (which only records that the call happened). */
+  readonly installedLinks: Array<ReadonlyArray<NetworkLink>> = [];
   private startAttempts = 0;
   private idSeq = 0;
 
@@ -109,8 +111,9 @@ class FakeBackend implements SandboxBackend {
 
   async removeNetwork(_networkId: string): Promise<void> {}
 
-  async installNetworkLinks(handle: SandboxHandle, _links: ReadonlyArray<NetworkLink>): Promise<void> {
+  async installNetworkLinks(handle: SandboxHandle, links: ReadonlyArray<NetworkLink>): Promise<void> {
     this.calls.push({ op: "installNetworkLinks", handleId: handle.id });
+    this.installedLinks.push(links);
     if (this.opts.failInstallNetworkLinks ?? false) {
       throw new Error("boom: installNetworkLinks failed");
     }
@@ -180,6 +183,144 @@ describe("GenericContainer — U1 port allocate/create/wait/map", () => {
   });
 });
 
+describe("GenericContainer — UDP exposed ports (builder/spec plumbing)", () => {
+  it("withExposedUdpPorts populates spec.ports with protocol 'udp', separate from the TCP entries", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("dns-server:latest")
+      .withBackend(backend)
+      .withExposedPorts(80)
+      .withExposedUdpPorts(53)
+      .waitingFor(instantReady());
+    await container.start();
+
+    const spec = backend.createdHandles[0]?.spec;
+    assert.equal(spec?.ports.length, 2);
+    const tcpEntry = spec?.ports.find((p) => p.protocol === "tcp");
+    const udpEntry = spec?.ports.find((p) => p.protocol === "udp");
+    assert.equal(tcpEntry?.guestPort, 80);
+    assert.equal(udpEntry?.guestPort, 53);
+    assert.ok((udpEntry?.hostPort ?? 0) > 0);
+
+    assert.equal(container.getMappedUdpPort(53), udpEntry?.hostPort);
+    assert.equal(container.getMappedPort(80), tcpEntry?.hostPort);
+
+    await container.stop();
+  });
+
+  it("getMappedUdpPort throws distinct messages for not-running vs never-exposed", async () => {
+    const notRunning = new GenericContainer("alpine:3.19").withBackend(new FakeBackend()).withExposedUdpPorts(53);
+    try {
+      notRunning.getMappedUdpPort(53);
+      assert.ok(false, "expected a throw");
+    } catch (err) {
+      assert.match((err as Error).message, /call start\(\) first/);
+    }
+
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).withExposedUdpPorts(53).waitingFor(instantReady());
+    await container.start();
+    try {
+      container.getMappedUdpPort(9999);
+      assert.ok(false, "expected a throw");
+    } catch (err) {
+      assert.match((err as Error).message, /withExposedUdpPorts\(9999\)/);
+    } finally {
+      await container.stop();
+    }
+  });
+
+  it("same-port-53-on-both-protocols mapping integrity: getMappedPort and getMappedUdpPort never share a bare-int key", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("dns-server:latest")
+      .withBackend(backend)
+      .withExposedPorts(53)
+      .withExposedUdpPorts(53)
+      .waitingFor(instantReady());
+    await container.start();
+
+    const spec = backend.createdHandles[0]?.spec;
+    assert.equal(spec?.ports.length, 2);
+    const tcpEntry = spec?.ports.find((p) => p.protocol === "tcp" && p.guestPort === 53);
+    const udpEntry = spec?.ports.find((p) => p.protocol === "udp" && p.guestPort === 53);
+    assert.ok(tcpEntry !== undefined);
+    assert.ok(udpEntry !== undefined);
+
+    // Each protocol's mapping is read back from its OWN accessor, and each
+    // matches only its own spec entry — never the other protocol's.
+    assert.equal(container.getMappedPort(53), tcpEntry?.hostPort);
+    assert.equal(container.getMappedUdpPort(53), udpEntry?.hostPort);
+
+    await container.stop();
+  });
+
+  it("releases both TCP and UDP host ports back to FreePorts on stop", async () => {
+    const backend = new FakeBackend();
+    const container = new GenericContainer("alpine:3.19")
+      .withBackend(backend)
+      .withExposedPorts(80)
+      .withExposedUdpPorts(53)
+      .waitingFor(instantReady());
+    await container.start();
+    const tcpPort = container.getMappedPort(80);
+    const udpPort = container.getMappedUdpPort(53);
+    assert.ok(FreePorts.issuedView().has(tcpPort));
+    assert.ok(FreePorts.issuedUdpView().has(udpPort));
+
+    await container.stop();
+
+    assert.ok(!FreePorts.issuedView().has(tcpPort));
+    assert.ok(!FreePorts.issuedUdpView().has(udpPort));
+  });
+
+  it("wait-exclusion: a udp-only container is vacuously ready under the default wait, and the TCP wait enumeration never contains a udp guest port", async () => {
+    const backend = new FakeBackend();
+    let observedExposedGuestPorts: ReadonlyArray<number> | undefined;
+    const recordingWait: WaitStrategy = {
+      waitUntilReady: async (target) => {
+        observedExposedGuestPorts = target.exposedGuestPorts;
+      },
+      withStartupTimeout(): WaitStrategy {
+        return this;
+      },
+    };
+    // No withExposedPorts() at all — only UDP — plus the recording wait
+    // above so this never depends on the real default's network probing.
+    const container = new GenericContainer("alpine:3.19").withBackend(backend).withExposedUdpPorts(53).waitingFor(recordingWait);
+    await container.start();
+    assert.deepEqual(observedExposedGuestPorts, []);
+    await container.stop();
+
+    // The real default (Wait.forListeningPort()) treats an empty TCP
+    // exposedGuestPorts list as vacuously ready, regardless of any UDP ports.
+    const backend2 = new FakeBackend();
+    const udpOnly = new GenericContainer("alpine:3.19").withBackend(backend2).withExposedUdpPorts(53);
+    await udpOnly.start();
+    assert.equal(udpOnly.isRunning, true);
+    await udpOnly.stop();
+  });
+
+  it("mixing TCP and UDP: the TCP wait enumeration carries only the TCP guest port, never the UDP one", async () => {
+    const backend = new FakeBackend();
+    let observedExposedGuestPorts: ReadonlyArray<number> | undefined;
+    const recordingWait: WaitStrategy = {
+      waitUntilReady: async (target) => {
+        observedExposedGuestPorts = target.exposedGuestPorts;
+      },
+      withStartupTimeout(): WaitStrategy {
+        return this;
+      },
+    };
+    const container = new GenericContainer("alpine:3.19")
+      .withBackend(backend)
+      .withExposedPorts(80)
+      .withExposedUdpPorts(53)
+      .waitingFor(recordingWait);
+    await container.start();
+    assert.deepEqual(observedExposedGuestPorts, [80]);
+    await container.stop();
+  });
+});
+
 describe("GenericContainer — U2 network links to running siblings", () => {
   it("links a new member to an already-running sibling, never to itself", async () => {
     const backend = new FakeBackend();
@@ -233,6 +374,40 @@ describe("GenericContainer — U2 network links to running siblings", () => {
 
     await solo.stop();
     await second.stop();
+  });
+
+  it("a UDP-exposed sibling contributes a link tagged protocol 'udp', separate from its TCP links", async () => {
+    const backend = new FakeBackend();
+    const net = Network.newNetwork();
+
+    const dns = new GenericContainer("dns-server:latest")
+      .withBackend(backend)
+      .withExposedPorts(80)
+      .withExposedUdpPorts(53)
+      .withNetwork(net)
+      .withNetworkAliases("dns")
+      .waitingFor(instantReady());
+    await dns.start();
+
+    const consumer = new GenericContainer("consumer:latest")
+      .withBackend(backend)
+      .withNetwork(net)
+      .withNetworkAliases("consumer")
+      .waitingFor(instantReady());
+    await consumer.start();
+
+    const links = backend.installedLinks[1] ?? [];
+    assert.equal(links.length, 2);
+    const tcpLink = links.find((l) => l.protocol === "tcp");
+    const udpLink = links.find((l) => l.protocol === "udp");
+    assert.equal(tcpLink?.alias, "dns");
+    assert.equal(tcpLink?.guestPort, 80);
+    assert.equal(udpLink?.alias, "dns");
+    assert.equal(udpLink?.guestPort, 53);
+    assert.equal(udpLink?.targetHostPort, dns.getMappedUdpPort(53));
+
+    await dns.stop();
+    await consumer.stop();
   });
 });
 

@@ -5,7 +5,46 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **UDP port exposure (Phase 1).** `PortBinding` gains a `protocol` field
+  (`"tcp" | "udp"`), defaulting to `"tcp"` on every existing producer — a
+  checkpoint-registry entry written before this change simply omits it and
+  reads back as tcp-only, and every `reuseHash`/spec-equality consumer now
+  incorporates protocol, so a tcp-exposed and udp-exposed spec never
+  collide. A new sibling builder method, `withExposedUdpPorts(...ports)`,
+  publishes guest ports over UDP to freshly-allocated host ports — backed by
+  a UDP socket bind-and-release probe (`FreePorts.allocateUdp`/
+  `releaseUdp`), never the existing TCP listener probe, since the two
+  transports keep independent OS port tables. A new accessor,
+  `getMappedUdpPort(guestPort)`, reads back the UDP mapping from a SEPARATE
+  per-protocol store — a container may expose the same numeric guest port on
+  both protocols (DNS's 53, say) and each gets its own independent host port,
+  never a shared bare-int key. On docker, `ExposedPorts`/`PortBindings` keys
+  become `"<guestPort>/<protocol>"`; container-to-container UDP needs no
+  further work there — a native user-defined network already carries it. On
+  microsandbox, the `-p HOST:GUEST` argv gains a `/udp` suffix for udp
+  bindings, in both the `run` and the checkpoint-reboot `restore` command
+  (a restore re-publishes each binding's original protocol, and
+  `fromCheckpoint()` splits a captured spec's ports back into the right
+  builder field by protocol).
+
+  **UDP exposure is deliberately invisible to the default wait strategies**:
+  `Wait.forListeningPort()`/`Wait.forHttp()` only ever probe the TCP guest
+  ports (`withExposedPorts`), never the UDP ones — a container exposing ONLY
+  UDP ports is vacuously ready under the default wait. Prefer
+  `Wait.forLogMessage(...)` for a UDP-only service.
+
+  **Joining an msb `Network` with a UDP-exposed member is unsupported in this
+  phase.** msb has no direct guest-to-guest networking — this library's msb
+  links are TCP exec-tunnels (`ExecTunnel`), and there is no UDP equivalent
+  of that channel — so `installNetworkLinks` now fails fast with a typed
+  `UnsupportedByBackendError` (naming the docker backend, or host-mapped UDP
+  ports via `withExposedUdpPorts`/`getMappedUdpPort`, as the remedies)
+  whenever ANY computed link is UDP, rather than silently building a TCP
+  tunnel for a UDP service. Docker is unaffected: its native bridge network
+  already carries container-to-container UDP with no per-link declaration,
+  so `installNetworkLinks` stays the same unconditional no-op it always was.
 
 ## [0.7.10] - 2026-09-18
 

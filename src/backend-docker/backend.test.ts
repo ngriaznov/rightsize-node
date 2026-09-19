@@ -85,6 +85,49 @@ describe("buildCreateBody — msb-only options are a deliberate no-op", () => {
   });
 });
 
+describe("buildCreateBody — port protocol emission", () => {
+  it("a tcp binding's ExposedPorts/PortBindings key is '<guestPort>/tcp' — unchanged from before udp existed", () => {
+    const body = buildCreateBody(baseSpec({ ports: [{ hostPort: 15432, guestPort: 5432, protocol: "tcp" }] }));
+    assert.deepEqual(Object.keys(body.ExposedPorts), ["5432/tcp"]);
+    assert.deepEqual(body.HostConfig.PortBindings["5432/tcp"], [{ HostIp: "127.0.0.1", HostPort: "15432" }]);
+  });
+
+  it("a udp binding's ExposedPorts/PortBindings key is '<guestPort>/udp'", () => {
+    const body = buildCreateBody(baseSpec({ ports: [{ hostPort: 15053, guestPort: 53, protocol: "udp" }] }));
+    assert.deepEqual(Object.keys(body.ExposedPorts), ["53/udp"]);
+    assert.deepEqual(body.HostConfig.PortBindings["53/udp"], [{ HostIp: "127.0.0.1", HostPort: "15053" }]);
+  });
+
+  it("the SAME guest port exposed on both protocols produces two independent keys, each with its own host port", () => {
+    const body = buildCreateBody(
+      baseSpec({
+        ports: [
+          { hostPort: 11111, guestPort: 53, protocol: "tcp" },
+          { hostPort: 22222, guestPort: 53, protocol: "udp" },
+        ],
+      }),
+    );
+    assert.deepEqual(Object.keys(body.ExposedPorts).sort(), ["53/tcp", "53/udp"]);
+    assert.deepEqual(body.HostConfig.PortBindings["53/tcp"], [{ HostIp: "127.0.0.1", HostPort: "11111" }]);
+    assert.deepEqual(body.HostConfig.PortBindings["53/udp"], [{ HostIp: "127.0.0.1", HostPort: "22222" }]);
+  });
+
+  it("mixed tcp and udp ports: tcp keys are byte-identical to a tcp-only spec, udp keys are additive", () => {
+    const tcpOnly = buildCreateBody(baseSpec({ ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }] }));
+    const mixed = buildCreateBody(
+      baseSpec({
+        ports: [
+          { hostPort: 1111, guestPort: 22, protocol: "tcp" },
+          { hostPort: 2222, guestPort: 53, protocol: "udp" },
+        ],
+      }),
+    );
+    assert.deepEqual(mixed.ExposedPorts["22/tcp"], tcpOnly.ExposedPorts["22/tcp"]);
+    assert.deepEqual(mixed.HostConfig.PortBindings["22/tcp"], tcpOnly.HostConfig.PortBindings["22/tcp"]);
+    assert.ok("53/udp" in mixed.ExposedPorts);
+  });
+});
+
 describe("isPortBindConflictMessage", () => {
   it("matches known daemon phrasings", () => {
     assert.ok(isPortBindConflictMessage("driver failed programming external connectivity: address already in use"));

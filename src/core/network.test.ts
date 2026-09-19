@@ -11,6 +11,10 @@ function fakeMember(overrides: Partial<NetworkMember> = {}): NetworkMember {
     mappedPort: overrides.mappedPort ?? (() => {
       throw new Error("mappedPort not stubbed");
     }),
+    exposedUdpGuestPorts: overrides.exposedUdpGuestPorts ?? [],
+    mappedUdpPort: overrides.mappedUdpPort ?? (() => {
+      throw new Error("mappedUdpPort not stubbed");
+    }),
   };
 }
 

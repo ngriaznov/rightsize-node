@@ -82,6 +82,15 @@ These apply to both backends, not just microsandbox:
   finished its own startup (loaded a dataset, joined a cluster, run
   migrations). Prefer `forHttp`/`forLogMessage` whenever the image gives you
   a real readiness signal.
+- **A UDP-only container is vacuously ready under the default wait.**
+  `Wait.forListeningPort()`/`Wait.forHttp()` only ever probe TCP guest ports
+  (`withExposedPorts`) — a UDP port published via `withExposedUdpPorts` never
+  enters that enumeration, by construction, so a container exposing *only*
+  UDP ports reports ready the instant it boots, before its UDP service is
+  necessarily listening. Give a UDP-only container an explicit
+  `Wait.forLogMessage(...)` instead of relying on the default. See the
+  [networking guide's UDP section](/guide/networking#udp-ports) for the full
+  picture, including the msb network-link limitation.
 - **A protocol that doesn't speak on connect defeats even the read-probe.**
   Memcached, for instance, never sends anything until spoken to, and never
   logs anything on startup either — neither a listening-port wait nor a

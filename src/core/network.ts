@@ -13,10 +13,14 @@ export interface NetworkMember {
   readonly aliases: ReadonlyArray<string>;
   /** Whether this member is currently running (a stopped member is never linked to). */
   readonly isRunning: boolean;
-  /** Guest ports this member has exposed. */
+  /** Guest ports this member has exposed over TCP. */
   readonly exposedGuestPorts: ReadonlyArray<number>;
-  /** The host port bound to `guestPort`. */
+  /** The TCP host port bound to `guestPort`. */
   mappedPort(guestPort: number): number;
+  /** Guest ports this member has exposed over UDP (`withExposedUdpPorts`) — a separate list from `exposedGuestPorts`, never merged with it. */
+  readonly exposedUdpGuestPorts: ReadonlyArray<number>;
+  /** The UDP host port bound to `guestPort`. */
+  mappedUdpPort(guestPort: number): number;
 }
 
 interface RegisteredMember {
@@ -73,7 +77,10 @@ export class Network implements AsyncDisposable {
       }
       for (const alias of member.aliases) {
         for (const guestPort of member.exposedGuestPorts) {
-          links.push({ alias, guestPort, targetHostPort: member.mappedPort(guestPort) });
+          links.push({ alias, guestPort, targetHostPort: member.mappedPort(guestPort), protocol: "tcp" });
+        }
+        for (const guestPort of member.exposedUdpGuestPorts) {
+          links.push({ alias, guestPort, targetHostPort: member.mappedUdpPort(guestPort), protocol: "udp" });
         }
       }
     }

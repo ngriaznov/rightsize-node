@@ -10,6 +10,7 @@ function baseIdentity(overrides: Partial<ReuseIdentitySpec> = {}): ReuseIdentity
     env: [["A", "1"], ["B", "2"]],
     command: undefined,
     exposedPorts: [6379],
+    exposedUdpPorts: [],
     memoryLimitMb: undefined,
     copies: [],
     diskLimitMb: undefined,
@@ -111,6 +112,37 @@ describe("reuseHash — identity rules", () => {
   it("leaving diskLimitMb/tmpfsRootMb/networkDisabled at their unset defaults does not disturb the pinned vector", async () => {
     const hash = await reuseHash(baseIdentity());
     assert.equal(hash, PINNED_VECTOR_HASH);
+  });
+});
+
+describe("reuseHash — UDP protocol sensitivity", () => {
+  it("leaving exposedUdpPorts at its unset (empty) default does not disturb the pinned vector", async () => {
+    const hash = await reuseHash(baseIdentity({ exposedUdpPorts: [] }));
+    assert.equal(hash, PINNED_VECTOR_HASH);
+  });
+
+  it("a different set of exposedUdpPorts changes the hash", async () => {
+    const a = await reuseHash(baseIdentity({ exposedUdpPorts: [] }));
+    const b = await reuseHash(baseIdentity({ exposedUdpPorts: [53] }));
+    assert.ok(a !== b);
+  });
+
+  it("exposedUdpPorts order does not affect the hash (canonicalized by sorting)", async () => {
+    const a = await reuseHash(baseIdentity({ exposedUdpPorts: [53, 123] }));
+    const b = await reuseHash(baseIdentity({ exposedUdpPorts: [123, 53] }));
+    assert.equal(a, b);
+  });
+
+  it("a spec exposing port 53 over tcp only differs from one exposing 53 over udp only — protocol is part of identity, not just the port number", async () => {
+    const tcpOnly = await reuseHash(baseIdentity({ exposedPorts: [53], exposedUdpPorts: [] }));
+    const udpOnly = await reuseHash(baseIdentity({ exposedPorts: [], exposedUdpPorts: [53] }));
+    assert.ok(tcpOnly !== udpOnly);
+  });
+
+  it("a spec exposing the SAME port 53 on both protocols differs from one exposing it on tcp alone", async () => {
+    const tcpOnly = await reuseHash(baseIdentity({ exposedPorts: [53], exposedUdpPorts: [] }));
+    const both = await reuseHash(baseIdentity({ exposedPorts: [53], exposedUdpPorts: [53] }));
+    assert.ok(tcpOnly !== both);
   });
 });
 

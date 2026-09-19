@@ -38,7 +38,7 @@ describe("MsbCommands", () => {
   it("run: ports, env, mounts appear in that order before the image", () => {
     const argv = MsbCommands.run(
       baseSpec({
-        ports: [{ hostPort: 15432, guestPort: 5432 }],
+        ports: [{ hostPort: 15432, guestPort: 5432, protocol: "tcp" }],
         env: [["POSTGRES_USER", "test"]],
         mounts: [{ hostPath: "/host/f.txt", guestPath: "/guest/f.txt", readOnly: true }],
       }),
@@ -59,6 +59,54 @@ describe("MsbCommands", () => {
     ]);
   });
 
+  it("run: a udp port binding gets a '/udp' suffix on -p; a tcp binding in the same spec stays plain HOST:GUEST", () => {
+    const argv = MsbCommands.run(
+      baseSpec({
+        ports: [
+          { hostPort: 1111, guestPort: 22, protocol: "tcp" },
+          { hostPort: 2222, guestPort: 53, protocol: "udp" },
+        ],
+      }),
+    );
+    assert.deepEqual(argv, [
+      "run",
+      "--name",
+      "rz-abc12345-1",
+      "-p",
+      "1111:22",
+      "-p",
+      "2222:53/udp",
+      "redis:8.6-alpine",
+    ]);
+  });
+
+  it("run: a tcp-only spec's -p emission is byte-identical to before udp existed", () => {
+    const argv = MsbCommands.run(baseSpec({ ports: [{ hostPort: 15432, guestPort: 5432, protocol: "tcp" }] }));
+    assert.deepEqual(argv.slice(3, 5), ["-p", "15432:5432"]);
+    assert.equal(argv.some((a) => a.includes("/udp")), false);
+  });
+
+  it("run: the SAME numeric guest port exposed on both protocols emits two independent -p flags, only the udp one suffixed", () => {
+    const argv = MsbCommands.run(
+      baseSpec({
+        ports: [
+          { hostPort: 1111, guestPort: 53, protocol: "tcp" },
+          { hostPort: 2222, guestPort: 53, protocol: "udp" },
+        ],
+      }),
+    );
+    assert.deepEqual(argv, [
+      "run",
+      "--name",
+      "rz-abc12345-1",
+      "-p",
+      "1111:53",
+      "-p",
+      "2222:53/udp",
+      "redis:8.6-alpine",
+    ]);
+  });
+
   it("run: an explicit command is appended after -- ; undefined command adds nothing", () => {
     const withCmd = MsbCommands.run(baseSpec({ command: ["redis-server", "--port", "6379"] }));
     assert.deepEqual(withCmd.slice(-4), ["--", "redis-server", "--port", "6379"]);
@@ -71,7 +119,7 @@ describe("MsbCommands", () => {
     const argv = MsbCommands.run(
       baseSpec({
         memoryLimitMb: 512,
-        ports: [{ hostPort: 1111, guestPort: 22 }],
+        ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }],
         env: [["A", "1"]],
         mounts: [{ hostPath: "/h", guestPath: "/g", readOnly: false }],
         command: ["sh", "-c", "true"],
@@ -120,7 +168,7 @@ describe("MsbCommands", () => {
         memoryLimitMb: 1024,
         diskLimitMb: 4096,
         networkDisabled: true,
-        ports: [{ hostPort: 1111, guestPort: 22 }],
+        ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }],
       }),
     );
     assert.deepEqual(argv, [
@@ -224,7 +272,7 @@ describe("MsbCommands", () => {
         checkpointRef: "rz-ckpt-abcdef012345",
         memoryLimitMb: 256,
         networkDisabled: true,
-        ports: [{ hostPort: 1111, guestPort: 22 }],
+        ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }],
         mounts: [{ hostPath: "/h", guestPath: "/g", readOnly: false }],
       }),
     );
@@ -241,8 +289,8 @@ describe("MsbCommands", () => {
       baseSpec({
         checkpointRef: "rz-ckpt-abcdef012345",
         ports: [
-          { hostPort: 1111, guestPort: 22 },
-          { hostPort: 2222, guestPort: 80 },
+          { hostPort: 1111, guestPort: 22, protocol: "tcp" },
+          { hostPort: 2222, guestPort: 80, protocol: "tcp" },
         ],
       }),
     );
@@ -256,6 +304,36 @@ describe("MsbCommands", () => {
       "-p",
       "2222:80",
     ]);
+  });
+
+  it("restore: a udp port binding gets a '/udp' suffix on -p, same as run() — a checkpoint reboot re-publishes the original protocol", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        ports: [
+          { hostPort: 1111, guestPort: 22, protocol: "tcp" },
+          { hostPort: 2222, guestPort: 53, protocol: "udp" },
+        ],
+      }),
+    );
+    assert.deepEqual(argv, [
+      "restore",
+      "rz-ckpt-abcdef012345",
+      "--name",
+      "rz-abc12345-1",
+      "-p",
+      "1111:22",
+      "-p",
+      "2222:53/udp",
+    ]);
+  });
+
+  it("restore: a tcp-only spec's -p emission is byte-identical to before udp existed", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({ checkpointRef: "rz-ckpt-abcdef012345", ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }] }),
+    );
+    assert.deepEqual(argv.slice(-2), ["-p", "1111:22"]);
+    assert.equal(argv.some((a) => a.includes("/udp")), false);
   });
 
   it("restore: never emits -e, --mount-file, or --root-disk, even when the spec carries env/disk settings — msb restore has no such flags", () => {
@@ -276,7 +354,7 @@ describe("MsbCommands", () => {
       baseSpec({
         checkpointRef: "rz-ckpt-abcdef012345",
         networkDisabled: true,
-        ports: [{ hostPort: 1111, guestPort: 22 }],
+        ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }],
       }),
     );
     assert.deepEqual(argv, [
@@ -300,7 +378,7 @@ describe("MsbCommands", () => {
     const argv = MsbCommands.restore(
       baseSpec({
         checkpointRef: "rz-ckpt-abcdef012345",
-        ports: [{ hostPort: 1111, guestPort: 22 }],
+        ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }],
         mounts: [
           { hostPath: "/host/f.txt", guestPath: "/guest/f.txt", readOnly: true },
           { hostPath: "/h", guestPath: "/g", readOnly: false },
@@ -338,7 +416,7 @@ describe("MsbCommands", () => {
         checkpointRef: "rz-ckpt-abcdef012345",
         memoryLimitMb: 1024,
         networkDisabled: true,
-        ports: [{ hostPort: 1111, guestPort: 22 }],
+        ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }],
         mounts: [{ hostPath: "/h", guestPath: "/g", readOnly: false }],
       }),
     );

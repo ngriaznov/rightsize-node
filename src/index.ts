@@ -38,7 +38,7 @@ export {
   CheckpointWorkloadCommandMissingError,
 } from "./core/errors.js";
 export { DockerImageName } from "./core/docker-image-name.js";
-export type { PortBinding, FileMount, ExecResult, ContainerSpec, Checkpoint } from "./core/model.js";
+export type { PortBinding, PortProtocol, FileMount, ExecResult, ContainerSpec, Checkpoint } from "./core/model.js";
 export type {
   NetworkLink,
   SandboxHandle,

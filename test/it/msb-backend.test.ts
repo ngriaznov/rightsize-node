@@ -167,7 +167,7 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
       await withSandbox(backend, spec, async (handle) => {
         let thrown: unknown;
         try {
-          await backend.installNetworkLinks(handle, [{ alias: "sibling", guestPort: 8080, targetHostPort: 9999 }]);
+          await backend.installNetworkLinks(handle, [{ alias: "sibling", guestPort: 8080, targetHostPort: 9999, protocol: "tcp" }]);
         } catch (err) {
           thrown = err;
         }
@@ -189,8 +189,8 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
       let thrown: unknown;
       try {
         await backend.installNetworkLinks(handle, [
-          { alias: "a", guestPort: 8080, targetHostPort: 9001 },
-          { alias: "b", guestPort: 8080, targetHostPort: 9002 },
+          { alias: "a", guestPort: 8080, targetHostPort: 9001, protocol: "tcp" },
+          { alias: "b", guestPort: 8080, targetHostPort: 9002, protocol: "tcp" },
         ]);
       } catch (err) {
         thrown = err;
@@ -212,7 +212,7 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
         let thrown: unknown;
         try {
           await backend.installNetworkLinks(handle, [
-            { alias: "sib'; rm -rf /; echo '", guestPort: 8080, targetHostPort: 9001 },
+            { alias: "sib'; rm -rf /; echo '", guestPort: 8080, targetHostPort: 9001, protocol: "tcp" },
           ]);
         } catch (err) {
           thrown = err;
@@ -262,6 +262,7 @@ describe("MsbCliBackend integration (the provisioner's pinned msb binary)", () =
         env: [["RZ_TEST_NONCE", nonce]],
         command: ["python3", "-m", "http.server", "8000"],
         exposedPorts: [8000],
+        exposedUdpPorts: [],
         memoryLimitMb: undefined,
         copies: [],
         diskLimitMb: undefined,

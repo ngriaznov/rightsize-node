@@ -135,7 +135,7 @@ describe("diagnostics() — report format", () => {
       spec: fakeSpec({
         name: "rz-ab12cd34-redis",
         image: "redis:7-alpine",
-        ports: [{ hostPort: 49213, guestPort: 6379 }],
+        ports: [{ hostPort: 49213, guestPort: 6379, protocol: "tcp" }],
       }),
     };
     registerSyncCleanup(redisHandle, redisBackend, () => {});
@@ -148,7 +148,7 @@ describe("diagnostics() — report format", () => {
       spec: fakeSpec({
         name: "rz-ab12cd34-postgres",
         image: "postgres:16-alpine",
-        ports: [{ hostPort: 49214, guestPort: 5432 }],
+        ports: [{ hostPort: 49214, guestPort: 5432, protocol: "tcp" }],
       }),
     };
     registerSyncCleanup(postgresHandle, postgresBackend, () => {});

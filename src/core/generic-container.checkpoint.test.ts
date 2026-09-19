@@ -943,6 +943,48 @@ describe("GenericContainer.fromCheckpoint()", () => {
     await restored.stop();
   });
 
+  it("splits cp.spec.ports by protocol into the right builder field: TCP guest ports go to withExposedPorts, UDP ones to withExposedUdpPorts", async () => {
+    const backend = new FakeCheckpointBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
+    const cp = {
+      ref: "rightsize/checkpoint:abcdef012345",
+      backend: "docker",
+      spec: {
+        name: "rz-source-1",
+        image: "dns-server:latest",
+        env: [],
+        command: undefined,
+        ports: [
+          { hostPort: 1, guestPort: 80, protocol: "tcp" as const },
+          { hostPort: 2, guestPort: 53, protocol: "udp" as const },
+        ],
+        mounts: [],
+        networkId: undefined,
+        aliases: [],
+        runId: "deadbeef",
+        memoryLimitMb: undefined,
+        keepAlive: false,
+        checkpointRef: "rightsize/checkpoint:abcdef012345",
+        diskLimitMb: undefined,
+        tmpfsRootMb: undefined,
+        networkDisabled: false,
+      },
+    };
+
+    const restored = GenericContainer.fromCheckpoint(cp).withBackend(backend).waitingFor(instantReady());
+    assert.deepEqual(restored.exposedGuestPorts, [80]);
+    assert.deepEqual(restored.exposedUdpGuestPorts, [53]);
+    await restored.start();
+
+    const builtPorts = backend.lastCreatedSpec()?.ports ?? [];
+    assert.equal(builtPorts.length, 2);
+    assert.equal(builtPorts.find((p) => p.guestPort === 80)?.protocol, "tcp");
+    assert.equal(builtPorts.find((p) => p.guestPort === 53)?.protocol, "udp");
+    assert.equal(restored.getMappedPort(80), builtPorts.find((p) => p.guestPort === 80)?.hostPort);
+    assert.equal(restored.getMappedUdpPort(53), builtPorts.find((p) => p.guestPort === 53)?.hostPort);
+
+    await restored.stop();
+  });
+
   it("allows the caller to override builder state after fromCheckpoint() on docker — an overridden env reaches an ordinary docker create/run unaffected", async () => {
     const backend = new FakeCheckpointBackend("docker", { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false });
     const cp = {

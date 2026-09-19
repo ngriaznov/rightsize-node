@@ -1,4 +1,4 @@
-import type { ContainerSpec, ExecResult } from "./model.js";
+import type { ContainerSpec, ExecResult, PortProtocol } from "./model.js";
 
 /**
  * One alias a container should be reachable under from a running sibling on
@@ -13,6 +13,18 @@ export interface NetworkLink {
   readonly guestPort: number;
   /** The sibling's host-side mapped port to tunnel/route traffic to. */
   readonly targetHostPort: number;
+  /**
+   * The transport `guestPort` was exposed over. `"tcp"` for every link
+   * computed from a sibling's `exposedGuestPorts`/`mappedPort` (unchanged
+   * behavior); `"udp"` for one computed from `exposedUdpGuestPorts`/
+   * `mappedUdpPort`. Docker ignores this — its native bridge network already
+   * carries UDP with no per-link declaration (see `installNetworkLinks`'s
+   * own doc); msb has no way to tunnel UDP over its TCP exec-stream channel,
+   * so `MsbCliBackend.installNetworkLinks` fails fast on any link whose
+   * `protocol` is `"udp"` rather than silently building a TCP tunnel for a
+   * UDP service.
+   */
+  readonly protocol: PortProtocol;
 }
 
 /**

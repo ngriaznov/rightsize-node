@@ -158,7 +158,7 @@ describe("DockerBackend integration (real daemon)", () => {
       const spec = baseSpec({
         image: "redis:8.6-alpine",
         command: undefined,
-        ports: [{ hostPort, guestPort: 6379 }],
+        ports: [{ hostPort, guestPort: 6379, protocol: "tcp" }],
       });
       await withContainer(backend, spec, async () => {
         const deadline = Date.now() + 15_000;
@@ -180,12 +180,12 @@ describe("DockerBackend integration (real daemon)", () => {
   itDockerIntegration("typed port-conflict error on a host port already bound by another container", async () => {
     const backend = new DockerBackend(DockerClient.fromEnv());
     const hostPort = await FreePorts.allocate();
-    const specA = baseSpec({ ports: [{ hostPort, guestPort: 6379 }], image: "redis:8.6-alpine", command: undefined });
+    const specA = baseSpec({ ports: [{ hostPort, guestPort: 6379, protocol: "tcp" }], image: "redis:8.6-alpine", command: undefined });
     const handleA = await backend.create(specA);
     try {
       await backend.start(handleA);
 
-      const specB = baseSpec({ ports: [{ hostPort, guestPort: 6379 }], image: "redis:8.6-alpine", command: undefined });
+      const specB = baseSpec({ ports: [{ hostPort, guestPort: 6379, protocol: "tcp" }], image: "redis:8.6-alpine", command: undefined });
       const handleB = await backend.create(specB);
       try {
         let thrown: unknown;

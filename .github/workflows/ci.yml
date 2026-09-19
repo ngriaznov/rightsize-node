@@ -2,10 +2,9 @@ name: CI
 
 on:
   push:
-    # win-docker is a temporary addition so this branch's own pushes get CI
-    # signal ahead of merging — remove once the Windows docker-backend work
-    # lands on main.
-    branches: [main]
+    # udp is a temporary addition so this branch's own pushes get CI signal
+    # ahead of merging — remove once the UDP Phase-1 work lands on main.
+    branches: [main, udp]
   pull_request:
   workflow_dispatch:
   # Weekly run: integration tests pin real upstream artifacts (the msb release,

@@ -864,7 +864,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       return;
     }
     const spec = baseSpec("rz-testrun1-ckpt-1", {
-      ports: [{ hostPort: 15999, guestPort: 80 }],
+      ports: [{ hostPort: 15999, guestPort: 80, protocol: "tcp" }],
       env: [["FOO", "bar"]],
       command: ["sleep", "60"],
     });
@@ -953,7 +953,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     // sandbox would either silently lose its mount or hard-fail under msb's
     // own require-complete restore-resource check.
     const spec = baseSpec("rz-testrun1-ckpt-mounts", {
-      ports: [{ hostPort: 15998, guestPort: 80 }],
+      ports: [{ hostPort: 15998, guestPort: 80, protocol: "tcp" }],
       mounts: [{ hostPath: "/host/config.json", guestPath: "/guest/config.json", readOnly: true }],
       networkDisabled: true,
       command: ["sleep", "60"],

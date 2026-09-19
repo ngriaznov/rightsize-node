@@ -29,7 +29,7 @@ import { Wait } from "./wait.js";
 import type { WaitStrategy, WaitTarget } from "./wait.js";
 import { registerSyncCleanup, unregisterSyncCleanup } from "./cleanup.js";
 import type { SandboxBackend, SandboxHandle, FollowHandle, NetworkLink } from "./backend.js";
-import type { ContainerSpec, FileMount, ExecResult, Checkpoint } from "./model.js";
+import type { ContainerSpec, FileMount, ExecResult, Checkpoint, PortBinding } from "./model.js";
 import type { MountableFile } from "./mountable-file.js";
 import { Backends } from "./backends.js";
 import { trackSandbox, untrackSandbox, trackNetwork } from "./reaper/init.js";
@@ -101,6 +101,12 @@ async function swallow(fn: () => Promise<void>): Promise<void> {
   }
 }
 
+/** The TCP and UDP host-port maps allocated for one boot attempt — kept as two independent `Map<guestPort, hostPort>`s, never merged, so the same numeric guest port can carry an unrelated mapping on each protocol. */
+interface PortAllocation {
+  readonly tcp: Map<number, number>;
+  readonly udp: Map<number, number>;
+}
+
 /** `Map<guestPort, hostPort>` → the registry's `{"<guestPort>": <hostPort>}` shape — JSON object keys are always strings. */
 function portsToRegistryRecord(ports: ReadonlyMap<number, number>): Record<string, number> {
   const record: Record<string, number> = {};
@@ -141,6 +147,8 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
   private readonly image: string;
   private envPairs: Array<[string, string]> = [];
   private exposedPorts: number[] = [];
+  /** UDP counterpart of `exposedPorts` (`withExposedUdpPorts`) — a separate field, never merged with the TCP list; see `PortBinding`'s own doc on why the same guest port can appear in both. */
+  private exposedUdpPorts: number[] = [];
   private command: string[] | undefined;
   private network: Network | undefined;
   private aliasNames: string[] = [];
@@ -168,6 +176,8 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
   private handle: SandboxHandle | undefined;
   private backend: SandboxBackend | undefined;
   private mappedPorts: Map<number, number> = new Map();
+  /** UDP counterpart of `mappedPorts` — a SEPARATE per-protocol store, never a shared bare-int-keyed map (see `getMappedUdpPort`). */
+  private mappedUdpPorts: Map<number, number> = new Map();
   private running = false;
   private installedNetworkLinks: ReadonlyArray<NetworkLink> = [];
 
@@ -215,8 +225,19 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     if (cp.spec.command !== undefined) {
       container.withCommand(...cp.spec.command);
     }
-    if (cp.spec.ports.length > 0) {
-      container.withExposedPorts(...cp.spec.ports.map((p) => p.guestPort));
+    // Split by protocol into the right builder field — cp.spec.ports mixes
+    // both transports (see PortBinding's own doc on why they're tagged
+    // rather than kept in separate lists at the ContainerSpec level), but
+    // the builder itself keeps two independent fields, exactly the way a
+    // fresh (non-restored) container's own withExposedPorts()/
+    // withExposedUdpPorts() calls would populate them.
+    const tcpGuestPorts = cp.spec.ports.filter((p) => p.protocol === "tcp").map((p) => p.guestPort);
+    const udpGuestPorts = cp.spec.ports.filter((p) => p.protocol === "udp").map((p) => p.guestPort);
+    if (tcpGuestPorts.length > 0) {
+      container.withExposedPorts(...tcpGuestPorts);
+    }
+    if (udpGuestPorts.length > 0) {
+      container.withExposedUdpPorts(...udpGuestPorts);
     }
     if (cp.spec.memoryLimitMb !== undefined) {
       container.withMemoryLimit(cp.spec.memoryLimitMb);
@@ -234,9 +255,35 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     return this;
   }
 
-  /** Publishes these guest ports to pre-allocated host ports (see `FreePorts`); read back with `getMappedPort`. */
+  /** Publishes these guest ports to pre-allocated host ports (see `FreePorts`); read back with `getMappedPort`. TCP only — see `withExposedUdpPorts` for UDP. */
   withExposedPorts(...ports: number[]): this {
     this.exposedPorts.push(...ports);
+    return this;
+  }
+
+  /**
+   * Publishes these guest ports over UDP to pre-allocated host ports (see
+   * `FreePorts.allocateUdp`); read back with `getMappedUdpPort`. A separate
+   * list from `withExposedPorts` — the same numeric guest port may be
+   * exposed on both protocols (DNS's 53, say), and each gets its own
+   * independent host-port mapping.
+   *
+   * UDP exposure is deliberately invisible to the default wait strategies:
+   * `Wait.forListeningPort()`/`Wait.forHttp()` only ever probe
+   * `withExposedPorts`' TCP guest ports, so a container exposing ONLY UDP
+   * ports is vacuously ready under the default wait — prefer
+   * `Wait.forLogMessage(...)` for a UDP-only service.
+   *
+   * Joining a `Network` on the microsandbox backend with a UDP-exposed
+   * sibling is unsupported in this phase: msb has no direct guest-to-guest
+   * networking (rightsize's msb links are TCP exec-tunnels), so
+   * `installNetworkLinks` fails fast with `UnsupportedByBackendError` rather
+   * than silently building a TCP tunnel for a UDP service — use the docker
+   * backend for container-to-container UDP, or publish host-mapped UDP ports
+   * (this method + `getMappedUdpPort`) instead.
+   */
+  withExposedUdpPorts(...ports: number[]): this {
+    this.exposedUdpPorts.push(...ports);
     return this;
   }
 
@@ -395,18 +442,13 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     return this.backendOverride ?? Backends.active();
   }
 
-  private buildSpec(name: string, ports: Map<number, number>): ContainerSpec {
+  private buildSpec(name: string, ports: PortAllocation): ContainerSpec {
     const spec: ContainerSpec = {
       name,
       image: this.image,
       env: this.envPairs.map(([k, v]) => [k, v] as const),
       command: this.command,
-      ports: this.exposedPorts.map((guestPort) => ({
-        hostPort: ports.get(guestPort) ?? (() => {
-          throw new Error(`no allocated host port for guest port ${guestPort}`);
-        })(),
-        guestPort,
-      })),
+      ports: this.buildPortBindings(ports),
       mounts: this.mounts,
       networkId: this.network?.id,
       aliases: this.aliasNames,
@@ -424,7 +466,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     };
     return GenericContainer.validateSpecConflicts(
       this.customizeSpec(spec, (guest) => {
-        const p = ports.get(guest);
+        const p = ports.tcp.get(guest);
         if (p === undefined) {
           throw new Error(`no allocated host port for guest port ${guest}`);
         }
@@ -434,18 +476,13 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
   }
 
   /** The reuse-active counterpart of `buildSpec`: always `keepAlive: true`, named `rz-reuse-<hash12>` rather than the run-scoped `rz-<runId>-<seq>`, and never joined to a `Network` (rejected earlier in `start()`). */
-  private buildReuseSpec(name: string, ports: Map<number, number>): ContainerSpec {
+  private buildReuseSpec(name: string, ports: PortAllocation): ContainerSpec {
     const spec: ContainerSpec = {
       name,
       image: this.image,
       env: this.envPairs.map(([k, v]) => [k, v] as const),
       command: this.command,
-      ports: this.exposedPorts.map((guestPort) => ({
-        hostPort: ports.get(guestPort) ?? (() => {
-          throw new Error(`no allocated host port for guest port ${guestPort}`);
-        })(),
-        guestPort,
-      })),
+      ports: this.buildPortBindings(ports),
       mounts: this.mounts,
       networkId: undefined,
       aliases: this.aliasNames,
@@ -462,7 +499,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     };
     return GenericContainer.validateSpecConflicts(
       this.customizeSpec(spec, (guest) => {
-        const p = ports.get(guest);
+        const p = ports.tcp.get(guest);
         if (p === undefined) {
           throw new Error(`no allocated host port for guest port ${guest}`);
         }
@@ -498,6 +535,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       env: this.envPairs.map(([k, v]) => [k, v] as const),
       command: this.command,
       exposedPorts: this.exposedPorts,
+      exposedUdpPorts: this.exposedUdpPorts,
       memoryLimitMb: this.memoryLimitMb,
       copies: this.mounts.map((m) => ({ guestPath: m.guestPath, hostPath: m.hostPath })),
       diskLimitMb: this.diskLimitMb,
@@ -506,18 +544,49 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     });
   }
 
-  private async allocatePorts(): Promise<Map<number, number>> {
-    const ports = new Map<number, number>();
+  private async allocatePorts(): Promise<PortAllocation> {
+    const tcp = new Map<number, number>();
     for (const guestPort of this.exposedPorts) {
-      ports.set(guestPort, await FreePorts.allocate());
+      tcp.set(guestPort, await FreePorts.allocate());
     }
-    return ports;
+    const udp = new Map<number, number>();
+    for (const guestPort of this.exposedUdpPorts) {
+      udp.set(guestPort, await FreePorts.allocateUdp());
+    }
+    return { tcp, udp };
   }
 
-  private releasePorts(ports: Map<number, number>): void {
-    for (const hostPort of ports.values()) {
+  private releasePorts(ports: PortAllocation): void {
+    for (const hostPort of ports.tcp.values()) {
       FreePorts.release(hostPort);
     }
+    for (const hostPort of ports.udp.values()) {
+      FreePorts.releaseUdp(hostPort);
+    }
+  }
+
+  /** Builds the `ContainerSpec.ports` array from this builder's TCP and UDP exposed-port lists plus their allocated host ports — shared by `buildSpec` and `buildReuseSpec`. */
+  private buildPortBindings(ports: PortAllocation): PortBinding[] {
+    return [
+      ...this.exposedPorts.map((guestPort) => ({
+        hostPort:
+          ports.tcp.get(guestPort) ??
+          (() => {
+            throw new Error(`no allocated host port for guest port ${guestPort}`);
+          })(),
+        guestPort,
+        protocol: "tcp" as const,
+      })),
+      ...this.exposedUdpPorts.map((guestPort) => ({
+        hostPort:
+          ports.udp.get(guestPort) ??
+          (() => {
+            throw new Error(`no allocated host port for guest port ${guestPort}/udp`);
+          })(),
+        guestPort,
+        protocol: "udp" as const,
+      })),
+    ];
   }
 
   /**
@@ -622,14 +691,17 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     }
 
     let handle: SandboxHandle | undefined;
-    let allocatedPorts: Map<number, number> | undefined;
+    let allocatedPorts: PortAllocation | undefined;
     let lastConflict: unknown;
     // Ports that hit a bind conflict stay quarantined (held in FreePorts' issued
     // set) until the retry loop exits: releasing them immediately would let the
     // next attempt legally re-pick the very port that just conflicted — the OS
     // frequently reissues a just-freed ephemeral port — wasting an attempt on a
-    // proven-contended port.
-    const conflictedPorts: number[] = [];
+    // proven-contended port. Tracked per protocol so the finally block below
+    // releases each back into the RIGHT pool (TCP vs UDP have independent OS
+    // port tables — see FreePorts.allocateUdp's own doc).
+    const conflictedTcpPorts: number[] = [];
+    const conflictedUdpPorts: number[] = [];
 
     try {
     for (let attempt = 0; attempt < MAX_START_ATTEMPTS; attempt++) {
@@ -663,8 +735,9 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
           await untrackSandbox(name);
         }
         if (isPortBindConflict(err)) {
-          // Quarantined, not released: see conflictedPorts above.
-          conflictedPorts.push(...ports.values());
+          // Quarantined, not released: see conflictedTcpPorts/conflictedUdpPorts above.
+          conflictedTcpPorts.push(...ports.tcp.values());
+          conflictedUdpPorts.push(...ports.udp.values());
           lastConflict = err;
           continue;
         }
@@ -673,8 +746,11 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       }
     }
     } finally {
-      for (const hostPort of conflictedPorts) {
+      for (const hostPort of conflictedTcpPorts) {
         FreePorts.release(hostPort);
+      }
+      for (const hostPort of conflictedUdpPorts) {
+        FreePorts.releaseUdp(hostPort);
       }
     }
 
@@ -689,7 +765,8 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     // even though readiness (below) hasn't been confirmed yet.
     this.handle = handle;
     this.backend = backend;
-    this.mappedPorts = allocatedPorts;
+    this.mappedPorts = allocatedPorts.tcp;
+    this.mappedUdpPorts = allocatedPorts.udp;
     this.running = true;
     // Real synchronous teardown, not a placeholder: if this process dies
     // before stop() ever runs (process.exit / SIGINT / SIGTERM), the exit
@@ -740,11 +817,12 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     const hash = await this.computeReuseHash();
     const name = reuseName(hash);
 
-    const { handle, mappedPorts } = await this.adoptOrCreate(backend, dir, hash, name, false);
+    const { handle, mappedPorts, mappedUdpPorts } = await this.adoptOrCreate(backend, dir, hash, name, false);
 
     this.handle = handle;
     this.backend = backend;
     this.mappedPorts = mappedPorts;
+    this.mappedUdpPorts = mappedUdpPorts;
     this.running = true;
     // Deliberately no registerSyncCleanup and no ledger trackSandbox call —
     // a keepAlive sandbox must outlive this process, which is exactly what
@@ -772,7 +850,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     hash: string,
     name: string,
     isRetry: boolean,
-  ): Promise<{ handle: SandboxHandle; mappedPorts: Map<number, number> }> {
+  ): Promise<{ handle: SandboxHandle; mappedPorts: Map<number, number>; mappedUdpPorts: Map<number, number> }> {
     const read = await readRegistry(dir, hash);
     if (read.kind === "found") {
       const adopted = await this.tryAdopt(backend, dir, hash, name, read.entry);
@@ -806,12 +884,14 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     // allocate-then-bind race to an unrelated process, and a reuse create is
     // no less exposed to that than an ephemeral one.
     let handle: SandboxHandle | undefined;
-    let allocatedPorts: Map<number, number> | undefined;
+    let allocatedPorts: PortAllocation | undefined;
     let lastConflict: unknown;
     // Same conflicted-port quarantine as the ordinary start path: a port that
     // just failed to bind stays out of the allocator until this retry loop
-    // exits, so no later attempt can re-pick it.
-    const conflictedPorts: number[] = [];
+    // exits, so no later attempt can re-pick it. Split by protocol for the
+    // same reason start()'s own loop is — see its comment.
+    const conflictedTcpPorts: number[] = [];
+    const conflictedUdpPorts: number[] = [];
 
     try {
     for (let attempt = 0; attempt < MAX_START_ATTEMPTS; attempt++) {
@@ -831,8 +911,9 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
           await swallow(() => backend.remove(createdHandle as SandboxHandle));
         }
         if (isPortBindConflict(err)) {
-          // Quarantined, not released: see conflictedPorts above.
-          conflictedPorts.push(...ports.values());
+          // Quarantined, not released: see conflictedTcpPorts/conflictedUdpPorts above.
+          conflictedTcpPorts.push(...ports.tcp.values());
+          conflictedUdpPorts.push(...ports.udp.values());
           lastConflict = err;
           continue;
         }
@@ -853,8 +934,11 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       }
     }
     } finally {
-      for (const hostPort of conflictedPorts) {
+      for (const hostPort of conflictedTcpPorts) {
         FreePorts.release(hostPort);
+      }
+      for (const hostPort of conflictedUdpPorts) {
+        FreePorts.releaseUdp(hostPort);
       }
     }
 
@@ -867,7 +951,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     const ports = allocatedPorts;
 
     try {
-      await this.waitStrategy.waitUntilReady(this.waitTargetFor(backend, handle, ports));
+      await this.waitStrategy.waitUntilReady(this.waitTargetFor(backend, handle, ports.tcp));
     } catch (err) {
       await swallow(() => backend.stop(handle));
       await swallow(() => backend.remove(handle));
@@ -875,16 +959,20 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       throw err;
     }
 
+    const udpPortsRecord = portsToRegistryRecord(ports.udp);
     const entry: ReuseRegistryEntry = {
       name,
       image: this.image,
-      ports: portsToRegistryRecord(ports),
+      ports: portsToRegistryRecord(ports.tcp),
       createdIso: new Date().toISOString(),
       backend: backend.name,
+      // Omitted when there are none, mirroring every other additive-optional
+      // field on this registry's sibling shapes.
+      ...(Object.keys(udpPortsRecord).length > 0 ? { udpPorts: udpPortsRecord } : {}),
     };
     await writeRegistryAtomic(dir, hash, entry);
 
-    return { handle, mappedPorts: ports };
+    return { handle, mappedPorts: ports.tcp, mappedUdpPorts: ports.udp };
   }
 
   /**
@@ -902,9 +990,12 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     hash: string,
     name: string,
     entry: ReuseRegistryEntry,
-  ): Promise<{ handle: SandboxHandle; mappedPorts: Map<number, number> } | undefined> {
+  ): Promise<{ handle: SandboxHandle; mappedPorts: Map<number, number>; mappedUdpPorts: Map<number, number> } | undefined> {
     const mappedPorts = registryRecordToPorts(entry.ports);
-    const spec = this.buildReuseSpec(name, mappedPorts);
+    // Absent on an entry written before UDP exposure existed — normalizes to
+    // no UDP ports, never a corrupt read (see isRegistryEntry in reuse/registry.ts).
+    const mappedUdpPorts = registryRecordToPorts(entry.udpPorts ?? {});
+    const spec = this.buildReuseSpec(name, { tcp: mappedPorts, udp: mappedUdpPorts });
 
     const handle = await backend.findRunning(spec).catch(() => undefined);
     if (handle === undefined) {
@@ -919,7 +1010,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       return undefined;
     }
 
-    return { handle, mappedPorts };
+    return { handle, mappedPorts, mappedUdpPorts };
   }
 
   /** Best-effort: remove whatever's running under `name` (by name — this call never held a handle for it) and delete the registry file. Never throws. */
@@ -946,7 +1037,10 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * `findRunning` matches on `spec.name` alone.
    */
   private async removeOrphanedRunningReuse(backend: SandboxBackend, name: string): Promise<void> {
-    const probePorts = new Map(this.exposedPorts.map((guestPort) => [guestPort, 0]));
+    const probePorts: PortAllocation = {
+      tcp: new Map(this.exposedPorts.map((guestPort) => [guestPort, 0])),
+      udp: new Map(this.exposedUdpPorts.map((guestPort) => [guestPort, 0])),
+    };
     const probeSpec = this.buildReuseSpec(name, probePorts);
     const running = await backend.findRunning(probeSpec).catch(() => undefined);
     if (running !== undefined) {
@@ -1000,6 +1094,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       // simply stay marked issued for the rest of this process's lifetime;
       // only this instance's own view of them is cleared below.
       this.mappedPorts = new Map();
+      this.mappedUdpPorts = new Map();
       return;
     }
 
@@ -1008,8 +1103,9 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     unregisterSyncCleanup(handle.id);
     await untrackSandbox(handle.spec.name);
 
-    this.releasePorts(this.mappedPorts);
+    this.releasePorts({ tcp: this.mappedPorts, udp: this.mappedUdpPorts });
     this.mappedPorts = new Map();
+    this.mappedUdpPorts = new Map();
   }
 
   /** `= stop()`. What `await using c = await new GenericContainer(img).start()` calls at scope exit; never throws. */
@@ -1032,9 +1128,14 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     return this.aliasNames;
   }
 
-  /** Every guest port this container published (set via `withExposedPorts`). Part of the `NetworkMember` contract `Network` uses to compute links. */
+  /** Every guest port this container published over TCP (set via `withExposedPorts`). Part of the `NetworkMember` contract `Network` uses to compute links; also what the default wait strategies probe — see `withExposedUdpPorts`' own doc on why UDP ports never appear here. */
   get exposedGuestPorts(): ReadonlyArray<number> {
     return this.exposedPorts;
+  }
+
+  /** Every guest port this container published over UDP (set via `withExposedUdpPorts`) — a separate list from `exposedGuestPorts`, never merged with it. Part of the `NetworkMember` contract `Network` uses to compute links. */
+  get exposedUdpGuestPorts(): ReadonlyArray<number> {
+    return this.exposedUdpPorts;
   }
 
   /**
@@ -1057,6 +1158,31 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
   /** Alias for `getMappedPort`, satisfying the `NetworkMember`/`WaitTarget` shape (which name this method `mappedPort`). */
   mappedPort(guestPort: number): number {
     return this.getMappedPort(guestPort);
+  }
+
+  /**
+   * The UDP counterpart of `getMappedPort` — reads from a SEPARATE
+   * per-protocol mapping store (`withExposedUdpPorts`), so exposing the same
+   * numeric guest port on both protocols (DNS's 53, say) never collides:
+   * `getMappedPort(53)` and `getMappedUdpPort(53)` can return two entirely
+   * different host ports. Throws the same two distinct-message shape as
+   * `getMappedPort`: not running at all, versus running but never exposed
+   * via `withExposedUdpPorts`.
+   */
+  getMappedUdpPort(guestPort: number): number {
+    if (!this.running) {
+      throw new Error(`Container is not running — call start() first.`);
+    }
+    const port = this.mappedUdpPorts.get(guestPort);
+    if (port === undefined) {
+      throw new Error(`Port ${guestPort}/udp is not exposed — call withExposedUdpPorts(${guestPort}).`);
+    }
+    return port;
+  }
+
+  /** Alias for `getMappedUdpPort`, satisfying the `NetworkMember` shape (which names this method `mappedUdpPort`). */
+  mappedUdpPort(guestPort: number): number {
+    return this.getMappedUdpPort(guestPort);
   }
 
   private requireHandle(): { handle: SandboxHandle; backend: SandboxBackend } {

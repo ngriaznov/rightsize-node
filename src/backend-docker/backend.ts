@@ -52,12 +52,26 @@ interface CreateContainerBody {
   };
 }
 
-/** Builds the `POST /containers/create` JSON body: port bindings pinned to `127.0.0.1`, read-only/read-write binds, the `host.docker.internal` extra host, and the run-id (or reuse) label — see `containerLabels`. The msb-only `diskLimitMb`/`tmpfsRootMb`/`networkDisabled` fields have no docker equivalent and are deliberately left unread here. */
+/**
+ * Builds the `POST /containers/create` JSON body: port bindings pinned to
+ * `127.0.0.1`, read-only/read-write binds, the `host.docker.internal` extra
+ * host, and the run-id (or reuse) label — see `containerLabels`. The
+ * msb-only `diskLimitMb`/`tmpfsRootMb`/`networkDisabled` fields have no
+ * docker equivalent and are deliberately left unread here.
+ *
+ * Each `ExposedPorts`/`PortBindings` key is `"<guestPort>/<protocol>"` — the
+ * daemon's own native shape for either transport (`"53/tcp"`, `"53/udp"`),
+ * so a container exposing the same guest port on both protocols gets two
+ * independent keys, never one. Docker needs no further UDP-specific work
+ * beyond this key: container-to-container UDP on a user-defined network
+ * already flows with no per-port declaration (see `installNetworkLinks`'s
+ * own doc), so this function is the entire docker-side UDP story.
+ */
 export function buildCreateBody(spec: ContainerSpec): CreateContainerBody {
   const exposedPorts: Record<string, Record<string, never>> = {};
   const portBindings: Record<string, Array<{ HostIp: string; HostPort: string }>> = {};
   for (const p of spec.ports) {
-    const key = `${p.guestPort}/tcp`;
+    const key = `${p.guestPort}/${p.protocol}`;
     exposedPorts[key] = {};
     portBindings[key] = [{ HostIp: "127.0.0.1", HostPort: String(p.hostPort) }];
   }
@@ -504,7 +518,16 @@ export class DockerBackend implements SandboxBackend {
     };
   }
 
-  /** No-op: docker relies entirely on native networks (`ensureNetwork`/`create`'s connect step) — there is nothing to emulate here, unlike msb's exec-tunnel links. */
+  /**
+   * No-op: docker relies entirely on native networks (`ensureNetwork`/
+   * `create`'s connect step) — there is nothing to emulate here, unlike
+   * msb's exec-tunnel links. Unaffected by a link's `protocol`: the daemon's
+   * own bridge network already carries UDP between containers on a shared
+   * user-defined network with no per-port declaration, the same as it
+   * always has for TCP, so a `"udp"` link needs no special handling here
+   * either — this stays the same unconditional no-op it was before UDP
+   * links existed.
+   */
   async installNetworkLinks(_handle: SandboxHandle, _links: ReadonlyArray<NetworkLink>): Promise<void> {}
 
   /**

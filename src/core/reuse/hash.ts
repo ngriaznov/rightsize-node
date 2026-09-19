@@ -18,6 +18,18 @@ export interface ReuseIdentitySpec {
   readonly command: ReadonlyArray<string> | undefined;
   /** Order does not affect the hash (canonicalized by sorting ascending). */
   readonly exposedPorts: ReadonlyArray<number>;
+  /**
+   * UDP-exposed guest ports (`withExposedUdpPorts`) — a separate list from
+   * `exposedPorts`, never merged with it: a container exposing guest port 53
+   * on both protocols must hash differently from one exposing only 53/tcp or
+   * only 53/udp, so protocol is part of identity, not just the port number.
+   * Order does not affect the hash (canonicalized by sorting ascending); an
+   * empty array is omitted from the canonical form entirely, so a spec that
+   * never calls `withExposedUdpPorts` hashes exactly as it did before this
+   * field existed (see the pinned cross-language contract vector in
+   * `hash.test.ts`).
+   */
+  readonly exposedUdpPorts: ReadonlyArray<number>;
   readonly memoryLimitMb: number | undefined;
   /** Order does not affect the hash (canonicalized by sorting on `guestPath`); content is hashed from `hostPath` at call time. */
   readonly copies: ReadonlyArray<{ readonly guestPath: string; readonly hostPath: string }>;
@@ -42,11 +54,12 @@ interface CanonicalForm {
   readonly memoryLimitMb: number | null;
   readonly copies: ReadonlyArray<CanonicalCopy>;
   // Omitted entirely (not present as null/false) when unset, so a spec that
-  // never touches these three keeps hashing exactly as it did before they
+  // never touches these four keeps hashing exactly as it did before they
   // existed — see the pinned cross-language vector in hash.test.ts.
   readonly diskLimitMb?: number;
   readonly tmpfsRootMb?: number;
   readonly networkDisabled?: true;
+  readonly exposedUdpPorts?: ReadonlyArray<number>;
 }
 
 function compareStrings(a: string, b: string): number {
@@ -93,6 +106,7 @@ async function canonicalize(spec: ReuseIdentitySpec): Promise<CanonicalForm> {
     ...(spec.diskLimitMb !== undefined ? { diskLimitMb: spec.diskLimitMb } : {}),
     ...(spec.tmpfsRootMb !== undefined ? { tmpfsRootMb: spec.tmpfsRootMb } : {}),
     ...(spec.networkDisabled ? { networkDisabled: true as const } : {}),
+    ...(spec.exposedUdpPorts.length > 0 ? { exposedUdpPorts: [...spec.exposedUdpPorts].sort((a, b) => a - b) } : {}),
   };
 }
 

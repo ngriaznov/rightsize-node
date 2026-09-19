@@ -16,8 +16,20 @@ import { requireValidCheckpointName } from "./name.js";
 export interface CheckpointRegistrySpec {
   readonly env: Record<string, string>;
   readonly command: ReadonlyArray<string> | null;
+  /** TCP-exposed guest ports only — unchanged shape/name from before UDP exposure existed. */
   readonly exposedPorts: ReadonlyArray<number>;
   readonly memoryLimitMb: number | null;
+  /**
+   * UDP-exposed guest ports (`withExposedUdpPorts`), kept as a SEPARATE list
+   * from `exposedPorts` so a restore can split them back into the right
+   * builder field (`fromCheckpoint` calls `withExposedPorts` for one list and
+   * `withExposedUdpPorts` for the other) rather than guessing protocol from a
+   * merged list of bare numbers. ADDITIVE and OPTIONAL: absent on every entry
+   * written before UDP exposure existed — a deserializer/validator reading an
+   * old entry treats a missing value as "no UDP ports were ever exposed"
+   * (normalizes to `[]`), never as corrupt.
+   */
+  readonly exposedUdpPorts?: ReadonlyArray<number>;
 }
 
 /**
@@ -100,6 +112,15 @@ export function isCheckpointRegistrySpec(value: unknown): value is CheckpointReg
 
   const exposedPorts = rec["exposedPorts"];
   if (!Array.isArray(exposedPorts) || !exposedPorts.every((p) => typeof p === "number")) {
+    return false;
+  }
+
+  // Additive and optional (see CheckpointRegistrySpec's own doc): an entry
+  // written before UDP exposure existed simply omits the key, which reads as
+  // "no UDP ports" — only a PRESENT-but-malformed value (not an array of
+  // numbers) is corrupt.
+  const exposedUdpPorts = rec["exposedUdpPorts"];
+  if (exposedUdpPorts !== undefined && !(Array.isArray(exposedUdpPorts) && exposedUdpPorts.every((p) => typeof p === "number"))) {
     return false;
   }
 
@@ -227,11 +248,16 @@ export function toCheckpointRegistrySpec(spec: ContainerSpec): CheckpointRegistr
   for (const [key, value] of spec.env) {
     env[key] = value;
   }
+  const exposedUdpPorts = spec.ports.filter((p) => p.protocol === "udp").map((p) => p.guestPort);
   return {
     env,
     command: spec.command ?? null,
-    exposedPorts: spec.ports.map((p) => p.guestPort),
+    exposedPorts: spec.ports.filter((p) => p.protocol === "tcp").map((p) => p.guestPort),
     memoryLimitMb: spec.memoryLimitMb ?? null,
+    // Omitted (not an empty array) when there are none — a spec that never
+    // exposes a UDP port serializes exactly as it did before this field
+    // existed.
+    ...(exposedUdpPorts.length > 0 ? { exposedUdpPorts } : {}),
   };
 }
 
@@ -267,7 +293,12 @@ export function fromCheckpointRegistryEntry(entry: CheckpointRegistryEntry): Con
     image: entry.ref,
     env: envRecordToPairs(entry.spec.env),
     command: entry.spec.command ?? entry.capturedCommand ?? undefined,
-    ports: entry.spec.exposedPorts.map((guestPort) => ({ hostPort: 0, guestPort })),
+    ports: [
+      ...entry.spec.exposedPorts.map((guestPort) => ({ hostPort: 0, guestPort, protocol: "tcp" as const })),
+      // Absent on an entry written before UDP exposure existed — normalizes
+      // to no UDP ports, never a corrupt read (see isCheckpointRegistrySpec).
+      ...(entry.spec.exposedUdpPorts ?? []).map((guestPort) => ({ hostPort: 0, guestPort, protocol: "udp" as const })),
+    ],
     mounts: [],
     networkId: undefined,
     aliases: [],

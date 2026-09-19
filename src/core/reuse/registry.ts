@@ -12,11 +12,20 @@ import * as path from "node:path";
 export interface ReuseRegistryEntry {
   readonly name: string;
   readonly image: string;
-  /** `{"<guestPort>": <hostPort>, ...}` — JSON object keys are always strings, so the guest port is stringified. */
+  /** `{"<guestPort>": <hostPort>, ...}` — TCP ports only. JSON object keys are always strings, so the guest port is stringified. */
   readonly ports: Record<string, number>;
   readonly createdIso: string;
   /** The backend name (e.g. `"microsandbox"`, `"docker"`) that created this sandbox — informational; adopt always re-verifies liveness through the CURRENTLY active backend regardless of this value. */
   readonly backend: string;
+  /**
+   * The UDP counterpart of `ports` (`withExposedUdpPorts`), kept as a
+   * SEPARATE map so a bare-int guest port never has to serve as a key
+   * shared between protocols. ADDITIVE and OPTIONAL: absent on every entry
+   * written before UDP exposure existed — a reader treats a missing value
+   * as "no UDP ports were ever exposed" (normalizes to `{}`), never as
+   * corrupt.
+   */
+  readonly udpPorts?: Record<string, number>;
 }
 
 /** `<cacheDir>/reuse` — the directory every reuse registry file lives under. */
@@ -46,7 +55,21 @@ function isRegistryEntry(value: unknown): value is ReuseRegistryEntry {
   if (typeof ports !== "object" || ports === null || Array.isArray(ports)) {
     return false;
   }
-  return Object.values(ports as Record<string, unknown>).every((v) => typeof v === "number");
+  if (!Object.values(ports as Record<string, unknown>).every((v) => typeof v === "number")) {
+    return false;
+  }
+  // Additive and optional (see ReuseRegistryEntry's own doc): an entry
+  // written before UDP exposure existed simply omits the key.
+  const udpPorts = rec["udpPorts"];
+  if (udpPorts !== undefined) {
+    if (typeof udpPorts !== "object" || udpPorts === null || Array.isArray(udpPorts)) {
+      return false;
+    }
+    if (!Object.values(udpPorts as Record<string, unknown>).every((v) => typeof v === "number")) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** The three outcomes reading a registry file can settle to — corrupt is deliberately distinct from missing, since the adopt path best-effort-cleans up a stale SANDBOX only for the former (see the reuse spec's stale/corrupt-registry fallback). */

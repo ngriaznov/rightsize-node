@@ -86,4 +86,35 @@ describe("reuse registry", () => {
     assert.equal(result.kind, "found");
     assert.deepEqual(result.kind === "found" ? result.entry.ports : undefined, { "6379": 2222 });
   });
+
+  it("resolves 'found' for a pre-existing entry with no udpPorts key at all — additive and optional, an old entry must not be treated as corrupt", async () => {
+    const dir = path.join(cacheDir, "reuse");
+    await fs.mkdir(dir, { recursive: true });
+    // Hand-written, deliberately WITHOUT udpPorts — the exact shape every
+    // reuse registry entry written before UDP exposure existed has on disk.
+    const oldEntry = makeEntry();
+    await fs.writeFile(path.join(dir, `${HASH}.json`), JSON.stringify(oldEntry));
+    const result = await readRegistry(cacheDir, HASH);
+    assert.equal(result.kind, "found");
+    if (result.kind === "found") {
+      assert.equal("udpPorts" in result.entry, false);
+    }
+  });
+
+  it("round-trips a udpPorts map alongside the TCP ports map", async () => {
+    const entry = makeEntry({ ports: { "80": 40001 }, udpPorts: { "53": 40002 } });
+    await writeRegistryAtomic(cacheDir, HASH, entry);
+    const result = await readRegistry(cacheDir, HASH);
+    assert.equal(result.kind, "found");
+    assert.deepEqual(result.kind === "found" ? result.entry.udpPorts : undefined, { "53": 40002 });
+  });
+
+  it("readRegistry reports 'corrupt' when udpPorts is present but not a map of numbers", async () => {
+    const dir = path.join(cacheDir, "reuse");
+    await fs.mkdir(dir, { recursive: true });
+    const entry = { ...makeEntry(), udpPorts: "not-a-map" };
+    await fs.writeFile(path.join(dir, `${HASH}.json`), JSON.stringify(entry));
+    const result = await readRegistry(cacheDir, HASH);
+    assert.equal(result.kind, "corrupt");
+  });
 });

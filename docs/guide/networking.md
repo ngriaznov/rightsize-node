@@ -148,3 +148,46 @@ Two siblings on one network both exposing the same guest port, or an alias
 containing shell-breaking characters, both fail immediately with an
 actionable message — before any tunnel is installed, not partway through a
 boot.
+
+## UDP ports
+
+`withExposedUdpPorts(...ports)` is the UDP sibling of `withExposedPorts`: it
+publishes guest ports over UDP to freshly-allocated host ports, read back
+with `getMappedUdpPort(guestPort)` — a separate accessor over a separate
+mapping store, so a container may expose the *same* numeric guest port on
+both protocols (DNS's 53, say) with each protocol getting its own
+independent host port:
+
+```ts
+import { GenericContainer, Wait } from "rightsize";
+
+await using dns = await new GenericContainer("dns-server:latest")
+  .withExposedUdpPorts(53)
+  .waitingFor(Wait.forLogMessage("ready", 1))
+  .start();
+
+const udpPort = dns.getMappedUdpPort(53);
+```
+
+**UDP exposure is invisible to the default wait strategies.**
+`Wait.forListeningPort()` and `Wait.forHttp()` only ever probe the TCP guest
+ports declared via `withExposedPorts` — never the UDP ones — so a container
+that exposes *only* UDP ports is vacuously ready under the default wait
+strategy: `start()` returns as soon as the sandbox boots, without proving
+the UDP service is actually listening. Give a UDP-only container an explicit
+`Wait.forLogMessage(...)` (or another strategy that doesn't depend on the
+TCP-only port enumeration) rather than relying on the default.
+
+**Joining an msb `Network` with a UDP-exposed member is unsupported in this
+phase.** msb has no direct guest-to-guest networking at all — the alias
+links described above are TCP exec-tunnels, and there is no UDP equivalent
+of that channel — so `start()` fails fast with a typed
+`UnsupportedByBackendError` the moment any computed link is UDP (before any
+tunnel is installed, the same fail-fast timing as the duplicate-port/alias
+checks above), naming two msb-compatible alternatives: the docker backend
+for real container-to-container UDP, or host-published UDP ports
+(`withExposedUdpPorts` + `getMappedUdpPort`, as shown above) if the traffic
+can go through the host instead of guest-to-guest. **Docker needs none of
+this:** its native bridge network already carries UDP between members with
+no per-port declaration, the same as it always has for TCP — a UDP-exposed
+container on a docker `Network` works with no special handling at all.

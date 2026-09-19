@@ -209,6 +209,34 @@ describe("readCheckpointRegistry", () => {
     const read = await readCheckpointRegistry(dir, entry.name);
     assert.equal(read.kind, "corrupt");
   });
+
+  it("resolves 'found' for a pre-existing entry with no spec.exposedUdpPorts key at all — additive and optional, a missing protocol reads as tcp-only (no UDP ports)", async () => {
+    const dir = await makeTempCacheDir();
+    await fs.mkdir(checkpointsDir(dir), { recursive: true });
+    // Hand-written, deliberately WITHOUT exposedUdpPorts — the exact shape
+    // every registry entry written before UDP exposure existed has on disk.
+    const oldEntry = baseEntry({ spec: { env: {}, command: null, exposedPorts: [80], memoryLimitMb: null } });
+    await fs.writeFile(checkpointRegistryPath(dir, oldEntry.name), JSON.stringify(oldEntry));
+    const read = await readCheckpointRegistry(dir, oldEntry.name);
+    assert.equal(read.kind, "found");
+    if (read.kind === "found") {
+      assert.equal("exposedUdpPorts" in read.entry.spec, false);
+      const spec = fromCheckpointRegistryEntry(read.entry);
+      assert.deepEqual(
+        spec.ports.map((p) => [p.guestPort, p.protocol]),
+        [[80, "tcp"]],
+      );
+    }
+  });
+
+  it("resolves 'corrupt' when spec.exposedUdpPorts is present but not an array of numbers", async () => {
+    const dir = await makeTempCacheDir();
+    await fs.mkdir(checkpointsDir(dir), { recursive: true });
+    const entry = { ...baseEntry(), spec: { env: {}, command: null, exposedPorts: [], exposedUdpPorts: "not-an-array", memoryLimitMb: null } };
+    await fs.writeFile(checkpointRegistryPath(dir, entry.name), JSON.stringify(entry));
+    const read = await readCheckpointRegistry(dir, entry.name);
+    assert.equal(read.kind, "corrupt");
+  });
 });
 
 describe("writeCheckpointRegistryAtomic / removeCheckpointRegistryFile", () => {
@@ -280,7 +308,7 @@ describe("toCheckpointRegistrySpec / fromCheckpointRegistryEntry", () => {
         ["B", "2"],
       ],
       command: ["sleep", "60"],
-      ports: [{ hostPort: 15999, guestPort: 80 }],
+      ports: [{ hostPort: 15999, guestPort: 80, protocol: "tcp" }],
       memoryLimitMb: 256,
     });
     const reduced = toCheckpointRegistrySpec(spec);
@@ -292,6 +320,38 @@ describe("toCheckpointRegistrySpec / fromCheckpointRegistryEntry", () => {
     const reduced = toCheckpointRegistrySpec(spec);
     assert.equal(reduced.command, null);
     assert.equal(reduced.memoryLimitMb, null);
+  });
+
+  it("toCheckpointRegistrySpec splits ports by protocol: TCP guest ports into exposedPorts, UDP ones into exposedUdpPorts", () => {
+    const spec = baseSpec({
+      ports: [
+        { hostPort: 1, guestPort: 80, protocol: "tcp" },
+        { hostPort: 2, guestPort: 53, protocol: "udp" },
+      ],
+    });
+    const reduced = toCheckpointRegistrySpec(spec);
+    assert.deepEqual(reduced.exposedPorts, [80]);
+    assert.deepEqual(reduced.exposedUdpPorts, [53]);
+  });
+
+  it("toCheckpointRegistrySpec omits exposedUdpPorts entirely when there are no UDP ports — serializes exactly as before UDP exposure existed", () => {
+    const spec = baseSpec({ ports: [{ hostPort: 1, guestPort: 80, protocol: "tcp" }] });
+    const reduced = toCheckpointRegistrySpec(spec);
+    assert.equal("exposedUdpPorts" in reduced, false);
+  });
+
+  it("fromCheckpointRegistryEntry reconstructs both protocols, tagged correctly, from a mixed entry", () => {
+    const entry = baseEntry({
+      spec: { env: {}, command: null, exposedPorts: [80], exposedUdpPorts: [53], memoryLimitMb: null },
+    });
+    const spec = fromCheckpointRegistryEntry(entry);
+    assert.deepEqual(
+      spec.ports.map((p) => [p.guestPort, p.protocol]).sort(),
+      [
+        [53, "udp"],
+        [80, "tcp"],
+      ],
+    );
   });
 
   it("fromCheckpointRegistryEntry reconstructs exactly the four fields fromCheckpoint() reads", () => {
@@ -320,8 +380,8 @@ describe("toCheckpointRegistrySpec / fromCheckpointRegistryEntry", () => {
       env: [["FOO", "bar"]],
       command: ["node", "server.js"],
       ports: [
-        { hostPort: 1, guestPort: 8080 },
-        { hostPort: 2, guestPort: 9090 },
+        { hostPort: 1, guestPort: 8080, protocol: "tcp" },
+        { hostPort: 2, guestPort: 9090, protocol: "tcp" },
       ],
       memoryLimitMb: 512,
     });

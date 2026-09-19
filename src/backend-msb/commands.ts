@@ -33,7 +33,10 @@ export const MsbCommands = {
       argv.push("--net", "private");
     }
     for (const port of spec.ports) {
-      argv.push("-p", `${port.hostPort}:${port.guestPort}`);
+      // "/udp" only for a udp binding — the plain "HOST:GUEST" spelling for
+      // tcp is byte-identical to before this suffix existed, since msb (like
+      // docker) treats an unmarked port publish as tcp by default.
+      argv.push("-p", `${port.hostPort}:${port.guestPort}${port.protocol === "udp" ? "/udp" : ""}`);
     }
     for (const [key, value] of spec.env) {
       argv.push("-e", `${key}=${value}`);
@@ -152,7 +155,10 @@ export const MsbCommands = {
       argv.push("--no-net");
     }
     for (const port of spec.ports) {
-      argv.push("-p", `${port.hostPort}:${port.guestPort}`);
+      // Same "/udp"-only-for-udp spelling as run() above — a checkpoint
+      // reboot re-publishes each binding's ORIGINAL protocol, never
+      // defaulting a udp binding back to tcp on restore.
+      argv.push("-p", `${port.hostPort}:${port.guestPort}${port.protocol === "udp" ? "/udp" : ""}`);
     }
     for (const mount of spec.mounts) {
       // Same option grammar and Windows rationale as `run()`'s `--mount-file` —

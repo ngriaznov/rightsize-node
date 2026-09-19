@@ -1,9 +1,30 @@
+/**
+ * The transport a published port speaks. `"tcp"` is the long-standing
+ * default — every producer of a `PortBinding` before this type existed
+ * always meant TCP, so a value here is never optional: every current
+ * producer (`GenericContainer.buildSpec`/`buildReuseSpec`,
+ * `fromCheckpointRegistryEntry`) tags it explicitly. A DESERIALIZED entry
+ * (the checkpoint registry) is the one place a missing tag can still show up
+ * — on-disk records written before this field existed — and that boundary
+ * normalizes a missing value to `"tcp"` rather than requiring it, so an old
+ * registry file keeps reading correctly.
+ */
+export type PortProtocol = "tcp" | "udp";
+
 /** A published container port: a host port already chosen, mapped to the port the workload listens on inside the guest. */
 export interface PortBinding {
-  /** The host-side port, pre-allocated by `FreePorts`. */
+  /** The host-side port, pre-allocated by `FreePorts` (TCP) or its UDP counterpart. */
   readonly hostPort: number;
   /** The port the workload listens on inside the guest. */
   readonly guestPort: number;
+  /**
+   * The transport this binding publishes over. A container may expose the
+   * SAME numeric `guestPort` on both protocols (DNS's 53, say) — each
+   * protocol gets its own independent host-port mapping, never a shared
+   * bare-int key, which is exactly why this field exists rather than
+   * inferring transport from the port number alone.
+   */
+  readonly protocol: PortProtocol;
 }
 
 /** A host path mounted into the guest before boot. `readOnly` is `false` via the builder (`withCopyFileToContainer`). */
