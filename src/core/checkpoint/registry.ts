@@ -309,5 +309,9 @@ export function fromCheckpointRegistryEntry(entry: CheckpointRegistryEntry): Con
     diskLimitMb: undefined,
     tmpfsRootMb: undefined,
     networkDisabled: false,
+    // Per-run wiring, never persisted — same placeholder treatment as
+    // networkDisabled/diskLimitMb/tmpfsRootMb above (see ContainerSpec's own
+    // doc on why this is never part of a checkpoint's identity).
+    hostUdpEgressPorts: [],
   };
 }

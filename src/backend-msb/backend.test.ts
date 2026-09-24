@@ -4,8 +4,9 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, assert, after, beforeEach } from "../../test/harness.js";
 import { MsbCliBackend } from "./backend.js";
-import { BackendError, TmpfsRootCheckpointError, CheckpointWorkloadCommandMissingError } from "../core/errors.js";
+import { BackendError, UnsupportedByBackendError, TmpfsRootCheckpointError, CheckpointWorkloadCommandMissingError } from "../core/errors.js";
 import type { ContainerSpec } from "../core/model.js";
+import type { NetworkLink } from "../core/backend.js";
 import { GenericContainer } from "../core/generic-container.js";
 import {
   readCheckpointRegistry,
@@ -987,6 +988,67 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
         "original spec, exactly like it already does for ports — and never --disk-only, which a " +
         "disk-scope snapshot rejects",
     );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("createCheckpoint's reboot carries the complete UDP net-default/net-rule policy in its restore argv when the spec has hostUdpEgressPorts", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Same reboot path as the mounts/network test above — MsbCommands.restore
+    // is the sole argv builder, so a hostUdpEgressPorts-bearing spec must
+    // reach it there too, not just on an ordinary fromCheckpoint() restore.
+    const spec = baseSpec("rz-testrun1-ckpt-udp-policy", {
+      hostUdpEgressPorts: [40000, 40001],
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-udp-policy1");
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    const rebootCall = state.callLog.filter((c) => c.cmd === "restore").at(-1);
+    assert.ok(rebootCall !== undefined, "expected a reboot 'restore' call after the snapshot/rm cycle");
+    assert.deepEqual(
+      rebootCall?.args,
+      [
+        "restore",
+        effectiveRef,
+        "--name",
+        handle.id,
+        "--net-default",
+        "deny",
+        "--net-rule",
+        "allow@public,allow@dns,allow@host:udp:40000,allow@host:udp:40001,allow:ingress@any",
+      ],
+      "expected the reboot's restore to carry the complete replacement network policy built from the " +
+        "original spec's hostUdpEgressPorts, exactly as MsbCommands.restore builds it for an ordinary restore",
+    );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("createCheckpoint's reboot omits --net-default/--net-rule from its restore argv when the spec has no hostUdpEgressPorts", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-ckpt-no-udp-policy", { command: ["sleep", "60"] });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    await backend.createCheckpoint(handle, "rz-ckpt-no-udp-policy1");
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
+    const rebootCall = state.callLog.filter((c) => c.cmd === "restore").at(-1);
+    assert.ok(rebootCall !== undefined, "expected a reboot 'restore' call after the snapshot/rm cycle");
+    assert.equal(rebootCall?.args.includes("--net-default"), false, "expected no --net-default when hostUdpEgressPorts is empty");
+    assert.equal(rebootCall?.args.includes("--net-rule"), false, "expected no --net-rule when hostUdpEgressPorts is empty");
 
     await backend.stop(handle);
     await backend.remove(handle);
@@ -2239,6 +2301,174 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.stop(handle);
     await backend.remove(handle);
   });
+
+  it("installNetworkLinks: a UDP probe failure throws a typed unsupported error naming the image and the docker remedy, without ever installing the forwarder", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-udp-probe-fail", { image: "no-nc:latest" });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.udpProbeFails = true;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const links: NetworkLink[] = [{ alias: "udp-echo", guestPort: 9153, targetHostPort: 40000, protocol: "udp" }];
+    let thrown: unknown;
+    try {
+      await backend.installNetworkLinks(handle, links);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof UnsupportedByBackendError, `expected UnsupportedByBackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /UDP network links/);
+    assert.match((thrown as Error).message, /no-nc:latest/);
+    assert.match((thrown as Error).message, /docker backend/);
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+    assert.equal(
+      state.callLog.some((c) => c.cmd === "udpForwarderInstall"),
+      false,
+      "expected the forwarder never to be installed after a failed probe",
+    );
+  });
+
+  it("installNetworkLinks: an all-TCP link list never runs the UDP-specific capability probe", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-tcp-only-links");
+    const handle = await backend.create(spec);
+    const links: NetworkLink[] = [{ alias: "redis", guestPort: 6379, targetHostPort: 30000, protocol: "tcp" }];
+
+    await backend.installNetworkLinks(handle, links);
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+    assert.equal(state.callLog.some((c) => c.cmd === "udpProbe"), false);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("installNetworkLinks: a UDP link installs via probe -> hosts alias -> forwarder script write+launch (exact script text and launch command) -> readiness poll", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-udp-install");
+    const handle = await backend.create(spec);
+    const links: NetworkLink[] = [{ alias: "udp-echo", guestPort: 9153, targetHostPort: 40000, protocol: "udp" }];
+
+    await backend.installNetworkLinks(handle, links);
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+    const order = state.callLog
+      .map((c) => c.cmd)
+      .filter((c) => ["udpProbe", "hostsAlias", "udpForwarderInstall", "udpReadinessPoll"].includes(c));
+    assert.deepEqual(order, ["udpProbe", "hostsAlias", "udpForwarderInstall", "udpReadinessPoll"]);
+
+    const installCall = state.callLog.find((c) => c.cmd === "udpForwarderInstall");
+    assert.ok(installCall !== undefined);
+    const script = installCall?.args.at(-1) as string;
+    assert.match(script, /^cat > \/tmp\/rz-udp-link-9153\.sh <<'EOF'\n/);
+    assert.ok(script.includes("nc -u -l -p $P -e timeout 60 nc -u $H $HP &"));
+    assert.match(script, /nohup sh \/tmp\/rz-udp-link-9153\.sh 9153 40000 >\/tmp\/rz-udp-link-9153\.log 2>&1 &$/);
+
+    const hostsCall = state.callLog.find((c) => c.cmd === "hostsAlias");
+    assert.equal(hostsCall?.args.at(-1), "echo '127.0.0.1 udp-echo' >> /etc/hosts");
+  });
+
+  it("installNetworkLinks: mixed TCP + UDP links — TCP still gets its exec tunnel, UDP gets the forwarder", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const spec = baseSpec("rz-testrun1-udp-mixed");
+    const handle = await backend.create(spec);
+    const links: NetworkLink[] = [
+      { alias: "redis", guestPort: 6379, targetHostPort: 30000, protocol: "tcp" },
+      { alias: "udp-echo", guestPort: 9153, targetHostPort: 40000, protocol: "udp" },
+    ];
+
+    await backend.installNetworkLinks(handle, links);
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+    assert.equal(state.callLog.some((c) => c.cmd === "udpForwarderInstall"), true, "expected the UDP link to get its forwarder");
+
+    const backendState = (backend as unknown as { handles: Map<string, { resources: unknown[] }> }).handles.get(handle.id);
+    assert.equal(backendState?.resources.length, 1, "expected exactly one ExecTunnel — the TCP link's, never spawned for the UDP one");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("installNetworkLinks: a UDP readiness timeout surfaces a descriptive error including the forwarder log tail", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Shrink the readiness poll/budget so a real timeout resolves in
+    // milliseconds instead of the real 5s — the same unsafe-cast seam this
+    // suite already uses for checkpointRebootAlreadyExistsRetryBudgetMs.
+    const seam = backend as unknown as { udpLinkReadinessPollMs: number; udpLinkReadinessTimeoutMs: number };
+    seam.udpLinkReadinessPollMs = 5;
+    seam.udpLinkReadinessTimeoutMs = 50;
+
+    const spec = baseSpec("rz-testrun1-udp-timeout");
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.udpReadinessNeverReady = true;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const links: NetworkLink[] = [{ alias: "udp-echo", guestPort: 9153, targetHostPort: 40000, protocol: "udp" }];
+    let thrown: unknown;
+    try {
+      await backend.installNetworkLinks(handle, links);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /never bound within/);
+    assert.match((thrown as Error).message, /fake forwarder log tail/);
+  });
+
+  it("installNetworkLinks: no UDP-link exec argument (probe, script write+launch, readiness poll, log tail) ever carries a double quote", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // Windows ProcessBuilder wraps an exec argument in quotes without
+    // escaping embedded ones, so a `"` anywhere in one of these execs would
+    // reach msb.exe mangled — force the readiness-timeout path so the log
+    // tail exec (the one argument not covered by network-links.test.ts's
+    // pure-function checks) is exercised too.
+    const seam = backend as unknown as { udpLinkReadinessPollMs: number; udpLinkReadinessTimeoutMs: number };
+    seam.udpLinkReadinessPollMs = 5;
+    seam.udpLinkReadinessTimeoutMs = 50;
+
+    const spec = baseSpec("rz-testrun1-udp-no-double-quotes");
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.udpReadinessNeverReady = true;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const links: NetworkLink[] = [{ alias: "udp-echo", guestPort: 9153, targetHostPort: 40000, protocol: "udp" }];
+    try {
+      await backend.installNetworkLinks(handle, links);
+    } catch {
+      // Expected: this is the readiness-timeout path, exercised for its
+      // execs' argv, not its outcome.
+    }
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+    const udpCalls = state.callLog.filter((c) =>
+      ["udpProbe", "hostsAlias", "udpForwarderInstall", "udpReadinessPoll", "udpForwarderLogTail"].includes(c.cmd),
+    );
+    assert.ok(udpCalls.length > 0, "expected at least one UDP-link exec to have run");
+    for (const call of udpCalls) {
+      for (const arg of call.args) {
+        assert.equal(arg.includes('"'), false, `expected no '"' in ${call.cmd}'s argv, got: ${arg}`);
+      }
+    }
+  });
 });
 
 describe("MsbCliBackend.capabilities", () => {
@@ -2393,6 +2623,83 @@ describe("MsbCliBackend's Windows job-free restore broker escalation (POLICY v2)
     assert.equal(state.sandboxes[freshName]?.status, "Running");
     const restoreCalls = state.callLog.filter((c) => c.cmd === "restore");
     assert.equal(restoreCalls.length, 2);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("rebootUnderFreshName's brokered restore argv carries the same UDP net-default/net-rule policy a direct restore would", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    // passthroughBroker performs the real restore against the fake msb
+    // double and records the exact argv it was invoked with — MsbCommands.restore
+    // builds that argv from handle.spec for BOTH launch modes (see
+    // launchRestoreViaBroker's own doc), so a brokered attempt's argv must
+    // carry hostUdpEgressPorts's policy exactly like the direct-path reboot
+    // above does.
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: passthroughBroker(brokerCalls) });
+    forcePlatform(backend, "win32");
+
+    const spec = baseSpec("rz-testrun1-broker-udp-policy", {
+      hostUdpEgressPorts: [40000, 40001],
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-broker-udp-policy1");
+    const freshName = handle.id;
+
+    assert.equal(brokerCalls.length, 1, "expected exactly one brokered attempt — the retry after the always-direct first one");
+    const brokeredCall = brokerCalls[0];
+    assert.deepEqual(
+      brokeredCall?.argv,
+      [
+        "restore",
+        effectiveRef,
+        "--name",
+        freshName,
+        "--net-default",
+        "deny",
+        "--net-rule",
+        "allow@public,allow@dns,allow@host:udp:40000,allow@host:udp:40001,allow:ingress@any",
+      ],
+      "expected the brokered attempt's own argv to carry the complete replacement network policy, exactly " +
+        "as a direct restore would",
+    );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("rebootUnderFreshName's brokered restore argv omits --net-default/--net-rule when the spec has no hostUdpEgressPorts", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: passthroughBroker(brokerCalls) });
+    forcePlatform(backend, "win32");
+
+    const spec = baseSpec("rz-testrun1-broker-no-udp-policy", { command: ["sleep", "60"] });
+    const handle = await backend.create(spec);
+    await backend.start(handle);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.createCheckpoint(handle, "rz-ckpt-broker-no-udp-policy1");
+
+    assert.equal(brokerCalls.length, 1, "expected exactly one brokered attempt — the retry after the always-direct first one");
+    const brokeredCall = brokerCalls[0];
+    assert.equal(brokeredCall?.argv.includes("--net-default"), false, "expected no --net-default when hostUdpEgressPorts is empty");
+    assert.equal(brokeredCall?.argv.includes("--net-rule"), false, "expected no --net-rule when hostUdpEgressPorts is empty");
 
     await backend.stop(handle);
     await backend.remove(handle);

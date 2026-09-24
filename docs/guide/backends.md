@@ -118,12 +118,14 @@ than incidental timing quirks:
   on microsandbox can see its last line arrive slightly *after* the sandbox
   reports stopped, rather than exactly at stream EOF the way a Docker log
   stream closes.
-- **Network-alias tunnels on microsandbox serve one connection at a time.**
-  See [Networking](/guide/networking#limits-on-the-microsandbox-backend) —
-  this is a real capability gap versus Docker's native bridge networking, not
-  a timing quirk, and it means sustained bidirectional sibling traffic (a
+- **A TCP network-alias tunnel on microsandbox serves one connection at a
+  time.** See [Networking](/guide/networking#limits-on-the-microsandbox-backend)
+  — this is a real capability gap versus Docker's native bridge networking,
+  not a timing quirk, and it means sustained bidirectional sibling traffic (a
   cross-container consumer reading continuously from a broker on a sibling
-  microVM) isn't something the microsandbox backend supports.
+  microVM) isn't something the microsandbox backend supports over TCP. A UDP
+  network-alias link has no such ceiling — see
+  [UDP ports](/guide/networking#udp-ports) for what it has instead.
 - **`withDiskLimit`, `withTmpfsRoot`, and `withNetworkDisabled` are
   msb-only.** Docker runs its containers with an uncapped, disk-backed root
   and normal networking regardless of any of the three — it silently ignores

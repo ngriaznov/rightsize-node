@@ -409,6 +409,81 @@ describe("GenericContainer — U2 network links to running siblings", () => {
     await dns.stop();
     await consumer.stop();
   });
+
+  it("the spec handed to backend.create carries the sorted, distinct UDP target host ports of running siblings — the same list installNetworkLinks receives", async () => {
+    const backend = new FakeBackend();
+    const net = Network.newNetwork();
+
+    const dnsA = new GenericContainer("dns-a:latest")
+      .withBackend(backend)
+      .withExposedUdpPorts(53)
+      .withNetwork(net)
+      .withNetworkAliases("dns-a")
+      .waitingFor(instantReady());
+    await dnsA.start();
+
+    const dnsB = new GenericContainer("dns-b:latest")
+      .withBackend(backend)
+      .withExposedUdpPorts(53)
+      .withNetwork(net)
+      .withNetworkAliases("dns-b")
+      .waitingFor(instantReady());
+    await dnsB.start();
+
+    const consumer = new GenericContainer("consumer:latest")
+      .withBackend(backend)
+      .withNetwork(net)
+      .withNetworkAliases("consumer")
+      .waitingFor(instantReady());
+    await consumer.start();
+
+    const expected = [dnsA.getMappedUdpPort(53), dnsB.getMappedUdpPort(53)].sort((a, b) => a - b);
+    const consumerHandle = backend.createdHandles[2];
+    assert.deepEqual(consumerHandle?.spec.hostUdpEgressPorts, expected);
+
+    const installedLinks = backend.installedLinks[2] ?? [];
+    const installedUdpTargets = installedLinks
+      .filter((l) => l.protocol === "udp")
+      .map((l) => l.targetHostPort)
+      .sort((a, b) => a - b);
+    assert.deepEqual(installedUdpTargets, expected);
+
+    await dnsA.stop();
+    await dnsB.stop();
+    await consumer.stop();
+  });
+
+  it("a container with no network gets an empty hostUdpEgressPorts", async () => {
+    const backend = new FakeBackend();
+    const solo = new GenericContainer("alpine:3.19").withBackend(backend).waitingFor(instantReady());
+    await solo.start();
+    assert.deepEqual(backend.createdHandles[0]?.spec.hostUdpEgressPorts, []);
+    await solo.stop();
+  });
+
+  it("a container on a network whose only sibling is TCP-exposed gets an empty hostUdpEgressPorts", async () => {
+    const backend = new FakeBackend();
+    const net = Network.newNetwork();
+    const tcpSibling = new GenericContainer("redis:8.6-alpine")
+      .withBackend(backend)
+      .withExposedPorts(6379)
+      .withNetwork(net)
+      .withNetworkAliases("redis")
+      .waitingFor(instantReady());
+    await tcpSibling.start();
+
+    const consumer = new GenericContainer("consumer:latest")
+      .withBackend(backend)
+      .withNetwork(net)
+      .withNetworkAliases("consumer")
+      .waitingFor(instantReady());
+    await consumer.start();
+
+    assert.deepEqual(backend.createdHandles[1]?.spec.hostUdpEgressPorts, []);
+
+    await tcpSibling.stop();
+    await consumer.stop();
+  });
 });
 
 describe("GenericContainer — U3 exec/mapped-port require running", () => {

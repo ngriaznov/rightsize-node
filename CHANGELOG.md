@@ -5,7 +5,34 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **UDP network links on microsandbox.** A container on a `Network` can now
+  reach a UDP-exposed sibling by `alias:guestPort`, the same
+  `withNetwork`/`withNetworkAliases` shape TCP links already use — no
+  user-facing API change. `ContainerSpec` gains `hostUdpEgressPorts`, filled
+  in by the core from the UDP-protocol links computed for a start BEFORE
+  `backend.create()`, so the consumer's `msb run` argv can open exactly the
+  host UDP ports its links need (`--net-rule allow@host:udp:<port>`, one per
+  port, additive to msb's default policy) and a checkpoint reboot's `msb
+  restore` can re-supply the complete replacement policy restore itself
+  needs (`--net-default deny --net-rule allow@public,allow@dns,allow@host:udp:<p>,...,allow:ingress@any`).
+  On the guest side, `installNetworkLinks` installs a small in-guest
+  forwarder per UDP link — a chained-listener `nc` supervisor relaying the
+  guest port to the target's own host-published UDP port — gated on a
+  capability probe for busybox-style `nc` (`-u`/`-e`) and `timeout`; a
+  consumer image without them fails `start()` fast with the existing typed
+  unsupported-backend error, naming the docker backend as the remedy. The
+  prior UDP-link rejection (`requireNoUdpLinks`) is gone. Docker needs none
+  of this — its native bridge network already carries UDP between members
+  with no per-link declaration.
+
+  **Datagram size limit (msb only).** A UDP datagram over 1472 bytes of
+  payload — to a published UDP port or across a UDP link — permanently
+  kills the receiving sandbox's whole inbound networking; a reply over that
+  size is silently truncated. This is an msb limitation this library cannot
+  guard against — keep UDP payloads at or under 1472 bytes on the
+  microsandbox backend.
 
 ## [0.7.11] - 2026-09-19
 

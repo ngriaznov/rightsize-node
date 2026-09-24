@@ -19,10 +19,12 @@ export interface NetworkLink {
    * behavior); `"udp"` for one computed from `exposedUdpGuestPorts`/
    * `mappedUdpPort`. Docker ignores this — its native bridge network already
    * carries UDP with no per-link declaration (see `installNetworkLinks`'s
-   * own doc); msb has no way to tunnel UDP over its TCP exec-stream channel,
-   * so `MsbCliBackend.installNetworkLinks` fails fast on any link whose
-   * `protocol` is `"udp"` rather than silently building a TCP tunnel for a
-   * UDP service.
+   * own doc); msb has no shared network to carry either transport, so it
+   * emulates both, but by different means: a TCP link gets an exec-tunnel
+   * relayed through this process (`MsbCliBackend`'s `ExecTunnel`), a UDP
+   * link gets an in-guest forwarder dialing `targetHostPort` on the host
+   * gateway directly, with no per-connection relay on this side at all (see
+   * `MsbCliBackend.installNetworkLinks`).
    */
   readonly protocol: PortProtocol;
 }

@@ -73,37 +73,44 @@ shared bridge network to attach to. rightsize transparently installs:
 
 1. An `/etc/hosts` entry inside the consuming container's guest, mapping the
    alias to `127.0.0.1`.
-2. A TCP relay tunneled over the sandbox's `exec --stream` channel — the
-   *only* guest data path available on this msb build (no sandbox→host TCP
-   under any net-rule tried; SSH forwarding was found broken too). The tunnel
-   pumps raw bytes, unbuffered, flush-per-read, in both directions.
+2. For a TCP link: a relay tunneled over the sandbox's `exec --stream`
+   channel — the *only* guest data path available on this msb build (no
+   sandbox→host TCP under any net-rule tried; SSH forwarding was found broken
+   too). The tunnel pumps raw bytes, unbuffered, flush-per-read, in both
+   directions.
+3. For a UDP link: a host-UDP-egress rule opened on the *consuming*
+   container's own boot (one rule per linked port, nothing broader), plus an
+   in-guest forwarder that relays the guest port to the target's own
+   host-published UDP port directly — see [UDP ports](#udp-ports) below.
 
 This is real emulation, not a shortcut, and it has real limits.
 
 ## Limits on the microsandbox backend
 
-- **Start dependencies before their consumers.** Network links are computed
-  for a new member from whichever siblings are *already running* at the
-  moment it joins. A container started before its dependency is up won't
-  retroactively gain a link to it.
-- **One connection at a time per tunnel.** The in-guest `nc -l` listener
-  backing a tunnel serves one connection, then gets respawned for the next.
-  Fine for config-fetch-style traffic; not fine for a long-lived
+- **Start dependencies before their consumers.** Network links (TCP or UDP)
+  are computed for a new member from whichever siblings are *already
+  running* at the moment it joins. A container started before its
+  dependency is up won't retroactively gain a link to it.
+- **One connection at a time per TCP tunnel.** The in-guest `nc -l` listener
+  backing a TCP link serves one connection, then gets respawned for the
+  next. Fine for config-fetch-style traffic; not fine for a long-lived
   cross-container consumer (a Kafka consumer reading continuously from a
-  broker on a sibling microVM, say).
-- **Client speaks first.** The tunnel protocol assumes the connecting side
-  sends the first bytes — matches HTTP requests and most RPC-style
-  protocols; a server that waits silently for the client to speak needs the
-  client end to actually be the one initiating data, which HTTP/REST calls
-  naturally are.
-- **The consumer image needs `nc`/busybox.** The tunnel is implemented as a
-  shelled-out `nc` listener inside the guest. An image without it (a
-  scratch-based image, or one that stripped busybox) fails `start()` fast,
-  with an error naming the missing binary and suggesting
-  `RIGHTSIZE_BACKEND=docker` as the workaround — this is exactly what happens
-  with `FlinkContainer.withTaskManager()` on microsandbox, documented on its
-  [module page](/modules/flink).
-- **A target that never propagates TCP close can't be detected by naive
+  broker on a sibling microVM, say). A UDP link has no such ceiling — see
+  [UDP ports](#udp-ports) below for what it does have instead.
+- **A TCP link's client speaks first.** The tunnel protocol assumes the
+  connecting side sends the first bytes — matches HTTP requests and most
+  RPC-style protocols; a server that waits silently for the client to speak
+  needs the client end to actually be the one initiating data, which
+  HTTP/REST calls naturally are.
+- **The consumer image needs `nc`/busybox.** Both a TCP tunnel and a UDP
+  forwarder are shelled-out `nc` invocations inside the guest — UDP needs a
+  stricter subset (`-u`/`-e` and `timeout`, see [UDP ports](#udp-ports)). An
+  image without it (a scratch-based image, or one that stripped busybox)
+  fails `start()` fast, with an error naming the missing binary and
+  suggesting `RIGHTSIZE_BACKEND=docker` as the workaround — this is exactly
+  what happens with `FlinkContainer.withTaskManager()` on microsandbox,
+  documented on its [module page](/modules/flink).
+- **A TCP target that never propagates TCP close can't be detected by naive
   EOF.** The msb port-publish proxy doesn't propagate the target socket's
   close to the tunnel, so end-of-exchange is inferred from an idle window
   *after* the first byte arrives — not from the whole connection, which would
@@ -178,16 +185,53 @@ the UDP service is actually listening. Give a UDP-only container an explicit
 `Wait.forLogMessage(...)` (or another strategy that doesn't depend on the
 TCP-only port enumeration) rather than relying on the default.
 
-**Joining an msb `Network` with a UDP-exposed member is unsupported in this
-phase.** msb has no direct guest-to-guest networking at all — the alias
-links described above are TCP exec-tunnels, and there is no UDP equivalent
-of that channel — so `start()` fails fast with a typed
-`UnsupportedByBackendError` the moment any computed link is UDP (before any
-tunnel is installed, the same fail-fast timing as the duplicate-port/alias
-checks above), naming two msb-compatible alternatives: the docker backend
-for real container-to-container UDP, or host-published UDP ports
-(`withExposedUdpPorts` + `getMappedUdpPort`, as shown above) if the traffic
-can go through the host instead of guest-to-guest. **Docker needs none of
-this:** its native bridge network already carries UDP between members with
-no per-port declaration, the same as it always has for TCP — a UDP-exposed
-container on a docker `Network` works with no special handling at all.
+**Joining an msb `Network` with a UDP-exposed sibling works.** A container
+that exposes a UDP port and starts first is reachable by alias from a
+sibling that joins afterward, the same `withNetwork`/`withNetworkAliases`
+shape as any TCP link:
+
+```ts
+import { GenericContainer, Network, Wait } from "rightsize";
+
+await using net = Network.newNetwork();
+
+await using dns = await new GenericContainer("dns-server:latest")
+  .withNetwork(net)
+  .withNetworkAliases("dns")
+  .withExposedUdpPorts(53)
+  .waitingFor(Wait.forLogMessage("ready", 1))
+  .start();
+
+await using consumer = await new GenericContainer("alpine:3.19")
+  .withNetwork(net)
+  .withCommand("sleep", "60")
+  .start();
+
+// Inside consumer: a datagram to "dns:53" reaches dns's own guest port 53.
+await consumer.exec("sh", "-c", "echo query | nc -u -w2 dns 53");
+```
+
+Requirements: the target exposes the port with `withExposedUdpPorts` and is
+already running when the consumer starts (the same ordering every link
+needs, see above); the consumer image has busybox-style `nc` (with `-u` and
+`-e`) and `timeout` — Alpine/busybox images have both, Debian/Ubuntu images
+and OpenBSD netcat do not.
+
+Behavior: the consumer's sandbox gets one host-UDP-egress rule per linked
+port and nothing broader — its outbound access is otherwise unchanged from
+before the link existed. Inside the guest, each distinct client socket
+(source port) holds its own relay for up to 60s of inactivity; a client that
+keeps sending past that gets a fresh relay transparently.
+
+**Datagram size limit (msb only, both directions).** A datagram over 1472
+bytes of payload — sent to a published UDP port *or* across a UDP link —
+permanently kills the receiving sandbox's whole inbound networking (DNS,
+HTTP, every published port), and a reply over that size is silently
+truncated. This is a limitation of msb itself, not something this library
+can guard against; keep UDP payloads at or under 1472 bytes on the
+microsandbox backend.
+
+**Docker needs none of this:** its native bridge network already carries
+UDP between members with no per-port declaration, the same as it always has
+for TCP — a UDP-exposed container on a docker `Network` works with no
+special handling at all, and has no datagram-size limit of its own.

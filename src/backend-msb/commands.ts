@@ -32,6 +32,13 @@ export const MsbCommands = {
     if (spec.networkDisabled) {
       argv.push("--net", "private");
     }
+    // One rule per linked UDP target: a bare --net-rule (no --net flag) is
+    // PREPENDED to msb's default policy, so public internet, DNS, and this
+    // sandbox's own published-port ingress all keep working — only these
+    // specific host UDP ports open up, nothing broader.
+    for (const port of spec.hostUdpEgressPorts ?? []) {
+      argv.push("--net-rule", `allow@host:udp:${port}`);
+    }
     for (const port of spec.ports) {
       // "/udp" only for a udp binding — the plain "HOST:GUEST" spelling for
       // tcp is byte-identical to before this suffix existed, since msb (like
@@ -153,6 +160,21 @@ export const MsbCommands = {
     }
     if (spec.networkDisabled) {
       argv.push("--no-net");
+    }
+    // Unlike run(), a bare --net-rule here is not additive: msb's restore
+    // drops whatever CLI policy the ORIGINAL sandbox booted with and falls
+    // back to its own default, so this has to re-supply the complete
+    // replacement policy, not just the extra rule. --net-rule only parses
+    // on restore alongside --net-default (there is no --net profile flag
+    // here, unlike run's --net private), and --net-default governs BOTH
+    // directions at once — so the published-port ingress a plain default
+    // policy gives for free must be re-added explicitly as
+    // allow:ingress@any, or this sandbox's own -p bindings restore
+    // unreachable.
+    const hostUdpEgressPorts = spec.hostUdpEgressPorts ?? [];
+    if (hostUdpEgressPorts.length > 0) {
+      const rules = ["allow@public", "allow@dns", ...hostUdpEgressPorts.map((port) => `allow@host:udp:${port}`), "allow:ingress@any"];
+      argv.push("--net-default", "deny", "--net-rule", rules.join(","));
     }
     for (const port of spec.ports) {
       // Same "/udp"-only-for-udp spelling as run() above — a checkpoint

@@ -107,6 +107,34 @@ describe("MsbCommands", () => {
     ]);
   });
 
+  it("run: an empty hostUdpEgressPorts (absent or []) emits no --net-rule — byte-identical to before the field existed", () => {
+    const withoutField = MsbCommands.run(baseSpec());
+    assert.equal(withoutField.includes("--net-rule"), false);
+    const withEmpty = MsbCommands.run(baseSpec({ hostUdpEgressPorts: [] }));
+    assert.deepEqual(withEmpty, withoutField);
+  });
+
+  it("run: hostUdpEgressPorts emits one --net-rule allow@host:udp:<port> per port, in list order, next to --net private and before -p", () => {
+    const argv = MsbCommands.run(
+      baseSpec({
+        hostUdpEgressPorts: [40000, 40001],
+        ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }],
+      }),
+    );
+    assert.deepEqual(argv, [
+      "run",
+      "--name",
+      "rz-abc12345-1",
+      "--net-rule",
+      "allow@host:udp:40000",
+      "--net-rule",
+      "allow@host:udp:40001",
+      "-p",
+      "1111:22",
+      "redis:8.6-alpine",
+    ]);
+  });
+
   it("run: an explicit command is appended after -- ; undefined command adds nothing", () => {
     const withCmd = MsbCommands.run(baseSpec({ command: ["redis-server", "--port", "6379"] }));
     assert.deepEqual(withCmd.slice(-4), ["--", "redis-server", "--port", "6379"]);
@@ -372,6 +400,36 @@ describe("MsbCommands", () => {
     const argv = MsbCommands.restore(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345", networkDisabled: false }));
     assert.equal(argv.includes("--no-net"), false);
     assert.equal(argv.includes("--net"), false);
+  });
+
+  it("restore: an empty hostUdpEgressPorts (absent or []) emits no --net-default/--net-rule — byte-identical to before the field existed", () => {
+    const withoutField = MsbCommands.restore(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345" }));
+    assert.equal(withoutField.includes("--net-default"), false);
+    assert.equal(withoutField.includes("--net-rule"), false);
+    const withEmpty = MsbCommands.restore(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345", hostUdpEgressPorts: [] }));
+    assert.deepEqual(withEmpty, withoutField);
+  });
+
+  it("restore: hostUdpEgressPorts emits the COMPLETE replacement policy — --net-default deny plus one comma-joined --net-rule covering public, dns, each linked port, and ingress — right after --name, before ports", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        hostUdpEgressPorts: [40000, 40001],
+        ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }],
+      }),
+    );
+    assert.deepEqual(argv, [
+      "restore",
+      "rz-ckpt-abcdef012345",
+      "--name",
+      "rz-abc12345-1",
+      "--net-default",
+      "deny",
+      "--net-rule",
+      "allow@public,allow@dns,allow@host:udp:40000,allow@host:udp:40001,allow:ingress@any",
+      "-p",
+      "1111:22",
+    ]);
   });
 
   it("restore: mounts emit --volume host:guest:ro|rw,nodev after ports, in spec order", () => {

@@ -29,7 +29,15 @@ import { isSnapshotSaveAccessDeniedFailure, salvageStagedArchive } from "./snaps
 import { parseSnapshotCreateArtifactPath } from "./snapshot-create.js";
 import { isSnapshotHeadRemovalRefused } from "./snapshot-rm.js";
 import { undeliveredLines } from "./follow-replay.js";
-import { requireNoUdpLinks, requireNoDuplicateGuestPorts, requireAliasesAreValid, hostsAliasScript } from "./network-links.js";
+import {
+  requireNoDuplicateGuestPorts,
+  requireAliasesAreValid,
+  hostsAliasScript,
+  udpForwarderProbeScript,
+  installUdpForwarderScript,
+  udpReadinessProbeScript,
+  udpForwarderLogPath,
+} from "./network-links.js";
 import { ExecTunnel } from "./exec-tunnel.js";
 import { isRestoreAccessDeniedFailure } from "./restore-access-denied.js";
 import { isSandboxAlreadyExistsFailure } from "./sandbox-already-exists.js";
@@ -42,6 +50,14 @@ import {
 
 const FIRST_RUN_PULL_TIMEOUT_MS = 600_000; // a cold pull can be slow
 const READINESS_POLL_MS = 300;
+// A UDP link's forwarder prints nothing on bind (`nc -u -l` is silent), so
+// readiness is polled against /proc/net/udp{,6} directly rather than
+// inferred from the launch exec alone — short interval, short budget: the
+// script's own listener loop starts within a handful of shell built-ins of
+// launching, never a cold pull or a poll-driven state transition like the
+// boot-readiness constants above.
+const UDP_LINK_READINESS_POLL_MS = 100;
+const UDP_LINK_READINESS_TIMEOUT_MS = 5_000;
 const STOP_TIMEOUT_MS = 60_000;
 const EXEC_TIMEOUT_MS = 120_000;
 // How long an exec keeps retrying while the guest agent's endpoint has not
@@ -558,6 +574,14 @@ export class MsbCliBackend implements SandboxBackend {
   // above, so both the escalation trigger AND the "non-Windows never
   // brokers" invariant are exercisable without an actual Windows host.
   private platformOverrideForTests: NodeJS.Platform | undefined = undefined;
+  // Test-only override seam for installUdpLink's own readiness poll
+  // interval/budget — defaults to the real UDP_LINK_READINESS_POLL_MS/
+  // _TIMEOUT_MS constants so production behavior is unchanged. Reached the
+  // same unsafe-cast way this suite already reaches
+  // checkpointRebootAlreadyExistsRetryBudgetMs above, so a readiness-timeout
+  // red-proof runs in milliseconds rather than the real 5s.
+  private udpLinkReadinessPollMs = UDP_LINK_READINESS_POLL_MS;
+  private udpLinkReadinessTimeoutMs = UDP_LINK_READINESS_TIMEOUT_MS;
 
   constructor(
     private readonly msbPathPromise: Promise<string>,
@@ -2406,18 +2430,20 @@ export class MsbCliBackend implements SandboxBackend {
   /**
    * Networks are emulated because there is no bridge/subnet the current
    * msb exposes on macOS — the only data path into a running sandbox is the
-   * exec channel. Five concerns, each its own guard: reject any UDP link
-   * outright (msb has no guest-to-guest UDP path at all — see
-   * `requireNoUdpLinks`'s own doc), reject duplicate guest ports, validate
-   * every alias (they get shell-interpolated), probe for `nc`, then install
-   * `/etc/hosts` aliases and spawn one tunnel per link.
+   * exec channel, and TCP and UDP links take DIFFERENT routes through it.
+   * Validate first (duplicate guest ports, alias charset — both get
+   * shell-interpolated below), then probe for `nc` (every link needs it)
+   * and, only when a UDP link is present, for the forwarder's stricter
+   * dependencies (`-u`/`-e`, `timeout`). `/etc/hosts` aliases install once,
+   * shared by both protocols. From there each link takes its own path: a
+   * TCP link gets an `ExecTunnel`, unchanged; a UDP link gets
+   * `installUdpLink`'s forwarder script.
    */
   async installNetworkLinks(handle: SandboxHandle, links: ReadonlyArray<NetworkLink>): Promise<void> {
     if (links.length === 0) {
       return;
     }
     const msbPath = await this.msbPath();
-    requireNoUdpLinks(links);
     requireNoDuplicateGuestPorts(links);
     requireAliasesAreValid(links);
 
@@ -2430,6 +2456,18 @@ export class MsbCliBackend implements SandboxBackend {
       );
     }
 
+    const udpLinks = links.filter((link) => link.protocol === "udp");
+    if (udpLinks.length > 0) {
+      const udpProbe = await this.exec(handle, ["sh", "-c", udpForwarderProbeScript()]);
+      if (udpProbe.exitCode !== 0) {
+        throw new UnsupportedByBackendError(
+          `UDP network links (consumer image '${handle.spec.image}' has no busybox-style nc with -u/-e, or no timeout)`,
+          this.name,
+          "run with the docker backend",
+        );
+      }
+    }
+
     const hostsResult = await this.exec(handle, ["sh", "-c", hostsAliasScript(links)]);
     if (hostsResult.exitCode !== 0) {
       throw new BackendError(`failed to install /etc/hosts aliases in ${handle.id}: ${hostsResult.stderr}`);
@@ -2437,10 +2475,51 @@ export class MsbCliBackend implements SandboxBackend {
 
     const state = this.handles.get(handle.id);
     for (const link of links) {
+      if (link.protocol === "udp") {
+        await this.installUdpLink(handle, link);
+        continue;
+      }
       const tunnel = new ExecTunnel(msbPath, handle.id, link);
       if (state !== undefined) {
         state.resources.push(tunnel);
       }
+    }
+  }
+
+  /**
+   * One UDP link: installs and detached-launches its forwarder script, then
+   * polls `/proc/net/udp{,6}` until the guest port is actually bound — the
+   * launch exec succeeding only proves the script started, not that its
+   * listener has bound yet, and `nc -u -l` itself prints nothing to signal
+   * that. No teardown counterpart, unlike `ExecTunnel`: the forwarder is a
+   * plain guest process with no host-side resource of its own, and guest
+   * processes die with the sandbox. A checkpoint reboot's link replay (see
+   * `GenericContainer.checkpoint`) reruns this exactly like a fresh install
+   * — `/tmp` is tmpfs, so the rebooted guest has no forwarder script left
+   * to find, only a fresh one this rewrites.
+   */
+  private async installUdpLink(handle: SandboxHandle, link: NetworkLink): Promise<void> {
+    const install = await this.exec(handle, ["sh", "-c", installUdpForwarderScript(link.guestPort, link.targetHostPort)]);
+    if (install.exitCode !== 0) {
+      throw new BackendError(
+        `failed to install the UDP forwarder for guest port ${link.guestPort} in ${handle.id}: ${install.stderr}`,
+      );
+    }
+
+    const deadline = Date.now() + this.udpLinkReadinessTimeoutMs;
+    for (;;) {
+      const probe = await this.exec(handle, ["sh", "-c", udpReadinessProbeScript(link.guestPort)]);
+      if (probe.exitCode === 0) {
+        return;
+      }
+      if (Date.now() >= deadline) {
+        const log = await this.exec(handle, ["sh", "-c", `tail -c 2000 ${udpForwarderLogPath(link.guestPort)} 2>/dev/null`]);
+        throw new BackendError(
+          `UDP forwarder for guest port ${link.guestPort} in ${handle.id} never bound within ` +
+            `${this.udpLinkReadinessTimeoutMs / 1000}s; forwarder log tail:\n${log.stdout}`,
+        );
+      }
+      await sleep(this.udpLinkReadinessPollMs);
     }
   }
 

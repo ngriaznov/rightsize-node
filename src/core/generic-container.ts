@@ -125,6 +125,11 @@ function registryRecordToPorts(record: Record<string, number>): Map<number, numb
   return ports;
 }
 
+/** `ContainerSpec.hostUdpEgressPorts`'s own computation: the distinct, ascending-sorted target host ports of `links`' UDP-protocol entries — shared by every spec-construction site a networked boot can reach. */
+function hostUdpEgressPortsFor(links: ReadonlyArray<NetworkLink>): number[] {
+  return [...new Set(links.filter((link) => link.protocol === "udp").map((link) => link.targetHostPort))].sort((a, b) => a - b);
+}
+
 /**
  * The builder, launcher, and lifecycle guard for a single container — the
  * one class every module (`RedisContainer`, `PostgresContainer`, …)
@@ -274,13 +279,11 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * ports is vacuously ready under the default wait — prefer
    * `Wait.forLogMessage(...)` for a UDP-only service.
    *
-   * Joining a `Network` on the microsandbox backend with a UDP-exposed
-   * sibling is unsupported in this phase: msb has no direct guest-to-guest
-   * networking (rightsize's msb links are TCP exec-tunnels), so
-   * `installNetworkLinks` fails fast with `UnsupportedByBackendError` rather
-   * than silently building a TCP tunnel for a UDP service — use the docker
-   * backend for container-to-container UDP, or publish host-mapped UDP ports
-   * (this method + `getMappedUdpPort`) instead.
+   * A UDP-exposed container can be a link target on a `Network` on both
+   * backends. On microsandbox the consumer gets an in-guest forwarder per UDP
+   * link, which needs a busybox-style `nc` (with `-u`/`-e`) and `timeout` in
+   * the consumer image; a datagram over 1472 bytes of payload breaks the
+   * receiving sandbox's inbound networking there (see the networking guide).
    */
   withExposedUdpPorts(...ports: number[]): this {
     this.exposedUdpPorts.push(...ports);
@@ -442,7 +445,8 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     return this.backendOverride ?? Backends.active();
   }
 
-  private buildSpec(name: string, ports: PortAllocation): ContainerSpec {
+  /** `hostUdpEgressPorts` is precomputed by `start()` from the SAME `linksForNewMember()` call `installNetworkLinks` is later given — never recomputed here, so the argv a networked boot builds from and the links actually installed after it always agree. */
+  private buildSpec(name: string, ports: PortAllocation, hostUdpEgressPorts: readonly number[]): ContainerSpec {
     const spec: ContainerSpec = {
       name,
       image: this.image,
@@ -463,6 +467,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       diskLimitMb: this.diskLimitMb,
       tmpfsRootMb: this.tmpfsRootMb,
       networkDisabled: this.networkDisabled,
+      hostUdpEgressPorts,
     };
     return GenericContainer.validateSpecConflicts(
       this.customizeSpec(spec, (guest) => {
@@ -496,6 +501,10 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       diskLimitMb: this.diskLimitMb,
       tmpfsRootMb: this.tmpfsRootMb,
       networkDisabled: this.networkDisabled,
+      // A reuse container never joins a Network (ReuseWithNetworkError,
+      // checked before this is ever reached) — no links, ever, to derive a
+      // host-UDP-egress list from.
+      hostUdpEgressPorts: [],
     };
     return GenericContainer.validateSpecConflicts(
       this.customizeSpec(spec, (guest) => {
@@ -690,6 +699,16 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
       await trackNetwork(this.network.id);
     }
 
+    // Computed once, before create() — never recomputed inside the retry
+    // loop below or ahead of the installNetworkLinks call after it: a
+    // backend that routes links through the host (msb) needs this
+    // container's own UDP-egress policy baked into the SAME argv that boots
+    // it, and the links actually installed once it's up must be the exact
+    // list that policy was built from, not a freshly recomputed one that
+    // could in principle disagree with it.
+    const links = this.network?.linksForNewMember() ?? [];
+    const hostUdpEgressPorts = hostUdpEgressPortsFor(links);
+
     let handle: SandboxHandle | undefined;
     let allocatedPorts: PortAllocation | undefined;
     let lastConflict: unknown;
@@ -707,7 +726,7 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     for (let attempt = 0; attempt < MAX_START_ATTEMPTS; attempt++) {
       const ports = await this.allocatePorts();
       const name = nextSandboxName();
-      const spec = this.buildSpec(name, ports);
+      const spec = this.buildSpec(name, ports, hostUdpEgressPorts);
 
       // Appended BEFORE create() — the ledger's `.sandboxes` file is always
       // a superset of this run's live sandboxes, never a subset. `keepAlive`
@@ -783,7 +802,10 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     }
 
     try {
-      const links = this.network?.linksForNewMember() ?? [];
+      // The SAME links computed above, before create() — never recomputed
+      // here (see the comment where they were computed): the policy already
+      // baked into this container's own argv must be exactly what gets
+      // installed, not a freshly recomputed list.
       await backend.installNetworkLinks(handle, links);
       this.installedNetworkLinks = links;
       // Register AFTER links are computed/installed — a container must

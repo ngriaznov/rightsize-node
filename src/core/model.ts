@@ -134,6 +134,22 @@ export interface ContainerSpec {
    * hash, the same as `memoryLimitMb`.
    */
   readonly networkDisabled: boolean;
+  /**
+   * The host loopback UDP ports this sandbox's network links need to reach —
+   * the distinct, ascending-sorted `targetHostPort`s of the UDP-protocol
+   * links `GenericContainer.start()` computes for this boot, filled in
+   * before `backend.create()` so a backend that routes links through the
+   * host (msb) can open exactly these ports in the SAME argv that boots the
+   * sandbox. `undefined`/absent means none — every current producer sets it
+   * explicitly, the same convention `mounts`/`aliases` follow with an empty
+   * array rather than leaving it out; absent only ever shows up on a
+   * hand-built spec that predates this field. docker ignores it — its
+   * native bridge network already carries UDP with no per-link declaration.
+   * Per-run wiring, never identity: never written to the named-checkpoint
+   * registry, never part of the reuse identity hash, never added to the
+   * pinned diagnostics report format.
+   */
+  readonly hostUdpEgressPorts?: readonly number[];
 }
 
 /**

@@ -349,6 +349,60 @@ if (cmd === "run") {
     process.stdout.write("/usr/bin/nc\n");
     process.exit(0);
   }
+  if (rest[0] === "sh" && rest[1] === "-c" && typeof rest[2] === "string" && rest[2].includes("nc --help")) {
+    // network-links.ts's udpForwarderProbeScript — MsbCliBackend.installNetworkLinks's
+    // UDP-specific capability probe. state.udpProbeFails steers the typed
+    // unsupported-error path without a real busybox underneath.
+    const state = readState();
+    logCall(state, "udpProbe", args);
+    writeState(state);
+    process.exit(state.udpProbeFails ? 1 : 0);
+  }
+  if (rest[0] === "sh" && rest[1] === "-c" && typeof rest[2] === "string" && rest[2].includes(">> /etc/hosts")) {
+    // hostsAliasScript's /etc/hosts install, logged so a test can assert it
+    // ran (and its exact alias set) without a real guest file underneath.
+    const state = readState();
+    logCall(state, "hostsAlias", args);
+    writeState(state);
+    process.exit(0);
+  }
+  if (rest[0] === "sh" && rest[1] === "-c" && typeof rest[2] === "string" && rest[2].includes("rz-udp-link-") && rest[2].includes("nohup")) {
+    // network-links.ts's installUdpForwarderScript — the write+detached-launch
+    // exec. state.udpForwarderInstallFails steers the install-failure path.
+    const state = readState();
+    logCall(state, "udpForwarderInstall", args);
+    writeState(state);
+    process.exit(state.udpForwarderInstallFails ? 1 : 0);
+  }
+  if (rest[0] === "sh" && rest[1] === "-c" && typeof rest[2] === "string" && rest[2].includes("/proc/net/udp")) {
+    // network-links.ts's udpReadinessProbeScript, polled by
+    // MsbCliBackend.installUdpLink. state.udpReadinessNeverReady always
+    // fails it (a readiness-timeout red-proof); state.udpReadinessPollFailuresRemaining
+    // counts down a bounded number of not-yet-bound polls before succeeding.
+    const state = readState();
+    logCall(state, "udpReadinessPoll", args);
+    const remaining = state.udpReadinessPollFailuresRemaining ?? 0;
+    if (state.udpReadinessNeverReady || remaining > 0) {
+      if (!state.udpReadinessNeverReady) {
+        state.udpReadinessPollFailuresRemaining = remaining - 1;
+      }
+      writeState(state);
+      process.exit(1);
+    }
+    writeState(state);
+    process.exit(0);
+  }
+  if (rest[0] === "sh" && rest[1] === "-c" && typeof rest[2] === "string" && rest[2].startsWith("tail -c")) {
+    // The readiness-timeout error's own forwarder-log-tail fetch — a fixed,
+    // recognizable body so a test can assert it's actually threaded into the
+    // thrown error message. Logged like the other UDP-link execs so a test
+    // can also assert its argv, not just its output.
+    const state = readState();
+    logCall(state, "udpForwarderLogTail", args);
+    writeState(state);
+    process.stdout.write("fake forwarder log tail\n");
+    process.exit(0);
+  }
   if (rest[0] === "sh" && rest[1] === "-c" && typeof rest[2] === "string" && rest[2].includes("rightsize:capture-workload-cmdline")) {
     // MsbCliBackend.captureGuestWorkloadCmdline's own guest script — steered
     // entirely by state.cmdlineCaptureArgv/state.cmdlineCaptureFails so a
