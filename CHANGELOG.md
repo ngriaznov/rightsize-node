@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.12] - 2026-09-24
+
 ### Added
 
 - **UDP network links on microsandbox.** A container on a `Network` can now
