@@ -64,7 +64,7 @@ on Windows.
 ## `backend-msb` deep-dive
 
 **Provisioning.** On first use, if no runtime is cached (and `MSB_PATH` isn't
-set), rightsize downloads a pinned `msb` release (currently `0.6.8`) plus its
+set), rightsize downloads a pinned `msb` release (currently `0.7.1`) plus its
 `libkrunfw` companion library from GitHub releases, matched to your
 OS/architecture. Every asset is SHA-256-verified against the release's
 `checksums.sha256` before anything trusts it. Installation is atomic and

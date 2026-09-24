@@ -162,8 +162,8 @@ backend-specific rather than behavioral divergences:
 - **`followOutput` delivers the same ordered, no-duplicate log stream on
   both backends**, but on microsandbox the final tail can arrive shortly
   after the sandbox reports stopped, rather than exactly at stream EOF
-  (`msb logs -f` doesn't close on sandbox stop in 0.6.8, so the backend
-  replays the not-yet-delivered tail once stop is confirmed).
+  (`msb logs -f` doesn't close on sandbox stop, so the backend replays the
+  not-yet-delivered tail once stop is confirmed).
 
 ## How it works
 
@@ -298,8 +298,10 @@ npm run docs:build                                          # static docs site
 npm run docs:verify                                         # typechecks every doc/README sample
 ```
 
-CI runs the matrix on Linux (KVM), macOS (Apple Silicon), and a Docker-only
-job, both Node and Bun.
+CI runs the matrix on Linux (KVM), Windows, and a Docker-only job, both
+Node and Bun. macOS support is verified on real Apple Silicon hardware
+outside CI — GitHub's hosted Apple Silicon runners can't do nested
+virtualization, so msb can't boot there.
 
 See [`CONTRIBUTING.md`](https://github.com/ngriaznov/rightsize-node/blob/main/.github/CONTRIBUTING.md)
 for what each `tsconfig*.json` is for, the full npm script reference, and

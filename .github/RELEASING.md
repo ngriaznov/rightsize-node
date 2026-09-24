@@ -37,8 +37,9 @@ of the flow.
    `prepublishOnly` rebuilds `dist/` and runs typecheck + the node unit suite
    inside the workflow, so a stale or broken build cannot ship, and
    `--provenance` attaches a signed attestation linking the tarball to the
-   repository and run. Unscoped packages default to public — no `--access`
-   flag needed.
+   repository and run. The publish step passes `--access public` alongside
+   `--provenance`: npm requires it for a package's first publish under
+   provenance.
 6. Tag and push:
 
    ```sh
