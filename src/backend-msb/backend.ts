@@ -516,8 +516,11 @@ export interface MsbCliBackendOptions {
 
 /**
  * The attached-mode CLI driver: every sandbox this backend starts runs as a
- * held child process (`msb run`, no `-d`) because detached mode never
- * executes the image's own ENTRYPOINT/CMD — only attached mode does.
+ * held child process (`msb run`, no `-d`). Detached mode (`msb run -d`) runs
+ * the image's own ENTRYPOINT/CMD too, so this isn't about getting the
+ * workload to start — it's supervision: the held child gives this backend
+ * child-exit-based death detection and a place to capture pre-Running boot
+ * diagnostics, neither of which a detached boot provides on its own.
  * Readiness is never inferred from that child's own output; it comes from
  * polling `msb ls --format json` until the name shows `"Running"`. The
  * attached child's stdout/stderr carries msb's own boot diagnostics and is
@@ -2047,10 +2050,10 @@ export class MsbCliBackend implements SandboxBackend {
   /**
    * `msb snapshot save <ref> <destFile>` — writes the `.tar.zst` artifact
    * `Checkpoints.exportTo` bundles into its own archive container. Never
-   * `--with-image` (see the checkpoints guide's own note on why: its import
-   * fails an integrity check in 0.6.6, so archives never bundle the OCI
-   * image — the destination machine pulls it on the restored container's
-   * first boot).
+   * `--with-image` (see the checkpoints guide's own note: this library
+   * doesn't bundle the OCI image into the archive, so the destination
+   * machine pulls it on the restored container's first boot — upstream
+   * supports bundling it, this library just doesn't use that yet).
    *
    * On Windows, msb 0.6.7 and 0.6.8 fail this call every single time: they
    * finish writing the archive to a staging file beside the destination and
@@ -2194,10 +2197,10 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
-   * `msb logs -f` never exits once the sandbox stops (confirmed against the
-   * real msb binary — it blocks on read forever instead of the documented
-   * clean exit). A watchdog polls `msb ls` in the background; the instant
-   * the sandbox leaves Running it quiesces the stuck follow child FIRST
+   * `msb logs -f` never exits on its own once the sandbox stops (confirmed
+   * against the real msb 0.7.1 binary — it just never exits, instead of the
+   * documented clean exit). A watchdog polls `msb ls` in the background; the
+   * instant the sandbox leaves Running it quiesces the stuck follow child FIRST
    * (kill it, wait for the reader to finish draining whatever was already
    * buffered) so `delivered` reflects everything the live stream will ever
    * produce, THEN does one authoritative non-follow `msb logs` fetch and
@@ -2428,9 +2431,10 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
-   * Networks are emulated because there is no bridge/subnet the current
-   * msb exposes on macOS — the only data path into a running sandbox is the
-   * exec channel, and TCP and UDP links take DIFFERENT routes through it.
+   * Networks are emulated because msb gives sandboxes no network shared with
+   * each other, and TCP and UDP links take DIFFERENT routes: a TCP link is
+   * relayed over the exec channel, a UDP link's in-guest forwarder sends
+   * through the sandbox's host gateway to the target's published port.
    * Validate first (duplicate guest ports, alias charset — both get
    * shell-interpolated below), then probe for `nc` (every link needs it)
    * and, only when a UDP link is present, for the forwarder's stricter

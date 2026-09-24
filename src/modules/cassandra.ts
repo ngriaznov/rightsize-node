@@ -13,16 +13,15 @@ const DEFAULT_IMAGE = "cassandra:latest";
  * No-arg construction floats to `cassandra:latest`, so the version tracks
  * upstream rather than this library's release cycle (verified against
  * `cassandra:5.0.8`, including every fact below — the `GPG_KEYS` override
- * stays unconditional regardless of which version ends up running, since
- * it's a no-op against a build that never baked the problem tab and required
- * against one that does).
+ * stays unconditional regardless of which version ends up running: a
+ * harmless no-op on the pinned msb either way).
  *
- * ### `GPG_KEYS` must be overridden — this is the difference between booting and aborting
+ * ### `GPG_KEYS` is cleared as a guard for older msb releases
  *
  * `cassandra:5.0.8`'s baked-in `GPG_KEYS` build arg contains a literal TAB
- * character, and msb panics on any image whose baked env contains one — 0.6.6
- * and the pinned 0.6.8 alike
- * — before the guest even boots:
+ * character. On older msb releases (0.6.x) that character panicked the VM
+ * builder on any image whose baked env carried one, before the guest even
+ * booted:
  *
  * ```
  * sandbox process exited (signal: 6 (SIGABRT)) before agent relay became available
@@ -34,11 +33,12 @@ const DEFAULT_IMAGE = "cassandra:latest";
  * panicked at msb_krun_vmm-0.1.25/src/builder.rs:1154: ... Err value: InvalidAscii
  * ```
  *
- * `GPG_KEYS` is consumed only at image-build time (verifying the signing
- * keys baked into that layer) — it has no effect on the running container,
- * so overriding it to an empty, tab-free string here is safe and required.
- * Without this override, `start()` never gets far enough to run its own
- * wait strategy at all.
+ * The pinned msb boots this image fine with no override at all. `GPG_KEYS`
+ * is consumed only at image-build time (verifying the signing keys baked
+ * into that layer) — it has no effect on the running container, so
+ * overriding it to an empty, tab-free string here is safe and kept
+ * unconditionally as a guard (for example, for anyone pointing `MSB_PATH`
+ * at an older msb).
  *
  * ### Heap sized down, memory ceiling measured
  *
@@ -56,7 +56,7 @@ export class CassandraContainer extends GenericContainer {
   constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
     super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
     this.withExposedPorts(CQL_PORT)
-      // Required — see the class doc for the exact panic this avoids.
+      // Guard for older msb releases — see the class doc for the exact panic this avoids.
       .withEnv("GPG_KEYS", "")
       .withEnv("MAX_HEAP_SIZE", "512M")
       .withEnv("HEAP_NEWSIZE", "128M")

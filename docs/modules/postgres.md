@@ -50,11 +50,12 @@ await client.end();
   init-time server moments before it's torn down. This module's
   `times: 2` wait is the fix, and the reason `Wait.forLogMessage`'s `times`
   parameter exists at all — see [Wait strategies](/guide/wait-strategies).
-- **A microsandbox-only environment-variable fix, harmless on Docker.** The
-  official `postgres:*-alpine` image bakes an environment variable
-  (`DOCKER_PG_LLVM_DEPS`) containing a literal tab character, which crashes
-  microsandbox's VM builder before the guest ever boots. This module clears
-  that variable by default — invisible on Docker, required on microsandbox.
+- **A guard for older msb releases, harmless everywhere else.** The official
+  `postgres:*-alpine` image bakes an environment variable
+  (`DOCKER_PG_LLVM_DEPS`) containing a literal tab character. On older msb
+  releases (0.6.x) that crashed the VM builder before the guest ever booted;
+  on the pinned msb it boots fine with no override. This module clears the
+  variable by default anyway — invisible on Docker, a harmless no-op on the
+  pinned msb, and a guard for anyone pointing `MSB_PATH` at an older msb.
   Nothing you need to do. The override stays in place under the new
-  Debian-based default too: harmless where the problem tab doesn't exist,
-  required where it does.
+  Debian-based default too, whether or not that build even bakes the tab.

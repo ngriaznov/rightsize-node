@@ -396,12 +396,13 @@ an existing same-name registry entry the same way `checkpoint(name)` does;
 an archive built from an unnamed checkpoint imports as an ephemeral
 `Checkpoint`, same as `checkpoint()` without a name.
 
-**The archive never bundles the OCI image.** On microsandbox, `--with-image`
-fails an integrity check on import in the current release, so the archive
-carries only the snapshot's filesystem — the destination machine pulls the
-base image itself on the restored container's first boot, same as any
-ordinary `start()` against that image. Make sure the image is reachable
-(a local pull, or registry access) wherever you import.
+**The archive never bundles the OCI image.** The archive carries only the
+snapshot's filesystem — the destination machine pulls the base image itself
+on the restored container's first boot, same as any ordinary `start()`
+against that image. Make sure the image is reachable (a local pull, or
+registry access) wherever you import. Bundling the image via microsandbox's
+own `--with-image` is possible upstream; this library doesn't do it yet —
+see the [roadmap](/guide/roadmap#self-contained-archives).
 
 **microsandbox refs point at a new path after import.** `importFrom`'s
 effective ref on microsandbox is the freshly loaded artifact's own absolute

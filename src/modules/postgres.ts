@@ -17,8 +17,8 @@ const DEFAULT_IMAGE = "postgres:latest";
  * `postgres:18-alpine`, including the wait-strategy and `DOCKER_PG_LLVM_DEPS`
  * facts below). `latest` is Debian-based rather than Alpine — functionally
  * equivalent, larger to pull. The `DOCKER_PG_LLVM_DEPS` override stays in
- * place regardless: it's a no-op against a build that never baked the
- * problem tab character, and required against one that does.
+ * place regardless: a harmless no-op on the pinned msb either way, and a
+ * guard for anyone running against an older msb.
  */
 export class PostgresContainer extends GenericContainer {
   private usernameState = "test";
@@ -33,13 +33,15 @@ export class PostgresContainer extends GenericContainer {
       .withEnv("POSTGRES_DB", this.databaseState)
       // The official postgres:*-alpine image bakes DOCKER_PG_LLVM_DEPS into
       // its manifest with a literal tab character in the value (a
-      // package-list built with `\t\t` continuation). msb's krun VMM
-      // builder panics with InvalidAscii on that boot-env value before the
-      // guest ever starts (reproduced with zero rightsize-set env vars —
-      // it's the image, not us). Docker is unaffected. Overriding the var
-      // here wins over the image default in both backends' env-merge order
-      // and is a no-op for the build the image already baked, so it's a
-      // safe, backend-portable fix rather than an msb-only special case.
+      // package-list built with `\t\t` continuation). On older msb releases
+      // (0.6.x) that boot-env value panicked the krun VMM builder with
+      // InvalidAscii before the guest ever started (reproduced with zero
+      // rightsize-set env vars — it's the image, not us); the pinned msb
+      // boots it fine with no override. Docker is unaffected either way.
+      // Overriding the var here wins over the image default in both
+      // backends' env-merge order and is a no-op for the build the image
+      // already baked, so it's a safe, backend-portable guard rather than an
+      // msb-only special case.
       .withEnv("DOCKER_PG_LLVM_DEPS", "")
       // The postgres entrypoint starts the server once to run initdb
       // scripts against it, shuts it down, then starts it again for real —

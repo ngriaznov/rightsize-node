@@ -74,14 +74,17 @@ mere existence is the "install complete" marker. A cross-process file lock
 serializes concurrent installs so parallel test workers provision exactly
 once instead of racing.
 
-**Attached-mode supervision.** microsandbox's detached mode (`msb run -d`)
-does **not** start the image's own ENTRYPOINT — the VM boots with only its
-init process, and the workload inside never launches. rightsize therefore
-runs every sandbox **attached**: each container is a held child process
-supervising its microVM, and the image's ENTRYPOINT/CMD runs exactly as it
-would under Docker. Readiness is "the sandbox name shows `Running` in `msb
-ls`" — not the attached process's own exit code or stdout; workload logs come
-from a separate `msb logs` channel. See [How It Works](/guide/how-it-works).
+**Attached-mode supervision.** rightsize runs every sandbox **attached**
+(`msb run`, no `-d`): each container is a held child process supervising its
+microVM, and the image's ENTRYPOINT/CMD runs exactly as it would under
+Docker. This isn't about getting the workload to start — microsandbox's
+detached mode (`msb run -d`) runs the image's ENTRYPOINT/CMD too — it's
+about supervision: the held child gives rightsize child-exit-based death
+detection and a place to capture pre-Running boot diagnostics, neither of
+which a detached boot provides. Readiness is "the sandbox name shows
+`Running` in `msb ls`" — not the attached process's own exit code or stdout;
+workload logs come from a separate `msb logs` channel. See
+[How It Works](/guide/how-it-works).
 
 ## `backend-docker` deep-dive: why this client is hand-rolled
 

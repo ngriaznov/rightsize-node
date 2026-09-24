@@ -3,9 +3,10 @@ import type { ContainerSpec } from "../core/model.js";
 /**
  * Pure msb CLI argv construction. Every spelling here was checked against the
  * real `msb` binary, not guessed from `--help` text alone. ATTACHED mode (no
- * `-d`) is the whole ballgame for `run()`: `msb run -d` boots the microVM but
- * never runs the image's own ENTRYPOINT/CMD, only attached mode does — see
- * `MsbCliBackend.start` for the supervision this forces. `restore()` is a
+ * `-d`) is the whole ballgame for `run()`: `msb run -d` runs the image's own
+ * ENTRYPOINT/CMD too, so attached mode isn't about starting the workload —
+ * see `MsbCliBackend.start` for the supervision it forces instead.
+ * `restore()` is a
  * different shape entirely — see its own doc and `MsbCliBackend.bootRestoreOnce`'s
  * for why: `msb restore` always detaches and exits once activation is
  * confirmed, well before the sandbox itself finishes booting, and it is
@@ -246,8 +247,9 @@ export const MsbCommands = {
 
   /**
    * `msb snapshot save <ref> <dest>` — writes a `.tar.zst` artifact archive;
-   * deliberately never `--with-image` (its import fails an integrity check
-   * in 0.6.6, see the checkpoints guide). Upstream renamed the subcommand
+   * deliberately never `--with-image` (see the checkpoints guide — this
+   * library doesn't bundle the OCI image into the archive yet, though
+   * upstream supports it). Upstream renamed the subcommand
    * from `export` to `save` for msb 0.7.1 (EMPIRICALLY VERIFIED against a
    * real 0.7.1 binary — `snapshot export` no longer exists at all); `<ref>`
    * and `<dest>` are still plain positionals with the explicit filename

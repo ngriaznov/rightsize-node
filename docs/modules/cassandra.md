@@ -39,18 +39,19 @@ console.log(result.stdout); // contains "hello"
 - **No-arg construction floats to `cassandra:latest`.** Verified against
   `cassandra:5.0.8`, including every fact on this page. The `GPG_KEYS`
   override below stays unconditional under the floating default too — a
-  no-op against a build that never baked the problem tab, required against
-  one that does.
+  harmless no-op on the pinned msb regardless of which build ends up
+  running.
 - **Compatibility check:** the constructor only accepts images whose
   repository is `cassandra` (registry host, tag, and digest stripped). A
   different repository throws `IncompatibleImageError` before any backend
   call; override with
   `DockerImageName.parse(image).asCompatibleSubstituteFor("cassandra")` for a
   verified compatible fork or mirror.
-- **`GPG_KEYS` must be overridden — this is the difference between booting
-  and aborting.** `cassandra:5.0.8`'s baked-in `GPG_KEYS` build arg contains
-  a literal TAB character, and msb panics on any image whose baked env
-  contains one, before the guest even boots:
+- **`GPG_KEYS` is cleared as a guard for older msb releases, not because the
+  pinned msb needs it.** `cassandra:5.0.8`'s baked-in `GPG_KEYS` build arg
+  contains a literal TAB character. On the pinned msb this boots fine with
+  no override. On older msb releases (0.6.x), the same TAB aborted the VM
+  builder before the guest ever came up:
 
   ```
   sandbox process exited (signal: 6 (SIGABRT)) before agent relay became available
@@ -64,7 +65,9 @@ console.log(result.stdout); // contains "hello"
 
   `GPG_KEYS` is consumed only at image-build time (verifying the signing
   keys baked into that layer), so overriding it to an empty, tab-free string
-  has no effect on the running container — this module sets it unconditionally.
+  has no effect on the running container — this module sets it
+  unconditionally as a harmless guard (for example, for anyone pointing
+  `MSB_PATH` at an older msb).
 - **Heap is sized down on purpose.** `MAX_HEAP_SIZE=512M`/`HEAP_NEWSIZE=128M`
   keep the JVM small; `2560` MB is the verified memory ceiling at that heap
   size.

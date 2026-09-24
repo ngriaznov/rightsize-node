@@ -74,9 +74,7 @@ shared bridge network to attach to. rightsize transparently installs:
 1. An `/etc/hosts` entry inside the consuming container's guest, mapping the
    alias to `127.0.0.1`.
 2. For a TCP link: a relay tunneled over the sandbox's `exec --stream`
-   channel — the *only* guest data path available on this msb build (no
-   sandbox→host TCP under any net-rule tried; SSH forwarding was found broken
-   too). The tunnel pumps raw bytes, unbuffered, flush-per-read, in both
+   channel. The tunnel pumps raw bytes, unbuffered, flush-per-read, in both
    directions.
 3. For a UDP link: a host-UDP-egress rule opened on the *consuming*
    container's own boot (one rule per linked port, nothing broader), plus an

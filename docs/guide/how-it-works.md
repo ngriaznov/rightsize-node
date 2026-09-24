@@ -56,20 +56,23 @@ another run's.
 
 ## The msb backend: attached-mode supervision
 
-microsandbox's detached mode (`msb run -d`) boots the microVM but never
-starts the image's own ENTRYPOINT — only attached mode does. The msb backend
-therefore runs every sandbox as a held child process (`msb run`, no `-d`),
-and readiness is inferred from `msb ls --format json` reporting the sandbox
-as `"Running"` — never from the attached process's own stdout or exit code,
+The msb backend runs every sandbox as a held child process (`msb run`, no
+`-d`), not microsandbox's detached mode (`msb run -d`) — both boot the
+image's own ENTRYPOINT/CMD, so this is not about getting the workload to
+start. It's about supervision: the held attached child gives this backend
+child-exit-based death detection and a place to capture pre-Running boot
+diagnostics, neither of which a detached boot provides on its own. Readiness
+is inferred from `msb ls --format json` reporting the sandbox as
+`"Running"` — never from the attached process's own stdout or exit code,
 since that process's output *is* the workload's log stream, which has no
 generic "I am ready" signal this backend could parse. Every child gets a
 closed stdin: `msb exec` (and, empirically, plain `msb run`) blocks
 indefinitely on a stdin that's held open but never closed.
 
-`msb logs -f` never exits once its sandbox stops — it blocks on read
-forever instead of returning cleanly. `followOutput` on this backend
-therefore runs a small watchdog alongside the live log stream: once the
-sandbox leaves `Running`, the watchdog kills the stuck follow process,
+`msb logs -f` never exits on its own once its sandbox stops, instead of
+returning cleanly. `followOutput` on this backend therefore runs a small
+watchdog alongside the live log stream: once the sandbox leaves `Running`,
+the watchdog kills the stuck follow process,
 confirms every line it had already buffered has been delivered, then does
 one authoritative non-streaming `msb logs` fetch and replays only the lines
 the live stream hadn't delivered yet — guarded so that replay can only ever
@@ -79,12 +82,12 @@ happen once, and an explicit `close()` never triggers it (closing means
 ## The msb backend: network links are a real TCP relay, not a shortcut
 
 microVMs are fully isolated from each other, so `Network` on this backend
-installs an `/etc/hosts` alias plus a byte-for-byte TCP relay tunneled over
-the sandbox's `exec --stream` channel — the only guest data path this msb
-build offers. The relay is deliberately unbuffered (a line-reader would hang
-the whole pump waiting for a newline that HTTP responses don't always
-provide) and serves one connection at a time, respawning its in-guest `nc -l`
-listener after each one.
+installs an `/etc/hosts` alias plus, for a TCP link, a byte-for-byte relay
+tunneled over the sandbox's `exec --stream` channel. The relay is
+deliberately unbuffered (a line-reader would hang the whole pump waiting for
+a newline that HTTP responses don't always provide) and serves one
+connection at a time, respawning its in-guest `nc -l` listener after each
+one.
 
 The trickiest part: **the msb port-publish proxy never propagates a target's
 own TCP close back to this relay.** A host client's response never gets a

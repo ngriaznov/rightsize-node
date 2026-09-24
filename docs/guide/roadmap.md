@@ -17,13 +17,11 @@ control the timeline for.
 
 Checkpoint export/import ships (see
 [Moving checkpoints between machines](/guide/checkpoints#moving-checkpoints-between-machines)),
-but the archive never bundles the OCI image — microsandbox's own
-`--with-image` export fails an integrity check on import in the current
-release, so a restored container still needs to pull its base image on
-first boot. Bundling the image (once upstream supports it) would make an
-archive fully offline-restorable, no registry/network access required on
-the importing machine — upstream-dependent, no timeline this library
-controls.
+but the archive never bundles the OCI image, so a restored container still
+needs to pull its base image on first boot. Bundling it via microsandbox's
+own `--with-image` is possible upstream now; this library doesn't do it
+yet. Doing so would make an archive fully offline-restorable, no
+registry/network access required on the importing machine.
 
 ## Module breadth
 
