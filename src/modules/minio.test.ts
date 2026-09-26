@@ -10,9 +10,10 @@ describe("MinIOContainer", () => {
     const minio = new MinIOContainer().withBackend(backend).waitingFor(instantReadyWait());
     await minio.start();
     try {
-      // quay.io/minio/minio, not minio/minio: Docker Hub's minio/minio
-      // repository was removed upstream (see minio.ts's DEFAULT_IMAGE).
-      assert.equal(backend.lastSpec?.image, "quay.io/minio/minio:latest");
+      // pgsty/minio, not minio/minio or quay.io/minio/minio: neither of
+      // MinIO's own repositories still serves an anonymous pull (see
+      // minio.ts's DEFAULT_IMAGE).
+      assert.equal(backend.lastSpec?.image, "pgsty/minio:latest");
       assert.deepEqual(backend.lastSpec?.ports.map((p) => p.guestPort), [9000, 9001]);
       assert.deepEqual(backend.lastSpec?.command, ["server", "/data", "--console-address", ":9001"]);
       const env = new Map(backend.lastSpec?.env ?? []);
@@ -83,6 +84,17 @@ describe("MinIOContainer", () => {
     await minio.start();
     try {
       assert.equal(backend.lastSpec?.image, "quay.io/minio/minio:RELEASE.2025-09-08T00-00-00Z");
+    } finally {
+      await minio.stop();
+    }
+  });
+
+  it("accepts a pgsty/minio image with no asCompatibleSubstituteFor declaration — the module treats it as a compatible substitute for minio/minio on its own", async () => {
+    const backend = new FakeModuleBackend();
+    const minio = new MinIOContainer("pgsty/minio:RELEASE.2026-08-04T00-00-00Z").withBackend(backend).waitingFor(instantReadyWait());
+    await minio.start();
+    try {
+      assert.equal(backend.lastSpec?.image, "pgsty/minio:RELEASE.2026-08-04T00-00-00Z");
     } finally {
       await minio.stop();
     }

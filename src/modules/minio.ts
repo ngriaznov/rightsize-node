@@ -5,15 +5,25 @@ import { DockerImageName } from "../core/docker-image-name.js";
 const API_PORT = 9000;
 const CONSOLE_PORT = 9001;
 const EXPECTED_REPOSITORY = "minio/minio";
-// Docker Hub's `minio/minio` repository has been removed upstream (`docker
-// pull minio/minio` now fails with "repository does not exist") — the
-// default floats to `quay.io/minio/minio:latest`, MinIO's maintained mirror,
-// instead. `requireCompatible` below strips the registry host before
-// comparing against EXPECTED_REPOSITORY, so this is the only line that
-// needed to change: a caller-supplied `minio/minio:<tag>` override (from a
-// mirror that still serves it, or a private registry) and a
-// `quay.io/minio/minio:<tag>` override are both still accepted, unchanged.
-const DEFAULT_IMAGE = "quay.io/minio/minio:latest";
+// MinIO no longer publishes public images: Docker Hub's `minio/minio` was
+// removed, and as of September 2026 `quay.io/minio/minio`, this module's
+// previous default, refuses anonymous pulls (HTTP 401). `pgsty/minio` is
+// Pigsty's community build of MinIO from source, published on Docker Hub
+// for linux/amd64 and linux/arm64 with upstream's image layout (the same
+// entrypoint and env defaults, `mc` bundled).
+const DEFAULT_IMAGE = "pgsty/minio:latest";
+const PGSTY_REPOSITORY = "pgsty/minio";
+
+/**
+ * `pgsty/minio` is this module's own default, so it counts as a substitute
+ * for `EXPECTED_REPOSITORY` without the caller declaring it. Every other
+ * image, including `minio/minio` and `quay.io/minio/minio`, passes through
+ * unchanged for `requireCompatible` to check as usual.
+ */
+function resolveCompatibleImage(image: string | DockerImageName): string | DockerImageName {
+  const name = typeof image === "string" ? DockerImageName.parse(image) : image;
+  return name.repository === PGSTY_REPOSITORY ? name.asCompatibleSubstituteFor(EXPECTED_REPOSITORY) : image;
+}
 
 /**
  * A single-node MinIO container — an S3-compatible object store. Requires
@@ -32,25 +42,28 @@ const DEFAULT_IMAGE = "quay.io/minio/minio:latest";
  * Readiness is a protocol-aware HTTP check against `/minio/health/live` on
  * the API port — verified answering 200 on the very first poll after boot.
  *
- * No-arg construction floats to `quay.io/minio/minio:latest` (Docker Hub's
- * `minio/minio` repository was removed upstream — see `DEFAULT_IMAGE`'s own
- * comment), so the version tracks upstream rather than this library's
- * release cycle (verified against `minio/minio:RELEASE.2025-09-07T16-13-09Z`,
- * before the Docker Hub removal).
+ * No-arg construction floats to `pgsty/minio:latest` (see `DEFAULT_IMAGE`
+ * for why), so the version moves with that image's releases rather than
+ * this library's. `minio/minio` and `quay.io/minio/minio` images are still
+ * accepted. Verified against `minio/minio:RELEASE.2025-09-07T16-13-09Z`;
+ * readiness, auth enforcement, and the `mc` round-trip were verified again
+ * by this module's integration test against
+ * `pgsty/minio:RELEASE.2026-08-04T00-00-00Z` (what `latest` pointed at) on
+ * msb 0.7.3.
  */
 export class MinIOContainer extends GenericContainer {
   private rootUserState = "testuser";
   private rootPasswordState = "testpassword";
 
   constructor(image: string | DockerImageName = DEFAULT_IMAGE) {
-    super(DockerImageName.requireCompatible(image, EXPECTED_REPOSITORY));
+    super(DockerImageName.requireCompatible(resolveCompatibleImage(image), EXPECTED_REPOSITORY));
     this.withExposedPorts(API_PORT, CONSOLE_PORT)
       .withCommand("server", "/data", "--console-address", ":9001")
       .withEnv("MINIO_ROOT_USER", this.rootUserState)
       .withEnv("MINIO_ROOT_PASSWORD", this.rootPasswordState)
       .waitingFor(Wait.forHttp("/minio/health/live").forPort(API_PORT));
-    // No withMemoryLimit override: the round-trip that verified this module
-    // ran at 1024 MB, but whether MinIO actually needs more than msb's
+    // No withMemoryLimit override: the `minio/minio` round-trip that verified
+    // this module ran at 1024 MB, but whether MinIO actually needs more than msb's
     // default microVM sizing was never isolated in that pass — a floor
     // belongs here once that's measured on its own, not assumed from a
     // number that included the whole round-trip's overhead.
