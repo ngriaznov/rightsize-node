@@ -59,6 +59,54 @@ function baseSpec(name: string, overrides: Partial<ContainerSpec> = {}): Contain
   };
 }
 
+/** One invocation the fake msb recorded in its `callLog`. */
+type FakeCall = { cmd: string; args: string[] };
+
+async function readFakeCalls(statePath: string): Promise<FakeCall[]> {
+  const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog?: FakeCall[] };
+  return state.callLog ?? [];
+}
+
+/** The `--name` a recorded `run`/`restore` call targeted. */
+function bootName(call: FakeCall): string | undefined {
+  const idx = call.args.indexOf("--name");
+  return idx === -1 ? undefined : call.args[idx + 1];
+}
+
+/**
+ * Shrinks `bootOnce`'s pause before its agent-relay retry from the real 2s —
+ * the same unsafe-cast seam this suite uses for the checkpoint reboot's own
+ * delay.
+ */
+function shrinkAgentRelayRetryDelay(backend: MsbCliBackend): void {
+  (backend as unknown as { agentRelayRetryDelayMs: number }).agentRelayRetryDelayMs = 5;
+}
+
+/**
+ * Runs `fn` with the reaper ledger live in "sweep" mode (it exercises
+ * `trackSandbox`/`untrackSandbox` without also spawning a real watchdog child
+ * against the fake msb), handing it this process's run id.
+ */
+async function withSweepLedgerRun(backend: MsbCliBackend, fn: (runId: string) => Promise<void>): Promise<void> {
+  const savedReaperEnv = process.env["RIGHTSIZE_REAPER"];
+  process.env["RIGHTSIZE_REAPER"] = "sweep";
+  _resetReaperForTests();
+  try {
+    await ensureReaperInitialized(backend);
+    const runsDirEntries = await fs.readdir(path.join(cacheDir(), "runs"));
+    const jsonFile = runsDirEntries.find((f) => f.endsWith(".json"));
+    assert.ok(jsonFile !== undefined, "expected ensureReaperInitialized to have written a run record");
+    await fn((jsonFile as string).slice(0, -".json".length));
+  } finally {
+    _resetReaperForTests();
+    if (savedReaperEnv === undefined) {
+      delete process.env["RIGHTSIZE_REAPER"];
+    } else {
+      process.env["RIGHTSIZE_REAPER"] = savedReaperEnv;
+    }
+  }
+}
+
 describe("MsbCliBackend against a scripted fake msb binary", () => {
   let statePath: string;
   let backend: MsbCliBackend;
@@ -428,6 +476,408 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.match(thrown.message, /state-database error twice in a row/);
     assert.match(thrown.message, /already exists/, "the error must carry msb's own output");
     await backend.remove(handle);
+  });
+
+  // The agent-relay retry (see isAgentRelayUnavailable): msb's sandbox process
+  // exits cleanly before the guest agent's relay is up and msb leaves the
+  // sandbox behind as a Stopped record. bootOnce removes it (`msb rm -f`),
+  // pauses, and boots the SAME name again, exactly once.
+  it("start retries a run boot once when msb's sandbox process exited before its agent relay came up — rm -f of the failed name, then the same name boots again", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failBootsWithAgentRelay = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const spec = baseSpec("rz-testrun1-relay");
+    const handle = await backend.create(spec);
+    // Default delay on purpose: this one test pins the real 2s pause.
+    const startedAt = Date.now();
+    await backend.start(handle);
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs >= 1900, `expected the retry to wait the real 2s pause first, took ${elapsedMs}ms`);
+
+    assert.equal(handle.id, "rz-testrun1-relay", "a same-name retry must leave the handle's identity untouched");
+    const calls = (await readFakeCalls(statePath)).filter((c) => c.cmd === "run" || c.cmd === "rm");
+    assert.deepEqual(
+      calls.map((c) => c.cmd),
+      ["run", "rm", "run"],
+      "expected the failed run, the removal of its sandbox, then the retried run",
+    );
+    assert.equal(bootName(calls[0] as FakeCall), "rz-testrun1-relay");
+    assert.deepEqual(calls[1]?.args, ["rm", "-f", "rz-testrun1-relay"], "expected `msb rm -f` of the SAME name between the runs");
+    assert.equal(bootName(calls[2] as FakeCall), "rz-testrun1-relay", "expected the retry to boot under the same name");
+
+    const logs = await backend.logs(handle);
+    assert.match(logs, /ready/);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("start retries the Unix wording of the same clean agent-relay exit", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failBootsWithAgentRelay = 1;
+    seeded.agentRelayExitStatus = "exit status: 0";
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const handle = await backend.create(baseSpec("rz-testrun1-relay-unix"));
+    await backend.start(handle);
+
+    const runs = (await readFakeCalls(statePath)).filter((c) => c.cmd === "run");
+    assert.equal(runs.length, 2, "expected the failed run plus exactly one retry");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("start surfaces an actionable error when the agent-relay exit repeats, and never tries a third boot", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failBootsWithAgentRelay = 3; // one more than the two attempts a start may make
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const handle = await backend.create(baseSpec("rz-testrun1-relay-twice"));
+    let thrown: Error | undefined;
+    try {
+      await backend.start(handle);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    if (thrown === undefined) {
+      throw new Error("start must reject after two agent-relay failures");
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    assert.match(thrown.message, /rz-testrun1-relay-twice/, "the error must name the sandbox");
+    assert.match(thrown.message, /agent relay came up on both attempts/);
+    assert.match(thrown.message, /before agent relay became available/, "the error must carry msb's own output");
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      failBootsWithAgentRelay: number;
+      callLog: FakeCall[];
+    };
+    assert.equal(state.callLog.filter((c) => c.cmd === "run").length, 2, "expected exactly two runs, not a third");
+    assert.equal(state.callLog.filter((c) => c.cmd === "rm").length, 1, "expected exactly one rm -f, between the two runs");
+    assert.equal(state.failBootsWithAgentRelay, 1, "the third armed failure must never have been consumed");
+    await backend.remove(handle);
+  });
+
+  // A crash exit with the same message is deterministic (the old tab-in-env
+  // SIGABRT), so retrying it would only repeat it.
+  for (const crashStatus of ["exit code: 0xc0000409", "exit code: 1", "signal: 6 (SIGABRT)"]) {
+    it(`start does not retry the agent-relay message when the exit is a crash (${crashStatus})`, async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      shrinkAgentRelayRetryDelay(backend);
+      const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+      seeded.failBootsWithAgentRelay = 1;
+      seeded.agentRelayExitStatus = crashStatus;
+      await fs.writeFile(statePath, JSON.stringify(seeded));
+
+      const handle = await backend.create(baseSpec("rz-testrun1-relay-crash"));
+      let thrown: Error | undefined;
+      try {
+        await backend.start(handle);
+      } catch (e) {
+        thrown = e as Error;
+      }
+      if (thrown === undefined) {
+        throw new Error("start must reject on a crash exit");
+      }
+      assert.match(thrown.message, /before reaching Running/, "expected the ordinary boot failure, not the relay retry's");
+      assert.ok(!/agent relay came up on both attempts/.test(thrown.message));
+
+      const calls = await readFakeCalls(statePath);
+      assert.equal(calls.filter((c) => c.cmd === "run").length, 1, "expected a single run, no retry");
+      assert.equal(calls.filter((c) => c.cmd === "rm").length, 0, "expected no rm -f of a deterministic failure");
+      await backend.remove(handle);
+    });
+  }
+
+  it("the agent-relay retry also covers the retry attempt of the state-database retry", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRunsWithStateDbError = 1; // first run: state-db error, so bootClassified retries
+    seeded.failBootsWithAgentRelay = 1; // second run: the relay failure, so bootOnce retries it again
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const handle = await backend.create(baseSpec("rz-testrun1-relay-after-db"));
+    await backend.start(handle);
+
+    const calls = (await readFakeCalls(statePath)).filter((c) => c.cmd === "run" || c.cmd === "rm");
+    assert.deepEqual(
+      calls.map((c) => c.cmd),
+      ["run", "run", "rm", "run"],
+      "expected the state-db failure, the relay failure, the removal, then the successful run",
+    );
+    assert.deepEqual(calls[2]?.args, ["rm", "-f", "rz-testrun1-relay-after-db"]);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("the agent-relay retry also covers the retry attempt of the image-cache heal", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRunsWithCacheError = 1;
+    seeded.failBootsWithAgentRelay = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const handle = await backend.create(baseSpec("rz-testrun1-relay-after-heal"));
+    await backend.start(handle);
+
+    const calls = (await readFakeCalls(statePath)).filter((c) => c.cmd === "run" || c.cmd === "rm");
+    assert.deepEqual(
+      calls.map((c) => c.cmd),
+      ["run", "run", "rm", "run"],
+      "expected the cache failure, the relay failure, the removal, then the successful run",
+    );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("the agent-relay retry also covers the retry attempt of the install-lock poll", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRunsWithInstallLock = 1;
+    seeded.failBootsWithAgentRelay = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    const handle = await backend.create(baseSpec("rz-testrun1-relay-after-lock"));
+    await backend.start(handle);
+
+    const calls = (await readFakeCalls(statePath)).filter((c) => c.cmd === "run" || c.cmd === "rm");
+    assert.deepEqual(
+      calls.map((c) => c.cmd),
+      ["run", "run", "rm", "run"],
+      "expected the install-lock refusal, the relay failure, the removal, then the successful run",
+    );
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("a restore whose sandbox process exited before its agent relay came up is retried once under the same name, after rm -f", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    const spec = baseSpec("rz-testrun1-restore-relay", {
+      checkpointRef: "/fake/checkpoints/snap_relay",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failBootsWithAgentRelay = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.start(handle);
+
+    assert.equal(handle.id, "rz-testrun1-restore-relay", "a same-name retry must leave the handle's identity untouched");
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string }>;
+      callLog: FakeCall[];
+    };
+    // The fake refuses a restore under a name that still has a record, as msb
+    // does, so the retry only gets through because `rm -f` cleared it.
+    const calls = state.callLog.filter((c) => c.cmd === "restore" || c.cmd === "rm");
+    assert.deepEqual(
+      calls.map((c) => c.cmd),
+      ["restore", "rm", "restore"],
+      "expected the failed restore, the removal of its sandbox, then the retried restore",
+    );
+    assert.equal(bootName(calls[0] as FakeCall), "rz-testrun1-restore-relay");
+    assert.deepEqual(calls[1]?.args, ["rm", "-f", "rz-testrun1-restore-relay"]);
+    assert.equal(bootName(calls[2] as FakeCall), "rz-testrun1-restore-relay");
+    assert.equal(state.sandboxes["rz-testrun1-restore-relay"]?.status, "Running");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("a restore that hits the agent-relay failure twice ends in the actionable error without a third restore", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    const spec = baseSpec("rz-testrun1-restore-relay-twice", {
+      checkpointRef: "/fake/checkpoints/snap_relay_twice",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failBootsWithAgentRelay = 3;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: Error | undefined;
+    try {
+      await backend.start(handle);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    if (thrown === undefined) {
+      throw new Error("start must reject after two agent-relay failures");
+    }
+    assert.match(thrown.message, /msb restore for sandbox rz-testrun1-restore-relay-twice/);
+    assert.match(thrown.message, /agent relay came up on both attempts/);
+    assert.match(thrown.message, /before agent relay became available/);
+
+    const restores = (await readFakeCalls(statePath)).filter((c) => c.cmd === "restore");
+    assert.equal(restores.length, 2, "expected exactly two restores, not a third");
+    await backend.remove(handle);
+  });
+
+  it("a restore does not retry the agent-relay message when the exit is a crash", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    const spec = baseSpec("rz-testrun1-restore-relay-crash", {
+      checkpointRef: "/fake/checkpoints/snap_relay_crash",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failBootsWithAgentRelay = 1;
+    seeded.agentRelayExitStatus = "exit code: 0xc0000409";
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: Error | undefined;
+    try {
+      await backend.start(handle);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    if (thrown === undefined) {
+      throw new Error("start must reject on a crash exit");
+    }
+    assert.match(thrown.message, /exited \(code 1\)/, "expected the ordinary restore failure");
+    const calls = await readFakeCalls(statePath);
+    assert.equal(calls.filter((c) => c.cmd === "restore").length, 1, "expected a single restore, no retry");
+    assert.equal(calls.filter((c) => c.cmd === "rm").length, 0);
+    await backend.remove(handle);
+  });
+
+  it("the agent-relay retry also covers the retry attempt of the access-denied candidate walk, under that candidate's own name", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    const spec = baseSpec("rz-testrun1-restore-relay-walk", {
+      checkpointRef: "/fake/checkpoints/snap_relay_walk",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+    const originalName = handle.id;
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1; // original name: access-denied, so the walk moves to a fresh name
+    seeded.failBootsWithAgentRelay = 1; // the fresh name: the relay failure
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.start(handle);
+    const freshName = handle.id;
+    assert.ok(freshName !== originalName, "expected the access-denied walk to have minted a fresh name");
+
+    const calls = (await readFakeCalls(statePath)).filter((c) => c.cmd === "restore");
+    assert.deepEqual(
+      calls.map(bootName),
+      [originalName, freshName, freshName],
+      "expected the relay retry to stay on the walk's candidate rather than minting yet another name",
+    );
+    const rmForced = (await readFakeCalls(statePath)).filter((c) => c.cmd === "rm" && c.args[1] === "-f");
+    assert.deepEqual(rmForced.map((c) => c.args[2]), [freshName]);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("createCheckpoint's reboot retries the agent-relay failure under the same fresh name, keeping the ledger entry for it", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    await withSweepLedgerRun(backend, async (runId) => {
+      const spec = baseSpec("rz-testrun1-ckpt-relay", { command: ["sleep", "60"] });
+      const handle = await backend.create(spec);
+      await backend.start(handle);
+      const originalName = handle.id;
+      await trackSandbox(originalName);
+
+      const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+      seeded.failBootsWithAgentRelay = 1;
+      await fs.writeFile(statePath, JSON.stringify(seeded));
+
+      await backend.createCheckpoint(handle, "rz-ckpt-relay1");
+      const freshName = handle.id;
+      assert.ok(freshName !== originalName, "expected the reboot to run under a fresh name");
+
+      const reboots = (await readFakeCalls(statePath)).filter((c) => c.cmd === "restore");
+      assert.deepEqual(reboots.map(bootName), [freshName, freshName], "expected both reboot attempts under one name");
+      const rmForced = (await readFakeCalls(statePath)).filter((c) => c.cmd === "rm" && c.args[1] === "-f");
+      assert.deepEqual(rmForced.map((c) => c.args[2]), [freshName]);
+      assert.deepEqual(
+        await readSandboxNames(cacheDir(), runId),
+        [originalName, freshName],
+        "expected the one fresh name tracked, with no extra name minted for the retry",
+      );
+
+      await backend.stop(handle);
+      await backend.remove(handle);
+    });
+  });
+
+  it("createCheckpoint's reboot untracks its fresh name when the agent-relay failure repeats", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    await withSweepLedgerRun(backend, async (runId) => {
+      const spec = baseSpec("rz-testrun1-ckpt-relay-twice", { command: ["sleep", "60"] });
+      const handle = await backend.create(spec);
+      await backend.start(handle);
+      const originalName = handle.id;
+      await trackSandbox(originalName);
+
+      const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+      seeded.failBootsWithAgentRelay = 2;
+      await fs.writeFile(statePath, JSON.stringify(seeded));
+
+      let thrown: unknown;
+      try {
+        await backend.createCheckpoint(handle, "rz-ckpt-relay-twice1");
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+      assert.match((thrown as Error).message, /agent relay came up on both attempts/);
+      assert.equal(handle.id, originalName, "expected a failed reboot to leave the handle's own identity untouched");
+      assert.deepEqual(await readSandboxNames(cacheDir(), runId), [originalName]);
+
+      await backend.remove(handle);
+    });
   });
 
   it("start classifies a clean fast exit as success when ls reports Stopped and the system log carries the started marker", async () => {
@@ -2586,6 +3036,84 @@ describe("MsbCliBackend's Windows job-free restore broker escalation (POLICY v2)
     assert.equal(restoreCalls.length, 2, "expected the direct first attempt plus exactly one brokered retry");
 
     await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("a brokered restore that hits the agent-relay failure is retried once, brokered again, under the same name after rm -f", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: passthroughBroker(brokerCalls) });
+    forcePlatform(backend, "win32");
+    shrinkAgentRelayRetryDelay(backend);
+
+    const spec = baseSpec("rz-testrun1-broker-relay", {
+      checkpointRef: "/fake/checkpoints/snap_brokerrelay",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+    const originalName = handle.id;
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1; // the direct first attempt: access-denied, which escalates to the broker
+    seeded.failBootsWithAgentRelay = 1; // the first brokered attempt: the relay failure
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    await backend.start(handle);
+    const freshName = handle.id;
+    assert.ok(freshName !== originalName, "expected the access-denied retry to mint a fresh sandbox name");
+
+    assert.equal(brokerCalls.length, 2, "expected the failed brokered attempt plus its brokered retry, never a direct one");
+    const brokeredNames = brokerCalls.map((c) => c.argv[c.argv.indexOf("--name") + 1]);
+    assert.deepEqual(brokeredNames, [freshName, freshName], "expected both brokered attempts under the same fresh name");
+
+    const calls = await readFakeCalls(statePath);
+    assert.deepEqual(
+      calls.filter((c) => c.cmd === "restore").map(bootName),
+      [originalName, freshName, freshName],
+      "expected the direct access-denied attempt, then the failed and retried brokered attempts",
+    );
+    const rmForced = calls.filter((c) => c.cmd === "rm" && c.args[1] === "-f");
+    assert.deepEqual(rmForced.map((c) => c.args[2]), [freshName], "expected `msb rm -f` of the failed brokered attempt's name");
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { sandboxes: Record<string, { status: string }> };
+    assert.equal(state.sandboxes[freshName]?.status, "Running");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("a brokered restore that hits the agent-relay failure twice ends in the actionable error without a third attempt", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: passthroughBroker(brokerCalls) });
+    forcePlatform(backend, "win32");
+    shrinkAgentRelayRetryDelay(backend);
+
+    const spec = baseSpec("rz-testrun1-broker-relay-twice", {
+      checkpointRef: "/fake/checkpoints/snap_brokerrelaytwice",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    seeded.failBootsWithAgentRelay = 3;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: Error | undefined;
+    try {
+      await backend.start(handle);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    if (thrown === undefined) {
+      throw new Error("start must reject after two agent-relay failures");
+    }
+    assert.match(thrown.message, /agent relay came up on both attempts/);
+    assert.equal(brokerCalls.length, 2, "expected exactly two brokered attempts, not a third");
     await backend.remove(handle);
   });
 

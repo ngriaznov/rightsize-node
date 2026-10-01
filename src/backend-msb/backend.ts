@@ -22,6 +22,7 @@ import { invoke, CLOSED_STDIN } from "./invoke.js";
 import { isPortBindConflictOutput } from "./port-conflict.js";
 import { isImageCacheCorruption } from "./image-cache.js";
 import { isMsbStateDbError } from "./state-db.js";
+import { isAgentRelayUnavailable } from "./agent-relay.js";
 import { isAgentEndpointNotReady } from "./agent-endpoint.js";
 import { isSnapshotNotFoundError } from "./snapshot-not-found.js";
 import { isSnapshotAlreadyExistsError, parseImportedArtifactPath } from "./snapshot-import.js";
@@ -155,6 +156,19 @@ class StateDbError extends Error {
 }
 
 /**
+ * The boot failure `bootOnce` retries once — the sandbox process exited
+ * cleanly before msb's agent relay came up (see `isAgentRelayUnavailable`).
+ * Thrown from both `bootRunOnce` and `bootRestoreOnce`, and caught by
+ * `bootOnce` itself, so unlike its siblings above it never reaches
+ * `bootClassified` or any caller of it.
+ */
+class AgentRelayUnavailableError extends Error {
+  constructor(readonly output: string) {
+    super(`msb sandbox process exited before its agent relay came up:\n${output}`);
+  }
+}
+
+/**
  * True if `output` (an `msb run` invocation's combined output) is msb
  * refusing to run anything while its internal install lock is held. Captured
  * verbatim from windows-2025 hosted runners (once in each sibling CI lane),
@@ -232,6 +246,15 @@ class SandboxAlreadyExistsError extends Error {
  * to commit; the retry's own `msb run` startup dwarfs this either way.
  */
 const STATE_DB_RETRY_DELAY_MS = 500;
+
+/**
+ * How long to wait between a boot whose sandbox process exited before its
+ * agent relay came up (see `isAgentRelayUnavailable`) and its one retry. The
+ * failed sandbox is removed (`msb rm -f`) first; the pause just lets msb and
+ * the OS finish tearing the dead process down before the same name boots
+ * again.
+ */
+const AGENT_RELAY_RETRY_DELAY_MS = 2_000;
 
 /**
  * How long the boot path keeps polling while msb's install-operation lock is
@@ -585,6 +608,11 @@ export class MsbCliBackend implements SandboxBackend {
   // red-proof runs in milliseconds rather than the real 5s.
   private udpLinkReadinessPollMs = UDP_LINK_READINESS_POLL_MS;
   private udpLinkReadinessTimeoutMs = UDP_LINK_READINESS_TIMEOUT_MS;
+  // Test-only override seam for bootOnce's pause before its one agent-relay
+  // retry — defaults to the real AGENT_RELAY_RETRY_DELAY_MS constant, reached
+  // the same unsafe-cast way as the seams above so a retry test does not
+  // block for the real 2s.
+  private agentRelayRetryDelayMs = AGENT_RELAY_RETRY_DELAY_MS;
 
   constructor(
     private readonly msbPathPromise: Promise<string>,
@@ -667,17 +695,18 @@ export class MsbCliBackend implements SandboxBackend {
   /**
    * A boot attempt wrapped in every classified-transient retry this backend
    * knows: the install-lock poll, the one-shot state-database retry, and the
-   * one-shot image-cache heal. Both the ordinary `start()` path and the
-   * checkpoint cycle's post-snapshot reboot come through here — a reboot
-   * from a snapshot (now `msb restore ...`, see `bootRestoreOnce`) is
-   * as exposed to msb's transients as any other boot, and skipping the
-   * classification there turned a passing install-lock poll into an
-   * immediate checkpoint failure on a live Windows run. The image-cache heal
-   * targets `handle.spec.image`, which for a restore is the checkpoint ref
-   * GenericContainer.fromCheckpoint() threaded through as the builder's
-   * "image" — never a real OCI reference `msb image remove` can act on
-   * meaningfully; this predates the 0.7.1 migration (the same was true of
-   * `--from-snapshot` boots) and is unchanged here.
+   * one-shot image-cache heal. (The one-shot agent-relay retry sits one level
+   * lower, inside `bootOnce`, so each `bootOnce` call below gets it too.)
+   * Both the ordinary `start()` path and the checkpoint cycle's post-snapshot
+   * reboot come through here — a reboot from a snapshot (now `msb restore
+   * ...`, see `bootRestoreOnce`) is as exposed to msb's transients as any
+   * other boot, and skipping the classification there turned a passing
+   * install-lock poll into an immediate checkpoint failure on a live Windows
+   * run. The image-cache heal targets `handle.spec.image`, which for a
+   * restore is the checkpoint ref GenericContainer.fromCheckpoint() threaded
+   * through as the builder's "image" — never a real OCI reference `msb image
+   * remove` can act on meaningfully; this predates the 0.7.1 migration (the
+   * same was true of `--from-snapshot` boots) and is unchanged here.
    *
    * `retryAccessDenied` (default `true`) gates ONLY the
    * `RestoreAccessDeniedError` branch below — every other classified retry
@@ -806,6 +835,56 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
+   * One boot, with its one agent-relay retry. Every caller that boots a
+   * sandbox goes through here: `bootClassified`'s first attempt and each of
+   * its own retries (install-lock poll, state-database, image-cache heal), and
+   * through it the ordinary `start()` path, the reuse boot, direct and
+   * brokered restores, and the checkpoint reboot's fresh-name loops
+   * (`retryRestoreAfterAccessDenied`, `rebootUnderFreshName`).
+   *
+   * When an attempt's sandbox process exits cleanly before msb's agent relay
+   * comes up (see `isAgentRelayUnavailable`) this removes the failed sandbox
+   * (`msb rm -f <name>`, result ignored — msb leaves the record behind as
+   * Stopped, and a plain same-name `run` would restart that persisted config
+   * while a same-name `restore` is refused as "already exists"), waits
+   * `AGENT_RELAY_RETRY_DELAY_MS`, and boots again with the SAME name, spec and
+   * `restoreLaunchMode`. Exactly once: a second relay failure throws a
+   * `BackendError` carrying that attempt's output, and any other error from
+   * either attempt propagates untouched for the caller's own policy. The name
+   * never changes, so the reaper ledger, `handles` and `startedNames` need no
+   * adjustment — a failed attempt registers nothing in the last two.
+   */
+  private async bootOnce(
+    msbPath: string,
+    handle: SandboxHandle,
+    state: HandleState,
+    restoreLaunchMode: RestoreLaunchMode = "direct",
+  ): Promise<void> {
+    try {
+      await this.bootAttempt(msbPath, handle, state, restoreLaunchMode);
+      return;
+    } catch (first) {
+      if (!(first instanceof AgentRelayUnavailableError)) {
+        throw first;
+      }
+    }
+    await invoke(msbPath, MsbCommands.rmForce(handle.id), STOP_TIMEOUT_MS).catch(() => {});
+    await sleep(this.agentRelayRetryDelayMs);
+    try {
+      await this.bootAttempt(msbPath, handle, state, restoreLaunchMode);
+    } catch (second) {
+      if (!(second instanceof AgentRelayUnavailableError)) {
+        throw second;
+      }
+      throw new BackendError(
+        `msb ${handle.spec.checkpointRef !== undefined ? "restore" : "run"} for sandbox ${handle.id}: msb's ` +
+          `sandbox process exited before its agent relay came up on both attempts (the retry ran after ` +
+          `'msb rm -f' of the failed sandbox and a short pause).\nlast attempt:\n${second.output}`,
+      );
+    }
+  }
+
+  /**
    * One boot attempt, dispatched by shape: an ordinary spec (no
    * `checkpointRef`) drives `run()`'s ATTACHED supervision model
    * (`bootRunOnce`); a checkpoint-restore spec drives `msb restore`'s
@@ -816,11 +895,11 @@ export class MsbCliBackend implements SandboxBackend {
    * (irrelevant to `bootRunOnce`'s own ordinary `run` path, which never
    * brokers — see `RestoreLaunchMode`'s own doc).
    */
-  private async bootOnce(
+  private async bootAttempt(
     msbPath: string,
     handle: SandboxHandle,
     state: HandleState,
-    restoreLaunchMode: RestoreLaunchMode = "direct",
+    restoreLaunchMode: RestoreLaunchMode,
   ): Promise<void> {
     state.logTail = [];
     state.attachedExited = false;
@@ -847,7 +926,9 @@ export class MsbCliBackend implements SandboxBackend {
    * own doc). An early exit is classified from the child's combined output:
    * the image-cache-corruption signature throws `ImageCacheCorruptionError`
    * (the one failure `start()` heals and retries), a host-port bind conflict
-   * throws `PortBindConflictError`, and otherwise — if the exit code was 0 —
+   * throws `PortBindConflictError`, a sandbox process that exited before its
+   * agent relay came up throws `AgentRelayUnavailableError` (retried once by
+   * `bootOnce`), and otherwise — if the exit code was 0 —
    * `isCompletedFastExit` gets a chance to reclassify the exit as a workload
    * that ran to completion before this poll loop could ever observe Running
    * (msb 0.6.16's convergent-lifecycle rework; see that method's own doc);
@@ -888,6 +969,9 @@ export class MsbCliBackend implements SandboxBackend {
         }
         if (isPortBindConflictOutput(output)) {
           throw new PortBindConflictError(`msb run for sandbox ${handle.id} could not bind a host port: ${output}`);
+        }
+        if (isAgentRelayUnavailable(output)) {
+          throw new AgentRelayUnavailableError(output);
         }
         if (exited.code === 0 && (await this.isCompletedFastExit(msbPath, handle.id))) {
           // The workload ran to completion before this poll loop ever
@@ -951,9 +1035,9 @@ export class MsbCliBackend implements SandboxBackend {
    *      "this could be a slow cold operation" uncertainty a pull is.
    *      Classified from the combined output the same way any boot's early
    *      exit is (install-lock, state-db, image-cache-corruption,
-   *      port-bind-conflict — see `bootClassified`'s own doc on why a
-   *      restore boot needs the identical classification an ordinary one
-   *      gets) — a nonzero, unclassified exit throws an ordinary
+   *      port-bind-conflict, agent-relay — see `bootClassified`'s own doc on
+   *      why a restore boot needs the identical classification an ordinary
+   *      one gets) — a nonzero, unclassified exit throws an ordinary
    *      `BackendError` carrying the output, same shape as `bootRunOnce`'s.
    *   2. Once it exits 0, poll `msb ls` for the sandbox to reach Running —
    *      the same `READINESS_POLL_MS` cadence and a fresh instance of the
@@ -1044,6 +1128,9 @@ export class MsbCliBackend implements SandboxBackend {
       }
       if (isSandboxAlreadyExistsFailure(output)) {
         throw new SandboxAlreadyExistsError(output);
+      }
+      if (isAgentRelayUnavailable(output)) {
+        throw new AgentRelayUnavailableError(output);
       }
       if (exitCode !== 0) {
         throw new BackendError(

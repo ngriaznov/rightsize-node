@@ -348,6 +348,16 @@ export const MsbCommands = {
     return ["rm", name];
   },
 
+  /**
+   * `msb rm -f <name>` — removes the sandbox even from a state a plain `rm`
+   * refuses (a row msb left stuck in Starting). The boot path's agent-relay
+   * retry uses it on the sandbox record a failed boot leaves behind (see
+   * `isAgentRelayUnavailable`); every other caller keeps the plain `rm`.
+   */
+  rmForce(name: string): string[] {
+    return ["rm", "-f", name];
+  },
+
   ls(): string[] {
     // No `--json` flag exists on `ls` — that spelling belongs to `logs`.
     return ["ls", "--format", "json"];

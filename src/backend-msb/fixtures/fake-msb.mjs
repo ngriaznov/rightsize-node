@@ -62,6 +62,36 @@ function maybeFailBoot(state) {
     process.exit(1);
   }
 }
+// The agent-relay boot failure (see isAgentRelayUnavailable): msb giving up
+// because the sandbox process had already exited before its agent relay came
+// up, exit 1 with the three-line styled error. `agentRelayExitStatus` swaps
+// the parenthesised exit status, so a test can also drive the crash variants
+// ("exit code: 0xc0000409", "signal: 6 (SIGABRT)") and the Unix "exit status:
+// 0" wording; the default is the clean-exit transient. Like the real failure,
+// it leaves the sandbox behind as a STOPPED record under `name` — a same-name
+// restore then collides with the check in the "restore" branch, so only an
+// `rm` in between lets the retry through. Called after every other boot knob
+// of its CLI surface, so a test can arm one of those first and have the
+// relay failure hit the retry attempt that follows it.
+function maybeFailWithAgentRelay(state, name) {
+  if ((state.failBootsWithAgentRelay ?? 0) <= 0) {
+    return;
+  }
+  state.failBootsWithAgentRelay -= 1;
+  const status = state.agentRelayExitStatus ?? "exit code: 0";
+  state.sandboxes[name] = {
+    status: "Stopped",
+    logs: [`booting ${name}`],
+    systemLog: [`boot diagnostics for ${name}`, "sandbox process exited before its agent relay came up"],
+  };
+  writeState(state);
+  process.stderr.write(
+    `error: failed to start "${name}"\n` +
+      `  \u2192 other: sandbox process exited (${status}) before agent relay became available\n` +
+      `  \u2192 run \`msb logs --source system ${name}\` for full diagnostics\n`,
+  );
+  process.exit(1);
+}
 function writeState(state) {
   // A test that never inspects state may spawn this fixture without
   // RIGHTSIZE_FAKE_MSB_STATE — persisting would then target the literal
@@ -92,6 +122,7 @@ if (cmd === "run") {
   // Reproduces the real msb binary's image-cache-corruption/install-lock/
   // state-db failures on demand — see maybeFailBoot's own doc.
   maybeFailBoot(state);
+  maybeFailWithAgentRelay(state, name);
   // Reproduces msb 0.6.16's fast-exit workload shape on demand: the attached
   // `run` process exits 0 immediately, without ever entering the watch loop
   // below (so state never shows "Running" to a poller, mirroring 0.6.16's
@@ -240,6 +271,7 @@ if (cmd === "run") {
     process.stderr.write(`error: sandbox '${name}' already exists\n`);
     process.exit(1);
   }
+  maybeFailWithAgentRelay(state, name);
   if (state.restoreSettlesAsStopped) {
     // Drives MsbCliBackend.bootRestoreOnce's Stopped/disappearance fast-fail
     // path on demand: the sandbox never progresses past a settled "Stopped"
@@ -289,7 +321,8 @@ if (cmd === "run") {
   writeState(state);
   process.exit(0);
 } else if (cmd === "rm") {
-  const name = args[1];
+  // rm [-f] <name> — the plain form and the agent-relay retry's `rm -f`.
+  const name = args.slice(1).find((a) => !a.startsWith("-"));
   const state = readState();
   logCall(state, "rm", args);
   if ((state.failRemovesWithStateDbError ?? 0) > 0) {

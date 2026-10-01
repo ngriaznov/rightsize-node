@@ -267,6 +267,11 @@ describe("MsbCommands", () => {
     assert.deepEqual(MsbCommands.rm("box-1"), ["rm", "box-1"]);
   });
 
+  it("rmForce is `rm -f <name>`, leaving the plain rm without the flag", () => {
+    assert.deepEqual(MsbCommands.rmForce("box-1"), ["rm", "-f", "box-1"]);
+    assert.ok(!MsbCommands.rm("box-1").includes("-f"));
+  });
+
   it("ls: --format json, never --json", () => {
     assert.deepEqual(MsbCommands.ls(), ["ls", "--format", "json"]);
   });
