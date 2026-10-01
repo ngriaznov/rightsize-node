@@ -65,9 +65,12 @@ diagnostics, neither of which a detached boot provides on its own. Readiness
 is inferred from `msb ls --format json` reporting the sandbox as
 `"Running"` — never from the attached process's own stdout or exit code,
 since that process's output *is* the workload's log stream, which has no
-generic "I am ready" signal this backend could parse. Every child gets a
-closed stdin: `msb exec` (and, empirically, plain `msb run`) blocks
-indefinitely on a stdin that's held open but never closed.
+generic "I am ready" signal this backend could parse. Every child except the
+network-link tunnel's gets a closed stdin. `msb exec` forwards a non-terminal
+stdin to the guest command, so a command that reads stdin would wait on input
+nobody sends; a closed stdin gives it EOF at once. (Before msb 0.7.5, msb also
+read host stdin to EOF before starting the command, so a held-open pipe hung
+the call.)
 
 `msb logs -f` never exits on its own once its sandbox stops, instead of
 returning cleanly. `followOutput` on this backend therefore runs a small
@@ -89,14 +92,17 @@ a newline that HTTP responses don't always provide) and serves one
 connection at a time, respawning its in-guest `nc -l` listener after each
 one.
 
-The trickiest part: **the msb port-publish proxy never propagates a target's
-own TCP close back to this relay.** A host client's response never gets a
-natural EOF, even after the real server on the other end has already closed
-its side — so end-of-exchange has to be *inferred*, not observed. The relay
-uses two independent idle-read timeouts on the target socket: a generous one
-(10s) that applies until the first response byte arrives, so a slow-but-real
-cold response is never truncated, and a much shorter one (500ms) once data
-has started flowing, where a gap that short really does mean the single
+The trickiest part: **a keep-alive target never signals the end of its
+response.** The relay pumps the target's response back to the guest and has to
+know when it's over. A target that closes after answering (`Connection: close`,
+HTTP/1.0, busybox `wget`) ends the exchange on EOF at once, since msb 0.7.5
+delivers a published port's guest close to the host client (before 0.7.5 no
+close ever arrived). A persistent HTTP/1.1 server never closes, so for those
+end-of-exchange still has to be *inferred*, not observed. The relay uses two
+independent idle-read timeouts on the target socket: a generous one (10s) that
+applies until the first response byte arrives, so a slow-but-real cold
+response is never truncated, and a much shorter one (500ms) once data has
+started flowing, where a gap that short really does mean the single
 client-speaks-first exchange is over. Collapsing these into a single window
 either truncates slow responses or wedges every idle exchange — they stay
 separate on purpose.

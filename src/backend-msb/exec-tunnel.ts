@@ -7,11 +7,16 @@ import type { NetworkLink } from "../core/backend.js";
 
 const RESPAWN_BACKOFF_MS = 200;
 
-// msb's host-port-publish proxy never propagates the target's own TCP
-// close back to this host-side socket — a plain end/close on the
-// target-to-guest direction therefore never arrives, and a connection would
-// otherwise hold the tunnel open forever after its first exchange. Two
-// separate idle windows, not one: a generous FIRST_BYTE_DEADLINE tolerates a
+// The host side connects to the TARGET sandbox's published port and pumps
+// the target's response back into the guest. A target that closes after its
+// response (`Connection: close`, HTTP/1.0, busybox `wget`) ends the exchange
+// on EOF: since msb 0.7.5 the host-port-publish proxy delivers the target's
+// close to this host-side socket once its buffered data has been delivered
+// (before 0.7.5 no close ever arrived). A keep-alive target, any persistent
+// HTTP/1.1 server, never closes, so a read-timeout heuristic is still the
+// only end-of-exchange signal for it; without one a connection would hold
+// the tunnel open forever after its first exchange. Two separate idle
+// windows, not one: a generous FIRST_BYTE_DEADLINE tolerates a
 // slow-but-real cold response before any target byte has arrived, then the
 // much tighter IDLE_WINDOW takes over once data starts flowing, where a gap
 // that short really does mean this single client-speaks-first exchange is
@@ -54,9 +59,10 @@ function firstByte(stream: NodeJS.ReadableStream): Promise<number | undefined> {
 
 /**
  * One `alias:guestPort` route into a consumer sandbox, bridged over `msb exec
- * --stream`. Single connection at a time; the in-guest `nc -l` listener is
- * respawned after each connection with backoff only when a respawn produced
- * no traffic at all (a busy no-traffic loop must not spin `msb exec` at full
+ * --stream`. Single connection at a time: each in-guest `nc -l` listener
+ * serves one connection and the worker loop serves one exchange before it
+ * respawns the listener, with backoff only when a respawn produced no
+ * traffic at all (a busy no-traffic loop must not spin `msb exec` at full
  * speed; a connection that was actually served respawns immediately).
  * Client-speaks-first protocols only (HTTP is) — the guest's listener must
  * see a byte before this side opens the real target connection.
@@ -124,9 +130,10 @@ export class ExecTunnel {
 
   /**
    * Raw, unbuffered relay from `target` into the guest's stdin, ending the
-   * exchange on an idle-read timeout rather than waiting for a close msb's
-   * proxy will never deliver. `FIRST_BYTE_DEADLINE_MS` applies until the
-   * first byte of the response arrives; from then on the much shorter
+   * exchange on the target's close when it sends one (msb 0.7.5 and later
+   * deliver it), and otherwise on an idle-read timeout, which is the only
+   * signal a keep-alive target gives. `FIRST_BYTE_DEADLINE_MS` applies until
+   * the first byte of the response arrives; from then on the much shorter
    * `IDLE_WINDOW_MS` applies, matching the two-phase contract described at
    * the top of this file.
    */

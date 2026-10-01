@@ -4,13 +4,13 @@ import { BackendError } from "../core/errors.js";
 import type { ExecResult } from "../core/model.js";
 
 /**
- * Every msb child this backend spawns gets a closed/null stdin. `msb exec`
- * (and, empirically, plain `msb run`/`logs`/`ls` too) forwards a held-open
- * stdin pipe straight through and blocks on it hitting EOF — a Node
- * `"pipe"` stdin option never closes on its own, so any child spawned that
- * way hangs forever the instant msb tries to read from it. `"ignore"`
- * signals EOF immediately, which is exactly what every non-interactive
- * invocation here wants.
+ * Every msb child this backend spawns, other than the exec tunnel's, gets a
+ * closed/null stdin. `msb exec` forwards a non-terminal stdin to the guest
+ * command while it runs (before msb 0.7.5 it read host stdin to EOF before
+ * starting the command, so a held-open pipe hung the call). A Node `"pipe"`
+ * stdin option never closes on its own, so a guest command that reads stdin
+ * would wait on input nobody sends. `"ignore"` signals EOF immediately, which
+ * is exactly what every non-interactive invocation here wants.
  */
 export const CLOSED_STDIN = "ignore" as const;
 

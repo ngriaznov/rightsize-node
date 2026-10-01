@@ -90,10 +90,11 @@ This is real emulation, not a shortcut, and it has real limits.
   running* at the moment it joins. A container started before its
   dependency is up won't retroactively gain a link to it.
 - **One connection at a time per TCP tunnel.** The in-guest `nc -l` listener
-  backing a TCP link serves one connection, then gets respawned for the
-  next. Fine for config-fetch-style traffic; not fine for a long-lived
-  cross-container consumer (a Kafka consumer reading continuously from a
-  broker on a sibling microVM, say). A UDP link has no such ceiling — see
+  backing a TCP link serves one connection, and the host-side loop serves one
+  exchange at a time before respawning the listener for the next. Fine for
+  config-fetch-style traffic; not fine for a long-lived cross-container
+  consumer (a Kafka consumer reading continuously from a broker on a sibling
+  microVM, say). A UDP link has no such ceiling — see
   [UDP ports](#udp-ports) below for what it does have instead.
 - **A TCP link's client speaks first.** The tunnel protocol assumes the
   connecting side sends the first bytes — matches HTTP requests and most
@@ -108,9 +109,11 @@ This is real emulation, not a shortcut, and it has real limits.
   suggesting `RIGHTSIZE_BACKEND=docker` as the workaround — this is exactly
   what happens with `FlinkContainer.withTaskManager()` on microsandbox,
   documented on its [module page](/modules/flink).
-- **A TCP target that never propagates TCP close can't be detected by naive
-  EOF.** The msb port-publish proxy doesn't propagate the target socket's
-  close to the tunnel, so end-of-exchange is inferred from an idle window
+- **A keep-alive TCP target never signals the end of its response.** A target
+  that closes after answering (`Connection: close`, HTTP/1.0, busybox `wget`)
+  ends the exchange on EOF at once, since msb 0.7.5 delivers a published
+  port's guest close to the host client. A persistent HTTP/1.1 server never
+  closes, so for those the tunnel infers end-of-exchange from an idle window
   *after* the first byte arrives — not from the whole connection, which would
   wrongly truncate a slow-to-respond target. See
   [How It Works](/guide/how-it-works) for the two-phase timeout this uses.

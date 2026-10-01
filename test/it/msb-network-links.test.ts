@@ -8,7 +8,7 @@ import { UnsupportedByBackendError } from "../../src/core/errors.js";
 
 /**
  * End-to-end reachability of the exec-tunnel network-link emulation
- * (`installNetworkLinks`, `ExecTunnel`) against the real `msb 0.6.8` binary —
+ * (`installNetworkLinks`, `ExecTunnel`) against the real `msb` binary —
  * the one thing `msb-backend.test.ts`'s reject-fast cases can't prove, since
  * those never get past validation into an actual byte-pumped connection.
  *
