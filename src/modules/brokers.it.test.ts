@@ -14,6 +14,34 @@ import { KafkaContainer } from "./kafka.js";
  * for no behavior this library actually implements.
  */
 
+/**
+ * Kafka creates its internal offsets topic on the first group-coordinator
+ * lookup, and until it exists the lookup answers "the group coordinator is
+ * not available". A kafkajs consumer started in that window gives up within a
+ * few hundred milliseconds and stops (seen on the Windows msb lane), so wait
+ * here until the coordinator answers.
+ */
+async function awaitGroupCoordinator(kafka: Kafka, groupId: string): Promise<void> {
+  const admin = kafka.admin();
+  await admin.connect();
+  try {
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      try {
+        await admin.describeGroups([groupId]);
+        return;
+      } catch (err) {
+        if (Date.now() >= deadline) {
+          throw err;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+    }
+  } finally {
+    await admin.disconnect();
+  }
+}
+
 async function roundTrip(bootstrapServers: string): Promise<string | undefined> {
   const brokers = [bootstrapServers.replace(/^PLAINTEXT:\/\//, "")];
   const kafka = new Kafka({ clientId: "rightsize-it", brokers, retry: { retries: 3 } });
@@ -33,6 +61,7 @@ async function roundTrip(bootstrapServers: string): Promise<string | undefined> 
     await producer.disconnect();
   }
 
+  await awaitGroupCoordinator(kafka, "g1");
   const consumer = kafka.consumer({ groupId: "g1" });
   await consumer.connect();
   try {
@@ -43,6 +72,14 @@ async function roundTrip(bootstrapServers: string): Promise<string | undefined> 
       // the message always arrives, just late. This bounds patience, it does
       // not hide a failure: no message in 60s is still a hard timeout.
       const timer = setTimeout(() => reject(new Error("timed out waiting for a message")), 60_000);
+      // A consumer that crashes without restarting will never deliver; fail
+      // now with its error instead of after the timeout.
+      consumer.on(consumer.events.CRASH, ({ payload }) => {
+        if (!payload.restart) {
+          clearTimeout(timer);
+          reject(payload.error);
+        }
+      });
       consumer
         .run({
           eachMessage: async ({ message }) => {
