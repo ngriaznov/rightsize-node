@@ -36,6 +36,8 @@ export {
   NetworkDisabledConflictError,
   TmpfsRootCheckpointError,
   CheckpointWorkloadCommandMissingError,
+  CheckpointHostFileMissingError,
+  CheckpointMissingCopiedFilesError,
 } from "./core/errors.js";
 export { DockerImageName } from "./core/docker-image-name.js";
 export type { PortBinding, PortProtocol, FileMount, ExecResult, ContainerSpec, Checkpoint } from "./core/model.js";

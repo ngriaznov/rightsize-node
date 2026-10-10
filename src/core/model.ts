@@ -27,7 +27,12 @@ export interface PortBinding {
   readonly protocol: PortProtocol;
 }
 
-/** A host path mounted into the guest before boot. `readOnly` is `false` via the builder (`withCopyFileToContainer`). */
+/**
+ * A host path mounted into the guest before boot. `readOnly` is `false` via the builder (`withCopyFileToContainer`).
+ *
+ * The content is not part of a checkpoint on either backend: a mount is a bind of the host
+ * file, so a snapshot or commit holds nothing for it. See `GenericContainer.fromCheckpoint`.
+ */
 export interface FileMount {
   /** Absolute host path to mount from. */
   readonly hostPath: string;
@@ -75,7 +80,7 @@ export interface ContainerSpec {
    * backend binds these, it never allocates its own. See `FreePorts`.
    */
   readonly ports: ReadonlyArray<PortBinding>;
-  /** Host files/directories to copy into the guest before boot. */
+  /** Host files/directories to copy into the guest before boot. Not captured by a checkpoint; see `FileMount`. */
   readonly mounts: ReadonlyArray<FileMount>;
   /** The `Network.id` this container joins, if any. */
   readonly networkId: string | undefined;
@@ -170,6 +175,10 @@ export interface Checkpoint {
   readonly ref: string;
   /** The backend that created this checkpoint. Restoring it under a DIFFERENT active backend throws `CheckpointBackendMismatchError` before any backend call. */
   readonly backend: string;
-  /** The source container's spec (env, command, exposed ports, memory limit — everything needed to boot an equivalent container from `ref`). */
+  /**
+   * The source container's spec (env, command, exposed ports, memory limit — everything needed to boot an equivalent container
+   * from `ref`). Its `mounts` are for reference only: `GenericContainer.fromCheckpoint` does not carry them over, and a
+   * checkpoint holds no content for them, so the container started from it adds each copied file again.
+   */
   readonly spec: ContainerSpec;
 }

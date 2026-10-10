@@ -13,6 +13,8 @@ import {
   NetworkDisabledConflictError,
   TmpfsRootCheckpointError,
   CheckpointWorkloadCommandMissingError,
+  CheckpointHostFileMissingError,
+  CheckpointMissingCopiedFilesError,
 } from "./errors.js";
 import type { ContainerSpec, FileMount } from "./model.js";
 
@@ -189,6 +191,72 @@ describe("CheckpointWorkloadCommandMissingError", () => {
     assert.equal(err.ref, "/cache/checkpoints/rz-source-1/snap_deadbeef");
     assert.match(err.message, /rz-source-1\/snap_deadbeef/);
     assert.match(err.message, /predates workload-cmdline capture/);
+  });
+});
+
+describe("CheckpointHostFileMissingError", () => {
+  it("is an Error with the right name, carries both paths, and says copied files are not part of a checkpoint", () => {
+    const err = new CheckpointHostFileMissingError("/etc/app/a.conf", "/tmp/gone/a.conf");
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "CheckpointHostFileMissingError");
+    assert.equal(err.guestPath, "/etc/app/a.conf");
+    assert.equal(err.hostPath, "/tmp/gone/a.conf");
+    assert.equal(
+      err.message,
+      "checkpoint() can't keep the copied file at /etc/app/a.conf: its host file /tmp/gone/a.conf no longer exists. " +
+        "Copied files are not part of a checkpoint; on microsandbox, checkpoint() mounts them again from their " +
+        "host files when it reboots the container.",
+    );
+  });
+});
+
+describe("CheckpointMissingCopiedFilesError", () => {
+  const output =
+    "error: invalid config: restore requires destination bindings for: mount /etc/app/b.conf; provide a destination mount for each path or explicitly allow missing resources";
+
+  it("is an Error with the right name and carries the sandbox, the ref and msb's output", () => {
+    const err = new CheckpointMissingCopiedFilesError("rz-abc12345-3", "/cache/checkpoints/rz-src-1/snap_deadbeef", output);
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "CheckpointMissingCopiedFilesError");
+    assert.equal(err.sandbox, "rz-abc12345-3");
+    assert.equal(err.ref, "/cache/checkpoints/rz-src-1/snap_deadbeef");
+    assert.equal(err.output, output);
+  });
+
+  it("names the sandbox and the ref, says copied files are not part of a checkpoint, and points at withCopyFileToContainer on the container started from it", () => {
+    const err = new CheckpointMissingCopiedFilesError("rz-abc12345-3", "/cache/checkpoints/rz-src-1/snap_deadbeef", output);
+    assert.match(err.message, /rz-abc12345-3/);
+    assert.match(err.message, /\/cache\/checkpoints\/rz-src-1\/snap_deadbeef/);
+    assert.match(err.message, /copied files are not part of a checkpoint/);
+    assert.match(err.message, /fromCheckpoint\(cp\)\.withCopyFileToContainer\(/);
+    assert.match(err.message, /same guest paths/);
+  });
+
+  it("includes msb's output, which lists the missing guest paths", () => {
+    const err = new CheckpointMissingCopiedFilesError("rz-abc12345-3", "/snap", output);
+    assert.ok(err.message.endsWith(output));
+    assert.match(err.message, /mount \/etc\/app\/b\.conf/);
+  });
+
+  it("claims nothing was removed: a plain fromCheckpoint().start() has no removed sandbox to mention", () => {
+    const err = new CheckpointMissingCopiedFilesError("rz-abc12345-3", "/snap", output);
+    assert.ok(!/was removed|removed after|re-booting/i.test(err.message));
+  });
+
+  it("avoids the phrases start()'s port-conflict retry matches on, so a start() that throws it is never retried", () => {
+    const err = new CheckpointMissingCopiedFilesError("rz-abc12345-3", "/snap", output);
+    const lower = err.message.toLowerCase();
+    assert.ok(!lower.includes("address already in use"));
+    assert.ok(!lower.includes("already allocated"));
+  });
+});
+
+describe("BackendError", () => {
+  it("keeps the error it wraps as its cause, and has none when constructed without one", () => {
+    const inner = new CheckpointHostFileMissingError("/g", "/h");
+    const wrapped = new BackendError("outer", inner);
+    assert.equal(wrapped.cause, inner);
+    assert.equal(new BackendError("plain").cause, undefined);
   });
 });
 

@@ -9,7 +9,12 @@ import { Wait } from "../../src/core/wait.js";
 import { MountableFile } from "../../src/core/mountable-file.js";
 import type { SandboxBackend } from "../../src/core/backend.js";
 import type { Checkpoint } from "../../src/core/model.js";
-import { IsolationRequiredError, TmpfsRootCheckpointError } from "../../src/core/errors.js";
+import {
+  IsolationRequiredError,
+  TmpfsRootCheckpointError,
+  CheckpointMissingCopiedFilesError,
+  CheckpointHostFileMissingError,
+} from "../../src/core/errors.js";
 import { diagnostics } from "../../src/core/diagnostics.js";
 import { MsbCliBackend } from "../../src/backend-msb/backend.js";
 import { ensureInstalled } from "../../src/backend-msb/provisioner.js";
@@ -982,5 +987,126 @@ describe(`backend contract suite (${BACKEND_NAME})`, () => {
 
     await makeBackend().removeCheckpoint(cp.ref);
     assert.equal(fs.existsSync(cp.ref), false, "expected the artifact dir to be removed after removeCheckpoint");
+  });
+
+  // Files copied in at start are bind mounts of host files, so a checkpoint holds no content
+  // for them on either backend. microsandbox's checkpoint() keeps them by mounting them again
+  // from their host files when it reboots the container; a container started from the
+  // checkpoint has to add them again, and on msb 0.7.8 a restore without them is refused
+  // (docker cannot tell and starts the container without the content). The host files live in
+  // a fresh temp dir that is deleted only at the end of the test, and the guest paths sit
+  // under /srv because /tmp is tmpfs in the msb guest.
+  for (const files of [
+    { label: "one copied file", guests: ["/srv/copied.txt"] },
+    { label: "two copied files under one guest directory", guests: ["/srv/a.txt", "/srv/b.txt"] },
+  ]) {
+    itIntegration(`checkpoint() keeps ${files.label}, and fromCheckpoint() needs them added again`, async () => {
+      const hostDir = fs.mkdtempSync(path.join(os.tmpdir(), "rightsize-contract-copied-"));
+      const contents = files.guests.map((guest) => `${path.basename(guest)}-${randomBytes(8).toString("hex")}\n`);
+      const hostFiles = files.guests.map((guest, i) => {
+        const hostFile = path.join(hostDir, path.basename(guest));
+        fs.writeFileSync(hostFile, contents[i] as string);
+        return hostFile;
+      });
+      const withFiles = (container: GenericContainer): GenericContainer => {
+        for (const [i, guest] of files.guests.entries()) {
+          container.withCopyFileToContainer(MountableFile.forHostPath(hostFiles[i] as string), guest);
+        }
+        return container;
+      };
+
+      let cp: Checkpoint | undefined;
+      try {
+        // (1) the container that was checkpointed still reads every file afterwards.
+        const source = withFiles(
+          new GenericContainer("alpine:3.19").withBackend(makeBackend()).withCommand("sh", "-c", "echo ready; sleep 60"),
+        );
+        await source.start();
+        try {
+          cp = await source.checkpoint();
+          for (const [i, guest] of files.guests.entries()) {
+            const read = await source.exec("cat", guest);
+            assert.equal(read.exitCode, 0, `cat ${guest} after checkpoint(): ${read.stderr}`);
+            assert.equal(read.stdout, contents[i], `expected ${guest} to keep its content across checkpoint()`);
+          }
+        } finally {
+          await source.stop();
+        }
+
+        // (2) without adding the files again, msb refuses to restore; docker cannot tell.
+        if (BACKEND_NAME !== "docker") {
+          const bare = GenericContainer.fromCheckpoint(cp)
+            .withBackend(makeBackend())
+            .waitingFor(Wait.forLogMessage("ready").withStartupTimeout(60_000));
+          let thrown: unknown;
+          try {
+            await bare.start();
+          } catch (err) {
+            thrown = err;
+          }
+          assert.ok(
+            thrown instanceof CheckpointMissingCopiedFilesError,
+            `expected CheckpointMissingCopiedFilesError, got: ${String(thrown)}`,
+          );
+          for (const guest of files.guests) {
+            assert.ok((thrown as Error).message.includes(guest), `expected the error to name ${guest}: ${(thrown as Error).message}`);
+          }
+          assert.equal(bare.isRunning, false);
+        }
+
+        // (3) with the files added again, the restored container reads the same content.
+        const restored = withFiles(
+          GenericContainer.fromCheckpoint(cp)
+            .withBackend(makeBackend())
+            .waitingFor(Wait.forLogMessage("ready").withStartupTimeout(60_000)),
+        );
+        await restored.start();
+        try {
+          for (const [i, guest] of files.guests.entries()) {
+            const read = await restored.exec("cat", guest);
+            assert.equal(read.exitCode, 0, `cat ${guest} in the restored container: ${read.stderr}`);
+            assert.equal(read.stdout, contents[i], `expected ${guest} to read back the same content in the restored container`);
+          }
+        } finally {
+          await restored.stop();
+        }
+      } finally {
+        if (cp !== undefined) {
+          await makeBackend().removeCheckpoint(cp.ref).catch(() => {});
+        }
+        fs.rmSync(hostDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  itIntegration("checkpoint() of a container whose copied file lost its host file is refused before anything is stopped (msb)", async () => {
+    if (BACKEND_NAME === "docker") {
+      return;
+    }
+    const hostDir = fs.mkdtempSync(path.join(os.tmpdir(), "rightsize-contract-copied-gone-"));
+    const hostFile = path.join(hostDir, "gone.txt");
+    fs.writeFileSync(hostFile, "gone\n");
+    try {
+      await using c = await new GenericContainer("alpine:3.19")
+        .withBackend(makeBackend())
+        .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/srv/gone.txt")
+        .withCommand("sleep", "60")
+        .start();
+      fs.rmSync(hostFile);
+
+      let thrown: unknown;
+      try {
+        await c.checkpoint();
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof CheckpointHostFileMissingError, `expected CheckpointHostFileMissingError, got: ${String(thrown)}`);
+
+      // Still the same running container: nothing was stopped or removed.
+      const probe = await c.exec("true");
+      assert.equal(probe.exitCode, 0);
+    } finally {
+      fs.rmSync(hostDir, { recursive: true, force: true });
+    }
   });
 });

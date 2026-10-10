@@ -10,7 +10,9 @@ captures the container's current filesystem; `fromCheckpoint()` boots a fresh
 container from that capture. Whatever was on disk when you checkpointed — a
 migrated schema, seeded rows, a config file you wrote via `exec` or
 [`copyFileToContainer`/`copyContentToContainer`](/guide/copy) — is there
-in every restored container. Whatever was only in memory — open connections,
+in every restored container. (Files added at start with
+`withCopyFileToContainer` are not: they are mounts of host files, see
+[Files copied in at start](#files-copied-in-at-start).) Whatever was only in memory — open connections,
 in-flight requests, anything the process hadn't flushed to disk — is not. If you
 have just written files via `exec`, run `sync` in the guest before checkpointing —
 an unflushed write is exactly the kind of state a checkpoint does not capture.
@@ -31,7 +33,7 @@ mechanisms:
 
 | | docker | microsandbox |
 |---|---|---|
-| Mechanism | Commit the running container to a new image | Stops the sandbox, snapshots its disk, and boots it back from that snapshot (`msb restore`) under the same name, ports, mounts, and network setting |
+| Mechanism | Commit the running container to a new image | Stops the sandbox, snapshots its disk, and boots it back from that snapshot (`msb restore`) with the same ports and network setting, and its [copied files](#files-copied-in-at-start) mounted again from their host files |
 | `capabilities.checkpoint` | `true` | `true` |
 | `capabilities.checkpointRestartsWorkload` | `false` — the container is undisturbed | `true` — the workload restarts |
 | Ref format | `rightsize/checkpoint:<12-hex>` (an image tag) | an absolute path, `<cacheDir>/checkpoints/<sourceSandbox>/snap_<hex-digest>` |
@@ -164,16 +166,61 @@ array, so the example above works as shown when `RIGHTSIZE_BACKEND=docker`.
 A restored container is ordinary in every other respect once started: fresh
 host ports (never the source's old ones), normal
 [orphan-reaping ledger](/guide/reaping) tracking, normal `stop()`. Network
-topology, mounts, and `keepAlive` are never carried over from the source
-spec — the captured state already has the filesystem baked in, and (the
-same reasoning as [reuse](/guide/reuse)'s network restriction) topology was
-never part of what a checkpoint captures.
+topology and `keepAlive` are never carried over from the source spec (the
+same reasoning as [reuse](/guide/reuse)'s network restriction: topology was
+never part of what a checkpoint captures). Neither are copied files: add
+them again, see the next section.
 
 `fromCheckpoint()` combined with `.withReuse()` throws
 `ReuseFromCheckpointError` once reuse is actually double opt-in active —
 reuse's identity hash doesn't cover a checkpoint ref, so an adopted sandbox
 could never be verified against the checkpoint it was meant to restore. Drop
 one or the other.
+
+## Files copied in at start
+
+`withCopyFileToContainer` does not copy a file into the guest's disk. It
+mounts a host file at the guest path before boot (docker binds it, microsandbox
+hard-links it into its staging directory), and a checkpoint captures the guest's
+disk, so the content behind a mount is not in it. **Copied files are not part
+of a checkpoint, on either backend.** Files you put into a running container
+with `copyFileToContainer` or `copyContentToContainer` are ordinary guest
+files and are captured.
+
+On microsandbox, `checkpoint()` keeps the copied files of the container you
+checkpoint: it stops the container, snapshots it, and boots it again, and that
+boot mounts each copied file again from its host file. The host files have to
+still exist. If one is gone, `checkpoint()` throws
+`CheckpointHostFileMissingError` before it stops the container or replaces a
+named checkpoint. On docker, `checkpoint()` commits the running container and
+leaves its mounts as they are, so there is nothing to check.
+
+A container started from a checkpoint has to add the files again, at the same
+guest paths, with `withCopyFileToContainer`:
+
+```ts
+import { GenericContainer, MountableFile, Wait } from "rightsize";
+import type { Checkpoint } from "rightsize";
+
+async function restore(checkpoint: Checkpoint): Promise<GenericContainer> {
+  return GenericContainer.fromCheckpoint(checkpoint)
+    .withCopyFileToContainer(MountableFile.forHostPath("./app.conf"), "/etc/app/app.conf")
+    .waitingFor(Wait.forListeningPort())
+    .start();
+}
+```
+
+If you leave one out:
+
+- **microsandbox**: a checkpoint taken by msb 0.7.8, the pinned version,
+  records its copied files and refuses to restore without them. `start()`
+  throws `CheckpointMissingCopiedFilesError`; its message names the sandbox and
+  the checkpoint ref and carries msb's own output, which lists the missing
+  guest paths. Nothing retries it. This holds for named, exported and imported
+  checkpoints as well, because msb refuses at restore time and no registry
+  entry or archive records the paths. A checkpoint taken by an older msb does
+  not record them, and restores with the file empty.
+- **docker**: the path is left empty, and nothing reports it.
 
 ## The seeded-database fixture pattern
 

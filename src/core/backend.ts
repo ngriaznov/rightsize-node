@@ -140,6 +140,12 @@ export interface SandboxBackend {
    * the named-checkpoint registry and on the `Checkpoint` it hands back,
    * never `ref` itself. Never called on a backend whose
    * `capabilities.checkpoint` is `false`.
+   *
+   * Files copied in at start (`handle.spec.mounts`) are bind mounts of host
+   * files and are not part of what either backend captures. Docker leaves
+   * them as they are. Microsandbox boots the sandbox again from its snapshot,
+   * so it mounts each one again from its host file, and throws
+   * `CheckpointHostFileMissingError` before stopping anything if one is gone.
    */
   createCheckpoint(handle: SandboxHandle, ref: string): Promise<string>;
   /**

@@ -382,6 +382,13 @@ describe("MsbCommands", () => {
     }
   });
 
+  it("restore: never emits --allow-missing-resources, with or without mounts — a copied file left out must be refused, not restored empty", () => {
+    for (const mounts of [[], [{ hostPath: "/h", guestPath: "/g", readOnly: false }]]) {
+      const argv = MsbCommands.restore(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345", mounts }));
+      assert.equal(argv.includes("--allow-missing-resources"), false);
+    }
+  });
+
   it("restore: networkDisabled emits --no-net right after --name, before ports", () => {
     const argv = MsbCommands.restore(
       baseSpec({
@@ -460,6 +467,52 @@ describe("MsbCommands", () => {
       "--volume",
       "/h:/g:rw,nodev",
     ]);
+  });
+
+  it("restore: no mounts means no --volume at all", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({ checkpointRef: "rz-ckpt-abcdef012345", ports: [{ hostPort: 1111, guestPort: 22, protocol: "tcp" }] }),
+    );
+    assert.equal(argv.includes("--volume"), false);
+    assert.deepEqual(argv, ["restore", "rz-ckpt-abcdef012345", "--name", "rz-abc12345-1", "-p", "1111:22"]);
+  });
+
+  it("restore: a single read-write mount emits one --volume host:guest:rw,nodev", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        mounts: [{ hostPath: "/tmp/f.conf", guestPath: "/etc/f.conf", readOnly: false }],
+      }),
+    );
+    assert.deepEqual(argv.slice(4), ["--volume", "/tmp/f.conf:/etc/f.conf:rw,nodev"]);
+  });
+
+  it("restore: two mounts under one guest directory both emit, in spec order, ro and rw each keeping its own token", () => {
+    const argv = MsbCommands.restore(
+      baseSpec({
+        checkpointRef: "rz-ckpt-abcdef012345",
+        mounts: [
+          { hostPath: "/host/a.conf", guestPath: "/etc/app/a.conf", readOnly: false },
+          { hostPath: "/host/b.conf", guestPath: "/etc/app/b.conf", readOnly: true },
+        ],
+      }),
+    );
+    assert.deepEqual(argv.slice(4), [
+      "--volume",
+      "/host/a.conf:/etc/app/a.conf:rw,nodev",
+      "--volume",
+      "/host/b.conf:/etc/app/b.conf:ro,nodev",
+    ]);
+  });
+
+  it("restore and run: a Windows-style host path goes through unchanged, and both flags carry the same value for the same mount", () => {
+    const mount = { hostPath: "C:\\Users\\x\\f.txt", guestPath: "/mnt/f.txt", readOnly: false };
+    const restoreArgv = MsbCommands.restore(baseSpec({ checkpointRef: "rz-ckpt-abcdef012345", mounts: [mount] }));
+    const runArgv = MsbCommands.run(baseSpec({ mounts: [mount] }));
+    const restoreValue = restoreArgv[restoreArgv.indexOf("--volume") + 1];
+    const runValue = runArgv[runArgv.indexOf("--mount-file") + 1];
+    assert.equal(restoreValue, "C:\\Users\\x\\f.txt:/mnt/f.txt:rw,nodev");
+    assert.equal(restoreValue, runValue);
   });
 
   it("restore: never emits --mount-file for mounts — the flag is --volume, not run()'s spelling", () => {

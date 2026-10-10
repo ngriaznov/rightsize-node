@@ -49,8 +49,12 @@ export class ContainerLaunchError extends Error {
 
 /** Thrown on subprocess/daemon failures; message carries full stderr/body. */
 export class BackendError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(
+    message: string,
+    /** The underlying error this one wraps, when there is one. */
+    readonly cause?: unknown,
+  ) {
+    super(message, cause !== undefined ? { cause } : undefined);
     this.name = "BackendError";
   }
 }
@@ -407,5 +411,79 @@ export class CheckpointWorkloadCommandMissingError extends Error {
         "container under a build that captures one.",
     );
     this.name = "CheckpointWorkloadCommandMissingError";
+  }
+}
+
+/**
+ * Thrown by `checkpoint()` on microsandbox when a file added with
+ * `withCopyFileToContainer` has lost its host file. Copied files are not part
+ * of a checkpoint: they are start-time mounts of host files, so a snapshot
+ * holds no content for them. microsandbox's `checkpoint()` stops the
+ * container, snapshots it and boots it again, and that boot mounts each copied
+ * file again from its host file, so the host file has to still be there.
+ *
+ * Thrown from two places, both before any destructive step:
+ * `GenericContainer.checkpoint()` itself (ahead of the named-checkpoint replace
+ * semantics' removal of whatever currently sits under the same ref, so a
+ * refused re-checkpoint never replaces a prior checkpoint) and, redundantly,
+ * `MsbCliBackend.createCheckpoint` (ahead of stopping the sandbox) for any
+ * caller that reaches the backend directly. docker never throws it: its
+ * checkpoint is a commit of the running container and does not reboot it.
+ */
+export class CheckpointHostFileMissingError extends Error {
+  constructor(
+    /** The guest path the copied file is mounted at. */
+    readonly guestPath: string,
+    /** The host file that was meant to back it and no longer exists. */
+    readonly hostPath: string,
+  ) {
+    super(
+      `checkpoint() can't keep the copied file at ${guestPath}: its host file ${hostPath} no longer exists. ` +
+        "Copied files are not part of a checkpoint; on microsandbox, checkpoint() mounts them again from their " +
+        "host files when it reboots the container.",
+    );
+    this.name = "CheckpointHostFileMissingError";
+  }
+}
+
+/**
+ * Thrown when microsandbox refuses to restore a checkpoint because the
+ * container it was taken from had files copied in with
+ * `withCopyFileToContainer`. Those files are mounts of host files, not part of
+ * the checkpoint. msb 0.7.8 records them in the snapshots it creates and
+ * refuses a restore that does not supply each one again; a snapshot made by an
+ * older msb restores with the file empty instead. msb's own output lists the
+ * missing guest paths and is carried in `output` and in the message.
+ *
+ * The remedy is to add the same files again, at the same guest paths, on the
+ * container started from the checkpoint:
+ * `GenericContainer.fromCheckpoint(cp).withCopyFileToContainer(...)`. Never
+ * retried: another attempt would be refused the same way.
+ *
+ * Thrown by `start()` on a container built with `fromCheckpoint()`. It could
+ * also come from `checkpoint()`'s own reboot, which supplies the container's
+ * copied files itself, so only a container whose mounts the library could not
+ * see would reach that. docker never throws it: it cannot tell, and starts the
+ * container with the path left empty.
+ */
+export class CheckpointMissingCopiedFilesError extends Error {
+  constructor(
+    /** The sandbox the restore was meant to create. */
+    readonly sandbox: string,
+    /** The checkpoint ref being restored. */
+    readonly ref: string,
+    /** msb's own output for the refused restore; it names the missing guest paths. */
+    readonly output: string,
+  ) {
+    super(
+      `msb refused to restore sandbox '${sandbox}' from checkpoint '${ref}': the container it was taken from ` +
+        "had files copied in with withCopyFileToContainer, and copied files are not part of a checkpoint (they " +
+        "are mounts of host files, so the checkpoint holds no content for them). Add the same files again, at " +
+        "the same guest paths, on the container you start from the checkpoint: " +
+        'GenericContainer.fromCheckpoint(cp).withCopyFileToContainer(MountableFile.forHostPath("<host file>"), ' +
+        '"<guest path>"). msb\'s output names the missing guest paths:\n' +
+        output,
+    );
+    this.name = "CheckpointMissingCopiedFilesError";
   }
 }

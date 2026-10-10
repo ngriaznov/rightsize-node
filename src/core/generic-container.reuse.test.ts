@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { describe, it, assert, beforeEach, afterEach } from "../../test/harness.js";
 import { GenericContainer } from "./generic-container.js";
 import { Network } from "./network.js";
+import { MountableFile } from "./mountable-file.js";
 import { ReuseWithNetworkError, PortBindConflictError } from "./errors.js";
 import type { WaitStrategy } from "./wait.js";
 import type { SandboxBackend, SandboxHandle, NetworkLink, ReaperKillCommand } from "./backend.js";
@@ -873,5 +874,90 @@ describe("GenericContainer — reuse fresh-create port-bind-conflict retry", () 
     assert.ok(thrown instanceof Error, `expected an Error, got: ${String(thrown)}`);
     const createCalls = backend.calls.filter((c) => c === "create").length;
     assert.equal(createCalls, 5, "expected exactly MAX_START_ATTEMPTS create() attempts before giving up");
+  });
+});
+
+// checkpoint() on a container that adopted a reuse sandbox reboots it from the
+// spec the backend's findRunning handed back (microsandbox restores with one
+// --volume per mount of that spec). That spec is the builder's own, so the
+// copied files are in it, and they are part of the reuse identity: a container
+// with different copied files never adopts this sandbox in the first place.
+describe("GenericContainer — reuse adopt path and files copied in at start", () => {
+  let cacheDir: string;
+  let hostDir: string;
+  const savedReuseEnv = process.env["RIGHTSIZE_REUSE"];
+
+  beforeEach(async () => {
+    cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-reuse-copied-test-"));
+    hostDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-reuse-copied-host-test-"));
+    process.env["RIGHTSIZE_CACHE_DIR"] = cacheDir;
+    process.env["RIGHTSIZE_REUSE"] = "true";
+  });
+
+  afterEach(async () => {
+    await fs.rm(cacheDir, { recursive: true, force: true });
+    await fs.rm(hostDir, { recursive: true, force: true });
+    delete process.env["RIGHTSIZE_CACHE_DIR"];
+    if (savedReuseEnv === undefined) {
+      delete process.env["RIGHTSIZE_REUSE"];
+    } else {
+      process.env["RIGHTSIZE_REUSE"] = savedReuseEnv;
+    }
+  });
+
+  function reuseContainer(backend: FakeReuseBackend, hostFile: string): GenericContainer {
+    return new GenericContainer("redis:8.6-alpine")
+      .withBackend(backend)
+      .withReuse()
+      .withExposedPorts(6379)
+      .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/etc/app/app.conf")
+      .waitingFor(instantReady());
+  }
+
+  it("the spec handed to findRunning carries the builder's mounts, so an adopted handle's reboot has them", async () => {
+    const hostFile = path.join(hostDir, "a.conf");
+    await fs.writeFile(hostFile, "a");
+
+    const creator = new FakeReuseBackend();
+    const first = reuseContainer(creator, hostFile);
+    await first.start();
+    const createdName = creator.createdHandles[0]?.spec.name as string;
+    assert.match(createdName, /^rz-reuse-/);
+
+    const seen: ContainerSpec[] = [];
+    const adopter = new FakeReuseBackend({
+      findRunningImpl: async (spec) => {
+        seen.push(spec);
+        return spec.name === createdName ? { id: createdName, spec } : undefined;
+      },
+    });
+    const second = reuseContainer(adopter, hostFile);
+    await second.start();
+
+    assert.ok(!adopter.calls.includes("create"), `expected the second container to adopt, got calls: ${JSON.stringify(adopter.calls)}`);
+    assert.deepEqual(seen[0]?.mounts, [{ hostPath: hostFile, guestPath: "/etc/app/app.conf", readOnly: false }]);
+    await second.stop();
+    await first.stop();
+  });
+
+  it("different copied-file content is a different reuse identity: such a container creates its own sandbox instead of adopting", async () => {
+    const hostFile = path.join(hostDir, "a.conf");
+    await fs.writeFile(hostFile, "a");
+    const creator = new FakeReuseBackend();
+    const first = reuseContainer(creator, hostFile);
+    await first.start();
+    const createdName = creator.createdHandles[0]?.spec.name as string;
+
+    await fs.writeFile(hostFile, "changed");
+    const other = new FakeReuseBackend({
+      findRunningImpl: async (spec) => (spec.name === createdName ? { id: createdName, spec } : undefined),
+    });
+    const second = reuseContainer(other, hostFile);
+    await second.start();
+
+    assert.ok(other.calls.includes("create"), "expected a container with different copied-file content not to adopt");
+    assert.ok(other.createdHandles[0]?.spec.name !== createdName);
+    await second.stop();
+    await first.stop();
   });
 });

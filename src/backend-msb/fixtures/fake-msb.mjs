@@ -25,6 +25,25 @@ function readState() {
 function logCall(state, cmd, args) {
   state.callLog = [...(state.callLog ?? []), { cmd, args }];
 }
+// The guest path of every `flag` (`--mount-file` on run, `--volume` on
+// restore) value in this invocation's argv. A value is
+// `SOURCE:/guest[:OPTIONS]`; the host path of a Windows-style value carries a
+// colon of its own, so the guest path is whatever follows the last colon once
+// a trailing options block (lowercase letters and commas only) is stripped.
+// msb itself forbids ':' in a guest path, so this is unambiguous.
+function guestPathsOf(flag) {
+  const paths = [];
+  for (let i = 0; i < args.length - 1; i += 1) {
+    if (args[i] !== flag) {
+      continue;
+    }
+    const value = args[i + 1];
+    const lastColon = value.lastIndexOf(":");
+    const body = /^[a-z,]+$/.test(value.slice(lastColon + 1)) ? value.slice(0, lastColon) : value;
+    paths.push(body.slice(body.lastIndexOf(":") + 1));
+  }
+  return paths;
+}
 // Shared boot-failure knobs, reproducing msb's own transient failure shapes
 // on demand for whichever CLI surface actually boots a sandbox — `run` and,
 // since msb 0.7.1, `restore` (the checkpoint reboot's own boot command, see
@@ -143,12 +162,12 @@ if (cmd === "run") {
     if (writeMarker) {
       systemLog.push("--- sandbox started ---");
     }
-    state.sandboxes[name] = { status: finalStatus, logs: [`booting ${name}`], systemLog };
+    state.sandboxes[name] = { status: finalStatus, logs: [`booting ${name}`], systemLog, externalMounts: guestPathsOf("--mount-file") };
     writeState(state);
     process.stdout.write(`booting ${name}\n`);
     process.exit(0);
   }
-  state.sandboxes[name] = { status: "Running", logs: [`booting ${name}`, "ready"] };
+  state.sandboxes[name] = { status: "Running", logs: [`booting ${name}`, "ready"], externalMounts: guestPathsOf("--mount-file") };
   writeState(state);
   process.stdout.write(`booting ${name}\nready\n`);
   // Reproduces the real msb binary's actual behavior (confirmed by live-probing
@@ -202,6 +221,28 @@ if (cmd === "run") {
   if (Object.prototype.hasOwnProperty.call(state.sandboxes, name)) {
     writeState(state);
     process.stderr.write(`error: sandbox '${name}' already exists\n`);
+    process.exit(1);
+  }
+  // msb 0.7.8's refusal to restore a snapshot whose source sandbox had files
+  // copied in at start (bind mounts) unless the restore supplies each guest
+  // path again with --volume. Wording captured verbatim from msb 0.7.8; the
+  // separator between several missing paths is a guess (only a single path
+  // has been captured). It never creates a sandbox record, matching a
+  // refusal that happens during validation. --allow-missing-resources would
+  // skip the check and restore the file empty, exactly what this library must
+  // never ask for.
+  const recordedMounts = (state.snapshots ?? {})[ref]?.externalMounts ?? [];
+  const suppliedVolumes = guestPathsOf("--volume");
+  const missingMounts = recordedMounts.filter((guestPath) => !suppliedVolumes.includes(guestPath));
+  if (missingMounts.length > 0 && !args.includes("--allow-missing-resources")) {
+    writeState(state);
+    process.stderr.write(
+      `error: invalid config: restore requires destination bindings for: ${missingMounts.map((g) => `mount ${g}`).join(", ")}; ` +
+        "provide a destination mount for each path or explicitly allow missing resources\n" +
+        "  \u2192 map each path with -v SOURCE:GUEST or --mount-disk SOURCE:GUEST\n" +
+        "  \u2192 or pass --allow-missing-resources to start without them\n" +
+        (state.missingBindingsExtraOutput ?? ""),
+    );
     process.exit(1);
   }
   // Reproduces the real msb binary's image-cache-corruption/install-lock/
@@ -282,6 +323,7 @@ if (cmd === "run") {
       status: "Stopped",
       logs: [`restoring ${name} from ${ref}`],
       systemLog: [`boot diagnostics for ${name}`, "background boot never completed"],
+      externalMounts: suppliedVolumes,
     };
   } else {
     // The realistic shape: not yet Running when this process exits — only
@@ -293,6 +335,7 @@ if (cmd === "run") {
       status: "Starting",
       logs: [`restoring ${name} from ${ref}`],
       restorePollsUntilRunning: state.restoreLsPollsBeforeRunning ?? 2,
+      externalMounts: suppliedVolumes,
     };
   }
   writeState(state);
@@ -552,7 +595,13 @@ if (cmd === "run") {
   const artifactPath = path.join(destDir, from, snapId);
   fs.mkdirSync(artifactPath, { recursive: true });
   fs.writeFileSync(path.join(artifactPath, "snapshot.json"), JSON.stringify({ from, name }));
-  state.snapshots = { ...(state.snapshots ?? {}), [artifactPath]: { from, name } };
+  // Like msb 0.7.8, record the source sandbox's copied files (start-time bind
+  // mounts) in the snapshot: their content is not captured, only the fact
+  // that a restore has to supply each one again. See the "restore" branch.
+  state.snapshots = {
+    ...(state.snapshots ?? {}),
+    [artifactPath]: { from, name, externalMounts: state.sandboxes[from]?.externalMounts ?? [] },
+  };
   writeState(state);
   if ((state.failSnapshotCreateBadOutput ?? 0) > 0) {
     // Reproduces an msb output this backend cannot parse — a last stdout

@@ -23,6 +23,7 @@ import {
 } from "./errors.js";
 import { requireValidCheckpointName } from "./checkpoint/name.js";
 import { checkpointRef } from "./checkpoint/ref.js";
+import { requireCopiedHostFilesExist } from "./checkpoint/copied-files.js";
 import { toCheckpointRegistrySpec, writeCheckpointRegistryAtomic, readCheckpointRegistry } from "./checkpoint/registry.js";
 import type { CheckpointRegistryEntry } from "./checkpoint/registry.js";
 import { Wait } from "./wait.js";
@@ -202,10 +203,17 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * env/command/exposed ports/memory limit default to `cp.spec` — chain
    * further builder calls (a different `waitingFor`, `withBackend`, …)
    * before `start()`, the same as any other container. Never carries over
-   * `cp.spec`'s network/aliases/mounts — the captured state already has the
-   * filesystem baked in, and (as with `withReuse()`'s own network
-   * restriction) network topology is never part of what a checkpoint
-   * captures. `start()` throws `CheckpointBackendMismatchError` before any
+   * `cp.spec`'s network/aliases (as with `withReuse()`'s own network
+   * restriction, network topology is never part of what a checkpoint
+   * captures) or mounts. Files added with `withCopyFileToContainer` are
+   * mounts of host files, not part of a checkpoint on either backend, so
+   * add them again on the returned container, at the same guest paths:
+   * `GenericContainer.fromCheckpoint(cp).withCopyFileToContainer(file,
+   * guestPath)`. On microsandbox a checkpoint taken by msb 0.7.8 refuses to
+   * restore without them, and `start()` throws
+   * `CheckpointMissingCopiedFilesError` (a checkpoint taken by an older msb
+   * restores with the file empty); on docker the path is left empty.
+   * `start()` throws `CheckpointBackendMismatchError` before any
    * backend call if the active backend isn't the one that created `cp`, and
    * `ReuseFromCheckpointError` if this container is also marked
    * `withReuse()` — reuse's identity hash never covers a checkpoint ref. On
@@ -314,6 +322,13 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * The mount is read-write, and it is a view of the host file rather than a copy of it —
    * docker binds the host path directly, microsandbox hard-links it into its staging
    * directory — so a guest write reaches the host file itself.
+   *
+   * A copied file is not part of a checkpoint, on either backend: the snapshot holds no
+   * content for it. `checkpoint()` on microsandbox keeps it by mounting it again from its
+   * host file when it reboots the container (the host file must still exist); a container
+   * started from a checkpoint has to add it again with this method. See
+   * `GenericContainer.fromCheckpoint`. Files put into a running container with
+   * `copyFileToContainer` / `copyContentToContainer` are ordinary guest files, unlike this.
    */
   withCopyFileToContainer(file: MountableFile, guestPath: string): this {
     this.mounts.push({ hostPath: file.path, guestPath, readOnly: false });
@@ -1288,6 +1303,16 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
    * before the rejection propagates, so a revived-but-never-ready workload
    * never sits around as an orphan.
    *
+   * Files added with `withCopyFileToContainer` are mounts of host files, not
+   * part of a checkpoint on either backend. On microsandbox this container
+   * keeps them: the reboot above mounts each one again from its host file, so
+   * the host file has to still exist, and a missing one throws
+   * `CheckpointHostFileMissingError` before the container is stopped or any
+   * prior checkpoint under `name` is replaced. docker's commit leaves the
+   * running container alone, so there is nothing to keep and nothing to check.
+   * A container started from the checkpoint has to add the files again; see
+   * `GenericContainer.fromCheckpoint`.
+   *
    * Checkpoints are never auto-reaped (a committed image or a disk snapshot
    * is not a container) — see the checkpoints guide for the manual cleanup
    * one-liners and the `Checkpoints.remove` cleanup affordance.
@@ -1311,6 +1336,15 @@ export class GenericContainer implements AsyncDisposable, NetworkMember {
     // call never touches anything.
     if (handle.spec.tmpfsRootMb !== undefined && backend.name === "microsandbox") {
       throw new TmpfsRootCheckpointError();
+    }
+    // Same placement, same reason, for the copied files: microsandbox's
+    // checkpoint reboots the container and mounts each copied file again from
+    // its host file, so a host file that has gone missing has to be found
+    // before the source sandbox is stopped and before a prior checkpoint under
+    // `name` is replaced. docker's checkpoint is a commit of the running
+    // container and never reads the host files, so it has nothing to check.
+    if (backend.name === "microsandbox") {
+      await requireCopiedHostFilesExist(handle.spec.mounts);
     }
     const ref = checkpointRef(backend.name, name);
     // Replace semantics: a prior checkpoint under this same name — if any —

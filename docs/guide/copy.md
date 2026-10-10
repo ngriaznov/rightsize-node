@@ -12,6 +12,7 @@ performs before `start()`.
 | Direction | Host → guest only | Both directions |
 | Mechanism | A bind mount (docker) / mounted file (msb) | An actual copy through each backend's own tool (`docker cp` / `msb copy`) |
 | Read-only option | Yes (`FileMount.readOnly`, enforced in-guest on both backends; `false` for mounts made through the builder) | N/A — every copy is a one-time transfer, not a live mount |
+| Captured by `checkpoint()` | No — add it again on the container started from the checkpoint | Yes — it is an ordinary guest file |
 
 The start-time mount is a **view of the host file, not a copy**: the docker
 backend binds the host path directly, the msb backend hard-links it into its
@@ -27,7 +28,9 @@ container is already up — writing a config mid-test, seeding a database
 that's already listening, or pulling a generated artifact or debug dump back
 to the host. To capture a container's entire filesystem rather than moving
 individual files or directories, see
-[Checkpoint / restore](/guide/checkpoints) instead.
+[Checkpoint / restore](/guide/checkpoints) instead; it also covers what
+happens to a `withCopyFileToContainer` mount across a checkpoint, on either
+backend.
 
 ## The three operations
 

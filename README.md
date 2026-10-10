@@ -213,7 +213,9 @@ backend-specific rather than behavioral divergences:
   make it durable and rediscoverable across runs via `Checkpoints.find`/
   `list`/`remove`, registered under the rightsize cache dir. `Checkpoints.exportTo`/
   `importFrom` bundle a checkpoint into a portable archive for moving it
-  between machines and CI caches. See
+  between machines and CI caches. Files added with `withCopyFileToContainer`
+  are mounts of host files and are not part of a checkpoint: add them again
+  on the `fromCheckpoint()` container. See
   [Checkpoint / restore](https://ngriaznov.github.io/rightsize-node/guide/checkpoints).
 - **Runtime file copy.** `copyFileToContainer` / `copyContentToContainer` /
   `copyFileFromContainer` move files and directories into or out of an

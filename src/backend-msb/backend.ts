@@ -9,7 +9,9 @@ import {
   UnsupportedByBackendError,
   TmpfsRootCheckpointError,
   CheckpointWorkloadCommandMissingError,
+  CheckpointMissingCopiedFilesError,
 } from "../core/errors.js";
+import { requireCopiedHostFilesExist } from "../core/checkpoint/copied-files.js";
 import { cacheDir } from "../core/cache-dir.js";
 import { nextSandboxName } from "../core/sandbox-name.js";
 import { trackSandbox, untrackSandbox } from "../core/reaper/init.js";
@@ -42,6 +44,7 @@ import {
 import { ExecTunnel } from "./exec-tunnel.js";
 import { isRestoreAccessDeniedFailure } from "./restore-access-denied.js";
 import { isSandboxAlreadyExistsFailure } from "./sandbox-already-exists.js";
+import { isRestoreMissingBindingsFailure } from "./restore-missing-bindings.js";
 import {
   realRestoreBroker,
   type RestoreBrokerCompleted,
@@ -1091,12 +1094,16 @@ export class MsbCliBackend implements SandboxBackend {
    * (`isImageCacheCorruption`, `isRestoreAccessDeniedFailure`, ...) a direct
    * attempt's always has, since the underlying `msb restore` invocation and
    * its failure signatures are identical either way; only how its stdout/
-   * stderr and exit code got back to this process differs. A broker launch
-   * can also come back `"unconfirmed"` (its own `ecFile` never appeared
-   * within its bound) — see `RestoreBrokerUnconfirmed`'s own doc — which
-   * skips classification entirely and falls straight through to phase 2
-   * exactly as a confirmed exit 0 does, since that phase's own `msb ls` poll
-   * is activation-gated and settles the question on its own regardless.
+   * stderr and exit code got back to this process differs. One of those
+   * signatures is not transient: msb 0.7.8 refusing a restore that leaves out
+   * a file copied in at start (`isRestoreMissingBindingsFailure`) is checked
+   * first and thrown as `CheckpointMissingCopiedFilesError`, which no caller
+   * retries. A broker launch can also come back `"unconfirmed"` (its own
+   * `ecFile` never appeared within its bound) — see
+   * `RestoreBrokerUnconfirmed`'s own doc — which skips classification
+   * entirely and falls straight through to phase 2 exactly as a confirmed
+   * exit 0 does, since that phase's own `msb ls` poll is activation-gated and
+   * settles the question on its own regardless.
    */
   private async bootRestoreOnce(
     msbPath: string,
@@ -1111,6 +1118,15 @@ export class MsbCliBackend implements SandboxBackend {
 
     if (launch.kind === "completed") {
       const { exitCode, output } = launch;
+      // First, so none of the transient classifiers below can claim it, and
+      // thrown as the public error itself rather than an internal one: nothing
+      // retries it (`bootClassified`, `bootOnce` and both fresh-name loops
+      // rethrow what they do not recognise), because the same restore is
+      // refused the same way every time. Direct and brokered attempts both
+      // pass through here, so this is the one place that classifies it.
+      if (isRestoreMissingBindingsFailure(output)) {
+        throw new CheckpointMissingCopiedFilesError(handle.id, handle.spec.checkpointRef ?? "(unknown)", output);
+      }
       if (isImageCacheCorruption(output)) {
         throw new ImageCacheCorruptionError(output);
       }
@@ -1844,8 +1860,9 @@ export class MsbCliBackend implements SandboxBackend {
    * interface doc calls `SandboxHandle` "immutable" — this is the one
    * carve-out, and only this method makes it: a checkpoint reboot is the one
    * operation that changes what sandbox a handle even refers to. `ports`,
-   * `env`, and `memoryLimitMb` are untouched by the rename — same ports, env,
-   * and memory ceiling as before the reboot, only the name differs.
+   * `env`, `mounts`, and `memoryLimitMb` are untouched by the rename — same
+   * ports, env, copied files and memory ceiling as before the reboot, only
+   * the name differs.
    * Upstream's
    * detached-start path (`Sandbox::start_detached`) passes
    * `CREATE_BREAKAWAY_FROM_JOB` on Windows, which `ERROR_ACCESS_DENIED`s
@@ -1912,6 +1929,19 @@ export class MsbCliBackend implements SandboxBackend {
    * Refuses outright, before any of the above, when `handle.spec.tmpfsRootMb`
    * is set: a tmpfs root has nothing on disk for a snapshot to capture.
    *
+   * Files copied in at start (`handle.spec.mounts`) are bind mounts of host
+   * files, so the snapshot holds no content for them. The reboot mounts each
+   * one again from its host file (`MsbCommands.restore` emits one `--volume`
+   * per mount), which is also what msb 0.7.8 requires: it refuses a restore
+   * that leaves one out. The host files therefore have to still exist, and
+   * this method checks that, before any of the above, with
+   * `CheckpointHostFileMissingError` (ahead of the stop, so a missing file
+   * never costs the caller its running sandbox). A reuse sandbox adopted
+   * through `findRunning` carries the builder's own spec, mounts included
+   * (they are part of the reuse identity), so its reboot supplies them like
+   * any other. One adopted by a process whose backend never called `create()`
+   * for it has no handle state and is refused before anything is stopped.
+   *
    * `ref` is the WORKING ref this method is asked to checkpoint under — its
    * basename becomes the snapshot create call's `<name>` argument (still
    * meaningful: it lands in msb's own index, see `MsbCommands.snapshotCreate`'s
@@ -1935,6 +1965,14 @@ export class MsbCliBackend implements SandboxBackend {
       // away a running sandbox for.
       throw new TmpfsRootCheckpointError();
     }
+    // Same reasoning for the copied files: the reboot below mounts each one
+    // again from its host file (`msb restore --volume`, see
+    // `MsbCommands.restore`), so a host file that has gone missing would only
+    // be noticed after the source sandbox is stopped, snapshotted and
+    // removed. `GenericContainer.checkpoint()` runs the same check ahead of
+    // replacing a named checkpoint; this one covers a caller that reaches the
+    // backend directly.
+    await requireCopiedHostFilesExist(handle.spec.mounts);
     const msbPath = await this.msbPath();
     // Captured up front: `handle.id` itself is mutated in place, below, once
     // the reboot under the fresh name has actually succeeded — every
@@ -2028,6 +2066,7 @@ export class MsbCliBackend implements SandboxBackend {
         `sandbox '${originalName}' was removed after a successful checkpoint snapshot, but booting a fresh ` +
           `sandbox back up from that snapshot failed: ${detail} — the sandbox's disk state is preserved in ` +
           `checkpoint '${effectiveRef}', restorable via GenericContainer.fromCheckpoint().`,
+        err,
       );
     }
     const freshName = rebootHandle.id;

@@ -10,7 +10,9 @@ import {
   ReuseFromCheckpointError,
   InvalidCheckpointNameError,
   CheckpointRestoreEnvOverrideError,
+  CheckpointHostFileMissingError,
 } from "./errors.js";
+import { MountableFile } from "./mountable-file.js";
 import type { WaitStrategy, WaitTarget } from "./wait.js";
 import type { BackendCapabilities, SandboxBackend, SandboxHandle, NetworkLink, ReaperKillCommand } from "./backend.js";
 import type { ContainerSpec, ExecResult } from "./model.js";
@@ -1407,5 +1409,183 @@ describe("GenericContainer.checkpoint() — cleanup-registry re-keying", () => {
 
     await container.stop();
     assert.equal(liveContainers().length, 0, "expected stop() to unregister the RENAMED entry, leaving none behind");
+  });
+});
+
+// Files added with withCopyFileToContainer are bind mounts of host files: a
+// checkpoint holds no content for them on either backend. microsandbox's
+// checkpoint() reboots the container and mounts each one again from its host
+// file, so it checks those host files before anything destructive; docker's
+// checkpoint is a commit of the running container and checks nothing.
+describe("GenericContainer — files copied in at start, across checkpoint() and fromCheckpoint()", () => {
+  const msbCaps: BackendCapabilities = { hardwareIsolated: true, checkpoint: true, checkpointRestartsWorkload: true };
+  const dockerCaps: BackendCapabilities = { hardwareIsolated: false, checkpoint: true, checkpointRestartsWorkload: false };
+
+  async function withHostFile(fn: (hostFile: string) => Promise<void>): Promise<void> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-copied-host-test-"));
+    try {
+      const hostFile = path.join(dir, "app.conf");
+      await fs.writeFile(hostFile, "setting=1\n");
+      await fn(hostFile);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("on microsandbox, checkpoint() hands the backend a handle whose spec carries the copied file", async () => {
+    await withHostFile(async (hostFile) => {
+      const backend = new FakeCheckpointBackend("microsandbox", msbCaps);
+      const container = new GenericContainer("alpine:3.19")
+        .withBackend(backend)
+        .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/etc/app/app.conf")
+        .withCommand("sleep", "60")
+        .waitingFor(instantReady());
+      await container.start();
+
+      const cp = await container.checkpoint();
+
+      assert.deepEqual(backend.lastCreatedSpec()?.mounts, [{ hostPath: hostFile, guestPath: "/etc/app/app.conf", readOnly: false }]);
+      assert.ok(backend.calls.some((c) => c.startsWith("createCheckpoint:")));
+      assert.deepEqual(cp.spec.mounts, [{ hostPath: hostFile, guestPath: "/etc/app/app.conf", readOnly: false }]);
+      await container.stop();
+    });
+  });
+
+  it("on microsandbox, a copied file whose host file is gone makes checkpoint() throw before any backend call", async () => {
+    await withHostFile(async (hostFile) => {
+      const backend = new FakeCheckpointBackend("microsandbox", msbCaps);
+      const container = new GenericContainer("alpine:3.19")
+        .withBackend(backend)
+        .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/etc/app/app.conf")
+        .withCommand("sleep", "60")
+        .waitingFor(instantReady());
+      await container.start();
+      await fs.rm(hostFile);
+      backend.calls.length = 0;
+
+      let thrown: unknown;
+      try {
+        await container.checkpoint();
+      } catch (err) {
+        thrown = err;
+      }
+
+      assert.ok(thrown instanceof CheckpointHostFileMissingError, `expected CheckpointHostFileMissingError, got: ${String(thrown)}`);
+      assert.equal((thrown as CheckpointHostFileMissingError).guestPath, "/etc/app/app.conf");
+      assert.equal((thrown as CheckpointHostFileMissingError).hostPath, hostFile);
+      assert.deepEqual(backend.calls, [], "no stop, snapshot, remove or checkpoint call may precede the pre-flight failure");
+      assert.equal(container.isRunning, true, "the container is left running");
+      await container.stop();
+    });
+  });
+
+  it("on microsandbox, a refused re-checkpoint never replaces the existing named checkpoint", async () => {
+    await withTempCacheDirEnv(async (cacheDirPath) => {
+      await withHostFile(async (hostFile) => {
+        const backend = new FakeContentAddressedBackend("microsandbox", msbCaps);
+        const container = new GenericContainer("alpine:3.19")
+          .withBackend(backend)
+          .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/etc/app/app.conf")
+          .withCommand("sleep", "60")
+          .waitingFor(instantReady());
+        await container.start();
+        const first = await container.checkpoint("golden");
+        assert.ok(backend.artifacts.has(first.ref));
+        await fs.rm(hostFile);
+        backend.calls.length = 0;
+
+        await assert.rejects(() => container.checkpoint("golden"));
+
+        assert.deepEqual(backend.calls, [], "the prior artifact must not be removed, and no new checkpoint attempted");
+        assert.ok(backend.artifacts.has(first.ref), "expected the prior checkpoint's artifact to survive");
+        const read = await readCheckpointRegistry(cacheDirPath, "golden");
+        assert.equal(read.kind, "found");
+        if (read.kind === "found") {
+          assert.equal(read.entry.ref, first.ref, "expected the registry entry to still point at the prior checkpoint");
+        }
+        await container.stop();
+      });
+    });
+  });
+
+  it("on docker, a copied file whose host file is gone does not stop checkpoint(): docker's commit never reads it", async () => {
+    await withHostFile(async (hostFile) => {
+      const backend = new FakeCheckpointBackend("docker", dockerCaps);
+      const container = new GenericContainer("alpine:3.19")
+        .withBackend(backend)
+        .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/etc/app/app.conf")
+        .withCommand("sleep", "60")
+        .waitingFor(instantReady());
+      await container.start();
+      await fs.rm(hostFile);
+
+      const cp = await container.checkpoint();
+
+      assert.ok(backend.artifacts.has(cp.ref));
+      await container.stop();
+    });
+  });
+
+  it("fromCheckpoint() does not carry the source's mounts over, and the checkpoint's recorded mounts are not an obstacle to starting", async () => {
+    await withHostFile(async (hostFile) => {
+      const backend = new FakeCheckpointBackend("microsandbox", msbCaps);
+      const source = new GenericContainer("alpine:3.19")
+        .withBackend(backend)
+        .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/etc/app/app.conf")
+        .withCommand("sleep", "60")
+        .waitingFor(instantReady());
+      await source.start();
+      const cp = await source.checkpoint();
+      await source.stop();
+
+      const restored = GenericContainer.fromCheckpoint(cp).withBackend(backend).waitingFor(instantReady());
+      await restored.start();
+
+      assert.deepEqual(backend.lastCreatedSpec()?.mounts, [], "the checkpoint holds no content for the file, so it is the caller's to add again");
+      await restored.stop();
+    });
+  });
+
+  it("fromCheckpoint(cp).withCopyFileToContainer(...) is honoured on microsandbox: it is not an env-style override, and the backend gets the mount", async () => {
+    await withHostFile(async (hostFile) => {
+      const backend = new FakeCheckpointBackend("microsandbox", msbCaps);
+      const source = new GenericContainer("alpine:3.19")
+        .withBackend(backend)
+        .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/etc/app/app.conf")
+        .withCommand("sleep", "60")
+        .waitingFor(instantReady());
+      await source.start();
+      const cp = await source.checkpoint();
+      await source.stop();
+
+      const restored = GenericContainer.fromCheckpoint(cp)
+        .withBackend(backend)
+        .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/etc/app/app.conf")
+        .waitingFor(instantReady());
+      await restored.start();
+
+      assert.deepEqual(backend.lastCreatedSpec()?.mounts, [{ hostPath: hostFile, guestPath: "/etc/app/app.conf", readOnly: false }]);
+      assert.equal(backend.lastCreatedSpec()?.checkpointRef, cp.ref);
+      await restored.stop();
+    });
+  });
+
+  it("fromCheckpoint(cp).withCopyFileToContainer(...) works the same on docker", async () => {
+    await withHostFile(async (hostFile) => {
+      const backend = new FakeCheckpointBackend("docker", dockerCaps);
+      const source = new GenericContainer("alpine:3.19").withBackend(backend).withCommand("sleep", "60").waitingFor(instantReady());
+      await source.start();
+      const cp = await source.checkpoint();
+      await source.stop();
+
+      const restored = GenericContainer.fromCheckpoint(cp)
+        .withBackend(backend)
+        .withCopyFileToContainer(MountableFile.forHostPath(hostFile), "/etc/app/app.conf")
+        .waitingFor(instantReady());
+      await restored.start();
+
+      assert.deepEqual(backend.lastCreatedSpec()?.mounts, [{ hostPath: hostFile, guestPath: "/etc/app/app.conf", readOnly: false }]);
+      await restored.stop();
+    });
   });
 });

@@ -1,4 +1,33 @@
-import type { ContainerSpec } from "../core/model.js";
+import type { ContainerSpec, FileMount } from "../core/model.js";
+
+/**
+ * The `SOURCE:GUEST:OPTIONS` value of one copied file, shared by `run()`'s
+ * `--mount-file` and `restore()`'s `--volume` so the two cannot drift. The
+ * option block is always spelled out, never left to msb's defaults, for two
+ * reasons on top of each other. The access token (`ro`/`rw`) carries
+ * FileMount.readOnly, which msb enforces as a genuine guest-side write block — and it
+ * keeps OUR spec parseable on Windows: msb stages each mount into a temp directory
+ * and canonicalizes it, which there yields the extended-length `\\?\C:\...` form, and
+ * its splitter skips a drive prefix only for a bare drive letter, so a spec with no
+ * option block splits at the drive's colon and rejects the path tail as options.
+ * `nodev` exists because msb then rebuilds an INTERNAL `tag:staged_path[:opts]` spec
+ * for the same mount, carrying over only NON-DEFAULT option tokens — `rw` is its
+ * default and is dropped, which on Windows strips the internal spec's option block
+ * and re-creates the same misparse one layer down (captured: `--mount
+ * "fm_…:\\?\C:\…": expected flag or key=value option`). `nodev` always survives the
+ * carry-over, and for a single-file mount it is meaningless (no device nodes to
+ * block): verified against a real msb 0.6.8 — `rw,nodev` mounts `rw,nodev` and
+ * accepts an in-guest write, `ro,nodev` rejects one with `Read-only file system`.
+ *
+ * `--volume` and `--mount-file` go through the same shared mount-spec parser,
+ * which splits `SOURCE:/guest[:options]` at the colon before the absolute guest
+ * path and skips a Windows drive colon (`find_guest_path_separator` /
+ * `is_windows_drive_separator` in msb's `crates/cli/lib/commands/common.rs`),
+ * so the host path goes in as the OS gives it, with no conversion.
+ */
+function fileMountValue(mount: FileMount): string {
+  return `${mount.hostPath}:${mount.guestPath}:${mount.readOnly ? "ro" : "rw"},nodev`;
+}
 
 /**
  * Pure msb CLI argv construction. Every spelling here was checked against the
@@ -49,23 +78,10 @@ export const MsbCommands = {
     for (const [key, value] of spec.env) {
       argv.push("-e", `${key}=${value}`);
     }
-    // The option block is always spelled out, never left to msb's defaults, for two
-    // reasons on top of each other. The access token (`ro`/`rw`) carries
-    // FileMount.readOnly, which msb enforces as a genuine guest-side write block — and it
-    // keeps OUR spec parseable on Windows: msb stages each mount into a temp directory
-    // and canonicalizes it, which there yields the extended-length `\\?\C:\...` form, and
-    // its splitter skips a drive prefix only for a bare drive letter, so a spec with no
-    // option block splits at the drive's colon and rejects the path tail as options.
-    // `nodev` exists because msb then rebuilds an INTERNAL `tag:staged_path[:opts]` spec
-    // for the same mount, carrying over only NON-DEFAULT option tokens — `rw` is its
-    // default and is dropped, which on Windows strips the internal spec's option block
-    // and re-creates the same misparse one layer down (captured: `--mount
-    // "fm_…:\\?\C:\…": expected flag or key=value option`). `nodev` always survives the
-    // carry-over, and for a single-file mount it is meaningless (no device nodes to
-    // block): verified against a real msb 0.6.8 — `rw,nodev` mounts `rw,nodev` and
-    // accepts an in-guest write, `ro,nodev` rejects one with `Read-only file system`.
+    // The value comes from `fileMountValue`, which also builds restore()'s
+    // `--volume`; see its doc for why the option block is always spelled out.
     for (const mount of spec.mounts) {
-      argv.push("--mount-file", `${mount.hostPath}:${mount.guestPath}:${mount.readOnly ? "ro" : "rw"},nodev`);
+      argv.push("--mount-file", fileMountValue(mount));
     }
     // `checkpointRef` never reaches here: msb 0.7.1 removed `run --from-snapshot`
     // outright (clap rejects it as an unexpected argument now), so a spec that
@@ -81,8 +97,8 @@ export const MsbCommands = {
   },
 
   /**
-   * `msb restore <ref> --name <name> [-m SIZE] [--no-net] [--volume
-   * SOURCE:GUEST:OPTS]... [-p HOST:GUEST]...` — the checkpoint-reboot argv,
+   * `msb restore <ref> --name <name> [-m SIZE] [--no-net] [-p HOST:GUEST]...
+   * [--volume SOURCE:GUEST:OPTS]...` — the checkpoint-reboot argv,
    * replacing the removed `run --from-snapshot` (msb 0.7.1 moved restore to
    * this dedicated subcommand). NEVER emits `--disk-only`: EMPIRICALLY
    * VERIFIED against a real msb 0.7.1 binary, a disk-scope snapshot — the
@@ -108,30 +124,40 @@ export const MsbCommands = {
    * call.
    *
    * Mounts and network are NOT in that category — they thread through here,
-   * mirroring `run()`'s own `--mount-file`/`--net private`. Per msb's own
-   * source (`sdk/rust/lib/sandbox/restore_builder.rs`'s `RestoreBuilder::new`),
-   * every restore starts with `mounts`/`ports`/`vsock` CLEARED and
-   * `restore_resources.require_complete` true — they are the destination's
-   * OWN fresh bindings for this specific restore, not something msb
-   * re-derives from the snapshot, and an un-resupplied captured external
-   * mount is a hard failure, not a silent drop. `createCheckpoint`'s
+   * mirroring `run()`'s own `--mount-file`/`--net private`. A file added with
+   * `.withCopyFileToContainer()` is a start-time bind mount of a host file, so
+   * a snapshot does NOT capture its content. Per msb's own source
+   * (`sdk/rust/lib/sandbox/restore_builder.rs`'s `RestoreBuilder::new`),
+   * every restore starts with `mounts`/`ports`/`vsock` CLEARED: they are the
+   * destination's OWN fresh bindings for this specific restore, not something
+   * msb re-derives from the snapshot. Verified live: a plain restore of such
+   * a snapshot brings the file back EMPTY on msb 0.7.6 and is REFUSED on
+   * 0.7.8 (`restore requires destination bindings for: mount <path>`, see
+   * `isRestoreMissingBindingsFailure`), while `--volume HOST:GUEST` supplies
+   * the file again with its content intact on both. `createCheckpoint`'s
    * stop/snapshot/reboot cycle (see `MsbCliBackend.createCheckpoint`) hands
    * this function `handle.spec` itself — the ORIGINAL sandbox's live
    * `mounts`/`networkDisabled` exactly as the caller set them via
    * `.withCopyFileToContainer()`/`.withNetworkDisabled()`, not anything
    * "carried over from a captured spec" — so they must be re-emitted here or
-   * they silently vanish across the reboot (or, if msb classifies the
-   * now-missing mount as a required external resource, throw instead).
-   * `GenericContainer.fromCheckpoint()` is the unrelated case the checkpoints
-   * guide's "network topology, mounts, and keepAlive are never carried over
-   * from the source spec" actually describes: it never copies
-   * `cp.spec.mounts`/`networkDisabled` onto the new container's own builder
-   * state in the first place (see its own doc), so a `fromCheckpoint()`
-   * container's `spec.mounts` is `[]` and `networkDisabled` is `false`
-   * unless the caller adds them back explicitly via
-   * `.withCopyFileToContainer()`/`.withNetworkDisabled()` on it directly —
+   * they vanish across the reboot (an empty file on 0.7.6, a refused restore
+   * on 0.7.8). The host files must therefore still exist when the reboot
+   * runs; `requireCopiedHostFilesExist` checks that before the source
+   * sandbox is touched. Every restore this backend makes builds its argv
+   * here (direct, brokered, retried and fresh-name attempts alike), so one
+   * `--volume` per mount reaches all of them.
+   * `GenericContainer.fromCheckpoint()` is the unrelated case: it never
+   * copies `cp.spec.mounts`/`networkDisabled` onto the new container's own
+   * builder state in the first place (see its own doc), so a
+   * `fromCheckpoint()` container's `spec.mounts` is `[]` and
+   * `networkDisabled` is `false` unless the caller adds them back explicitly
+   * via `.withCopyFileToContainer()`/`.withNetworkDisabled()` on it directly —
    * in which case this function threads those through exactly the same as
-   * for any other spec, as it should.
+   * for any other spec, as it should. A copied file left out there makes
+   * msb 0.7.8 refuse the restore, which `bootRestoreOnce` turns into
+   * `CheckpointMissingCopiedFilesError`; this function never passes
+   * `--allow-missing-resources` to get past that. A `--volume` for a guest
+   * path the snapshot never had is accepted by both versions.
    *
    * `--volume SOURCE:GUEST[:OPTIONS]` is restore's own mount flag (`-v`
    * short form; `RestoreResourceArgs.volume` in
@@ -184,9 +210,8 @@ export const MsbCommands = {
       argv.push("-p", `${port.hostPort}:${port.guestPort}${port.protocol === "udp" ? "/udp" : ""}`);
     }
     for (const mount of spec.mounts) {
-      // Same option grammar and Windows rationale as `run()`'s `--mount-file` —
-      // see this function's own doc.
-      argv.push("--volume", `${mount.hostPath}:${mount.guestPath}:${mount.readOnly ? "ro" : "rw"},nodev`);
+      // The very value `run()` hands `--mount-file` — see `fileMountValue`.
+      argv.push("--volume", fileMountValue(mount));
     }
     return argv;
   },

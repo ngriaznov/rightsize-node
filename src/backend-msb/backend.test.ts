@@ -4,7 +4,14 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, assert, after, beforeEach } from "../../test/harness.js";
 import { MsbCliBackend } from "./backend.js";
-import { BackendError, UnsupportedByBackendError, TmpfsRootCheckpointError, CheckpointWorkloadCommandMissingError } from "../core/errors.js";
+import {
+  BackendError,
+  UnsupportedByBackendError,
+  TmpfsRootCheckpointError,
+  CheckpointWorkloadCommandMissingError,
+  CheckpointHostFileMissingError,
+  CheckpointMissingCopiedFilesError,
+} from "../core/errors.js";
 import type { ContainerSpec } from "../core/model.js";
 import type { NetworkLink } from "../core/backend.js";
 import { GenericContainer } from "../core/generic-container.js";
@@ -1403,9 +1410,14 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     // regain public network access, and a `.withCopyFileToContainer()`
     // sandbox would either silently lose its mount or hard-fail under msb's
     // own require-complete restore-resource check.
+    // A real host file: the checkpoint checks that every copied file's host
+    // file still exists before it stops the sandbox.
+    const hostDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-ckpt-mounts-test-"));
+    const hostFile = path.join(hostDir, "config.json");
+    await fs.writeFile(hostFile, "{}");
     const spec = baseSpec("rz-testrun1-ckpt-mounts", {
       ports: [{ hostPort: 15998, guestPort: 80, protocol: "tcp" }],
-      mounts: [{ hostPath: "/host/config.json", guestPath: "/guest/config.json", readOnly: true }],
+      mounts: [{ hostPath: hostFile, guestPath: "/guest/config.json", readOnly: true }],
       networkDisabled: true,
       command: ["sleep", "60"],
     });
@@ -1432,7 +1444,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
         "-p",
         "15998:80",
         "--volume",
-        "/host/config.json:/guest/config.json:ro,nodev",
+        `${hostFile}:/guest/config.json:ro,nodev`,
       ],
       "expected the reboot's restore to re-emit --no-net (networkDisabled) and --volume (mounts) from the " +
         "original spec, exactly like it already does for ports — and never --disk-only, which a " +
@@ -1441,6 +1453,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
 
     await backend.stop(handle);
     await backend.remove(handle);
+    await fs.rm(hostDir, { recursive: true, force: true });
   });
 
   it("createCheckpoint's reboot carries the complete UDP net-default/net-rule policy in its restore argv when the spec has hostUdpEgressPorts", async () => {
@@ -3451,6 +3464,440 @@ describe("MsbCliBackend's Windows job-free restore broker escalation (POLICY v2)
     assert.equal(restoreCalls.length, 2);
 
     await backend.stop(handle);
+    await backend.remove(handle);
+  });
+});
+
+// Files copied in at start (`withCopyFileToContainer`) are bind mounts of host
+// files: a snapshot holds no content for them. The fake msb models msb 0.7.8
+// here — `run --mount-file` records each guest path on the sandbox, `snapshot
+// create` copies them onto the snapshot, and `restore` refuses unless every
+// recorded guest path is supplied again with `--volume` (the verbatim 0.7.8
+// refusal, no sandbox record created). Own describe block and beforeEach, for
+// the same reason the broker suite above has them.
+describe("MsbCliBackend with files copied in at start", () => {
+  let statePath: string;
+  let hostDir: string;
+  let backend: MsbCliBackend;
+
+  beforeEach(async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-copied-test-"));
+    statePath = path.join(tmpDir, "state.json");
+    await fs.writeFile(statePath, JSON.stringify({ sandboxes: {} }));
+    process.env["RIGHTSIZE_FAKE_MSB_STATE"] = statePath;
+    process.env["RIGHTSIZE_CACHE_DIR"] = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-copied-cache-test-"));
+    hostDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-copied-host-test-"));
+    backend = new MsbCliBackend(Promise.resolve(FAKE_MSB));
+  });
+
+  after(async () => {
+    delete process.env["RIGHTSIZE_FAKE_MSB_STATE"];
+    delete process.env["RIGHTSIZE_CACHE_DIR"];
+  });
+
+  // Same skip as the suites above: the fake msb is a POSIX shell script.
+  function skipOnWindows(): boolean {
+    return process.platform === "win32";
+  }
+
+  async function hostFile(name: string): Promise<string> {
+    const file = path.join(hostDir, name);
+    await fs.writeFile(file, `content of ${name}`);
+    return file;
+  }
+
+  async function readState(): Promise<{
+    sandboxes: Record<string, { status: string; externalMounts?: string[] }>;
+    snapshots?: Record<string, { externalMounts?: string[] }>;
+    callLog: FakeCall[];
+  }> {
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      sandboxes: Record<string, { status: string; externalMounts?: string[] }>;
+      snapshots?: Record<string, { externalMounts?: string[] }>;
+      callLog?: FakeCall[];
+    };
+    return { ...state, callLog: state.callLog ?? [] };
+  }
+
+  async function seed(patch: Record<string, unknown>): Promise<void> {
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as Record<string, unknown>;
+    await fs.writeFile(statePath, JSON.stringify({ ...state, ...patch }));
+  }
+
+  /** Two copied files under ONE guest directory, one rw and one ro. */
+  async function twoMounts(): Promise<ContainerSpec["mounts"]> {
+    return [
+      { hostPath: await hostFile("a.conf"), guestPath: "/etc/app/a.conf", readOnly: false },
+      { hostPath: await hostFile("b.conf"), guestPath: "/etc/app/b.conf", readOnly: true },
+    ];
+  }
+
+  it("createCheckpoint's reboot supplies every copied file again with --volume, in spec order, and the container comes back running", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const mounts = await twoMounts();
+    const handle = await backend.create(baseSpec("rz-testrun1-copied-ckpt", { mounts, command: ["sleep", "60"] }));
+    await backend.start(handle);
+
+    const state0 = await readState();
+    assert.deepEqual(state0.sandboxes[handle.id]?.externalMounts, ["/etc/app/a.conf", "/etc/app/b.conf"]);
+
+    const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-copied1");
+
+    const state = await readState();
+    assert.deepEqual(state.snapshots?.[effectiveRef]?.externalMounts, ["/etc/app/a.conf", "/etc/app/b.conf"]);
+    const cycle = state.callLog.slice(-5);
+    assert.deepEqual(
+      cycle.map((c) => c.cmd),
+      ["stop", "snapshotCreate", "rm", "restore", "execWorkload"],
+      "expected exactly one restore: the fake refuses a reboot that leaves a copied file out, and nothing retries it",
+    );
+    assert.deepEqual(cycle[3]?.args, [
+      "restore",
+      effectiveRef,
+      "--name",
+      handle.id,
+      "--volume",
+      `${mounts[0]?.hostPath}:/etc/app/a.conf:rw,nodev`,
+      "--volume",
+      `${mounts[1]?.hostPath}:/etc/app/b.conf:ro,nodev`,
+    ]);
+    assert.equal(state.sandboxes[handle.id]?.status, "Running");
+
+    // The reboot's sandbox carries the files too, so a second checkpoint of the same container works.
+    const secondRef = await backend.createCheckpoint(handle, "rz-ckpt-copied2");
+    const second = await readState();
+    assert.deepEqual(second.snapshots?.[secondRef]?.externalMounts, ["/etc/app/a.conf", "/etc/app/b.conf"]);
+    assert.equal(second.callLog.filter((c) => c.cmd === "restore").length, 2);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("createCheckpoint's fresh-name walk supplies the copied files on every attempt, not just the first", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const seam = backend as unknown as {
+      checkpointRebootAlreadyExistsRetryBudgetMs: number;
+      checkpointRebootAlreadyExistsRetryDelayMs: number;
+    };
+    seam.checkpointRebootAlreadyExistsRetryBudgetMs = 4_000;
+    seam.checkpointRebootAlreadyExistsRetryDelayMs = 20;
+    const mounts = await twoMounts();
+    const handle = await backend.create(baseSpec("rz-testrun1-copied-walk", { mounts, command: ["sleep", "60"] }));
+    await backend.start(handle);
+    await seed({ failRestoresWithAlreadyExists: 2 });
+
+    await backend.createCheckpoint(handle, "rz-ckpt-copiedwalk");
+
+    const restores = (await readState()).callLog.filter((c) => c.cmd === "restore");
+    assert.equal(restores.length, 3, "expected two refused attempts plus the winning one");
+    for (const call of restores) {
+      assert.deepEqual(
+        call.args.filter((a) => a.includes(":/etc/app/")),
+        [`${mounts[0]?.hostPath}:/etc/app/a.conf:rw,nodev`, `${mounts[1]?.hostPath}:/etc/app/b.conf:ro,nodev`],
+        `expected every attempt to carry both --volume values, got: ${call.args.join(" ")}`,
+      );
+    }
+    assert.equal(new Set(restores.map((c) => bootName(c))).size, 3, "expected a fresh name per attempt");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("createCheckpoint checks every copied file's host file before it stops, snapshots or removes anything", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const mounts = await twoMounts();
+    const handle = await backend.create(baseSpec("rz-testrun1-copied-gone", { mounts, command: ["sleep", "60"] }));
+    await backend.start(handle);
+    const before = (await readState()).callLog.length;
+    await fs.rm(mounts[1]?.hostPath as string); // the SECOND file is gone; the first is still there
+
+    let thrown: unknown;
+    try {
+      await backend.createCheckpoint(handle, "rz-ckpt-copiedgone");
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof CheckpointHostFileMissingError, `expected CheckpointHostFileMissingError, got: ${String(thrown)}`);
+    assert.equal(
+      (thrown as Error).message,
+      `checkpoint() can't keep the copied file at /etc/app/b.conf: its host file ${mounts[1]?.hostPath} no longer exists. ` +
+        "Copied files are not part of a checkpoint; on microsandbox, checkpoint() mounts them again from their " +
+        "host files when it reboots the container.",
+    );
+
+    const state = await readState();
+    assert.equal(state.callLog.length, before, "expected no msb call at all after the pre-flight failed: no stop, snapshot, rm or restore");
+    assert.equal(state.sandboxes[handle.id]?.status, "Running", "expected the source sandbox to be left running");
+    assert.equal(Object.keys(state.snapshots ?? {}).length, 0, "expected no snapshot to have been taken");
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("start() of a restore whose snapshot recorded a copied file ends in CheckpointMissingCopiedFilesError after exactly one restore call", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const ref = "/fake/checkpoints/snap_copiedmissing";
+    await seed({ snapshots: { [ref]: { from: "rz-src", name: "n", externalMounts: ["/etc/app/b.conf"] } } });
+    const handle = await backend.create(baseSpec("rz-testrun1-copied-refused", { checkpointRef: ref, command: ["sleep", "60"] }));
+
+    let thrown: unknown;
+    try {
+      await backend.start(handle);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof CheckpointMissingCopiedFilesError, `expected CheckpointMissingCopiedFilesError, got: ${String(thrown)}`);
+    const err = thrown as CheckpointMissingCopiedFilesError;
+    assert.equal(err.sandbox, "rz-testrun1-copied-refused");
+    assert.equal(err.ref, ref);
+    assert.match(err.output, /restore requires destination bindings for: mount \/etc\/app\/b\.conf/);
+    assert.match(err.message, /rz-testrun1-copied-refused/);
+    assert.ok(err.message.includes(ref));
+    assert.match(err.message, /copied files are not part of a checkpoint/);
+    assert.match(err.message, /withCopyFileToContainer/);
+    assert.match(err.message, /mount \/etc\/app\/b\.conf/, "expected msb's own output, which lists the missing guest path");
+    assert.ok(!/was removed|re-booting/i.test(err.message), "a plain start() has no removed sandbox to talk about");
+
+    const state = await readState();
+    assert.deepEqual(
+      state.callLog.map((c) => c.cmd),
+      ["restore"],
+      "expected exactly ONE restore and nothing else: no fresh-name retry, no 'msb rm -f' agent-relay retry, no ls polling",
+    );
+    assert.equal(
+      state.callLog.some((c) => c.args.includes("--allow-missing-resources")),
+      false,
+      "expected the refusal never to be answered with --allow-missing-resources",
+    );
+    assert.equal(handle.id in state.sandboxes, false, "expected the refused restore to have left no sandbox");
+    assert.equal(handle.id, "rz-testrun1-copied-refused", "expected the handle to keep its name: no fresh-name walk happened");
+
+    await backend.remove(handle);
+  });
+
+  it("the same restore with the copied files supplied again starts, passing --volume for each", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const ref = "/fake/checkpoints/snap_copiedreadded";
+    await seed({ snapshots: { [ref]: { from: "rz-src", name: "n", externalMounts: ["/etc/app/a.conf", "/etc/app/b.conf"] } } });
+    const mounts = await twoMounts();
+    const handle = await backend.create(baseSpec("rz-testrun1-copied-readded", { checkpointRef: ref, mounts, command: ["sleep", "60"] }));
+
+    await backend.start(handle);
+
+    const state = await readState();
+    assert.equal(state.sandboxes[handle.id]?.status, "Running");
+    const restore = state.callLog.find((c) => c.cmd === "restore");
+    assert.deepEqual(restore?.args, [
+      "restore",
+      ref,
+      "--name",
+      handle.id,
+      "--volume",
+      `${mounts[0]?.hostPath}:/etc/app/a.conf:rw,nodev`,
+      "--volume",
+      `${mounts[1]?.hostPath}:/etc/app/b.conf:ro,nodev`,
+    ]);
+
+    await backend.stop(handle);
+    await backend.remove(handle);
+  });
+
+  it("a partial re-add is refused with msb's output naming only the path still missing", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const ref = "/fake/checkpoints/snap_copiedpartial";
+    await seed({ snapshots: { [ref]: { from: "rz-src", name: "n", externalMounts: ["/etc/app/a.conf", "/etc/app/b.conf"] } } });
+    const mounts = await twoMounts();
+    const handle = await backend.create(baseSpec("rz-testrun1-copied-partial", { checkpointRef: ref, mounts: [mounts[0] as ContainerSpec["mounts"][number]] }));
+
+    let thrown: unknown;
+    try {
+      await backend.start(handle);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof CheckpointMissingCopiedFilesError, `expected CheckpointMissingCopiedFilesError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /mount \/etc\/app\/b\.conf/);
+    assert.ok(!(thrown as Error).message.includes("mount /etc/app/a.conf"));
+
+    await backend.remove(handle);
+  });
+
+  it("a refusal whose output also carries transient signatures still ends in the typed error after one restore call", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    shrinkAgentRelayRetryDelay(backend);
+    const ref = "/fake/checkpoints/snap_copiedknobs";
+    await seed({
+      snapshots: { [ref]: { from: "rz-src", name: "n", externalMounts: ["/data/x"] } },
+      // The agent-relay and state-database signatures appended to the same
+      // output: if either classifier ran before the refusal's, the boot would
+      // be retried or reported as that transient instead.
+      missingBindingsExtraOutput:
+        "  \u2192 other: sandbox process exited (exit code: 0) before agent relay became available\n" +
+        "error: database error: database is locked\n",
+    });
+    const handle = await backend.create(baseSpec("rz-testrun1-copied-knobs", { checkpointRef: ref, command: ["sleep", "60"] }));
+
+    let thrown: unknown;
+    try {
+      await backend.start(handle);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof CheckpointMissingCopiedFilesError, `expected CheckpointMissingCopiedFilesError, got: ${String(thrown)}`);
+    const restores = (await readState()).callLog.filter((c) => c.cmd === "restore");
+    assert.equal(restores.length, 1);
+
+    await backend.remove(handle);
+  });
+
+  it("a refusal out of createCheckpoint's own reboot keeps the typed error as the cause and an accurate message", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const mounts = await twoMounts();
+    const handle = await backend.create(baseSpec("rz-testrun1-copied-ckpt-refused", { mounts, command: ["sleep", "60"] }));
+    await backend.start(handle);
+    // A handle that has lost its mounts while the sandbox still has them, the
+    // shape the reboot would be in if it ever missed one.
+    (handle as { spec: ContainerSpec }).spec = { ...handle.spec, mounts: [] };
+
+    let thrown: unknown;
+    try {
+      await backend.createCheckpoint(handle, "rz-ckpt-copiedrefused");
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+    const cause = (thrown as BackendError).cause;
+    assert.ok(cause instanceof CheckpointMissingCopiedFilesError, `expected the cause to be CheckpointMissingCopiedFilesError, got: ${String(cause)}`);
+    const message = (thrown as Error).message;
+    assert.match(message, /was removed after a successful checkpoint snapshot/);
+    assert.match(message, /preserved in checkpoint/);
+    assert.match(message, /copied files are not part of a checkpoint/);
+    assert.match(message, /mount \/etc\/app\/a\.conf/);
+    const state = await readState();
+    assert.equal(state.callLog.filter((c) => c.cmd === "restore").length, 1, "expected no retry of a refusal");
+  });
+
+  it("a reuse sandbox adopted through findRunning keeps the spec it was given, mounts included, so its reboot supplies them", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const mounts = await twoMounts();
+    const spec = baseSpec("rz-reuse-copied", { mounts, keepAlive: true, command: ["sleep", "60"] });
+    const created = await backend.create(spec);
+    await backend.start(created);
+
+    // What GenericContainer's adopt path does: build the spec from the builder and ask the backend whether it runs.
+    const adopted = await backend.findRunning(spec);
+    assert.ok(adopted !== undefined, "expected the running sandbox to be adopted");
+    assert.deepEqual(adopted?.spec.mounts, mounts);
+
+    await backend.createCheckpoint(adopted as NonNullable<typeof adopted>, "rz-ckpt-adopted");
+    const restore = (await readState()).callLog.filter((c) => c.cmd === "restore").at(-1);
+    assert.deepEqual(
+      restore?.args.filter((a) => a.includes(":/etc/app/")),
+      [`${mounts[0]?.hostPath}:/etc/app/a.conf:rw,nodev`, `${mounts[1]?.hostPath}:/etc/app/b.conf:ro,nodev`],
+    );
+
+    await backend.stop(adopted as NonNullable<typeof adopted>);
+    await backend.remove(adopted as NonNullable<typeof adopted>);
+  });
+
+  it("a sandbox this backend never created cannot be checkpointed, and nothing is stopped or removed first", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const mounts = await twoMounts();
+    const spec = baseSpec("rz-reuse-copied-foreign", { mounts, keepAlive: true, command: ["sleep", "60"] });
+    const creator = new MsbCliBackend(Promise.resolve(FAKE_MSB));
+    const created = await creator.create(spec);
+    await creator.start(created);
+    const before = (await readState()).callLog.length;
+
+    // Another process's backend: it has the spec findRunning hands back, but no handle state.
+    const adopted = await backend.findRunning(spec);
+    assert.ok(adopted !== undefined);
+    await assert.rejects(() => backend.createCheckpoint(adopted as NonNullable<typeof adopted>, "rz-ckpt-foreign"));
+
+    const state = await readState();
+    assert.equal(state.callLog.length, before, "expected no stop, snapshot, rm or restore");
+    assert.equal(state.sandboxes[spec.name]?.status, "Running");
+
+    await creator.stop(created);
+    await creator.remove(created);
+  });
+});
+
+describe("MsbCliBackend's brokered restore with a copied file left out", () => {
+  let statePath: string;
+
+  beforeEach(async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-copied-broker-test-"));
+    statePath = path.join(tmpDir, "state.json");
+    await fs.writeFile(statePath, JSON.stringify({ sandboxes: {} }));
+    process.env["RIGHTSIZE_FAKE_MSB_STATE"] = statePath;
+    process.env["RIGHTSIZE_CACHE_DIR"] = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-copied-broker-cache-test-"));
+  });
+
+  after(async () => {
+    delete process.env["RIGHTSIZE_FAKE_MSB_STATE"];
+    delete process.env["RIGHTSIZE_CACHE_DIR"];
+  });
+
+  it("classifies a PowerShell-decorated refusal from the broker the same way, and neither retries nor falls back to a direct attempt", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const brokerCalls: Array<{ argv: readonly string[] }> = [];
+    const decorated =
+      "msb.exe : error: invalid config: restore requires destination bindings for: mount /etc/app/b.conf; provide a destination mount for each path or explicitly allow missing resources\n" +
+      "At line:1 char:1\n" +
+      "    + FullyQualifiedErrorId : NativeCommandError\n" +
+      "  \u0393\u00e5\u00c6 map each path with -v SOURCE:GUEST or --mount-disk SOURCE:GUEST\n";
+    const broker: RestoreBrokerLauncher = async (_msbPath, argv) => {
+      brokerCalls.push({ argv });
+      return { kind: "completed", exitCode: 1, output: decorated };
+    };
+    const backend = new MsbCliBackend(Promise.resolve(FAKE_MSB), { restoreBroker: broker });
+    (backend as unknown as { platformOverrideForTests: NodeJS.Platform }).platformOverrideForTests = "win32";
+
+    const spec = baseSpec("rz-testrun1-copied-brokered", {
+      checkpointRef: "/fake/checkpoints/snap_copiedbrokered",
+      command: ["sleep", "60"],
+    });
+    const handle = await backend.create(spec);
+    // The direct first attempt hits access-denied, which is what escalates the retries to the broker.
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.failRestoreWithAccessDenied = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+
+    let thrown: unknown;
+    try {
+      await backend.start(handle);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof CheckpointMissingCopiedFilesError, `expected CheckpointMissingCopiedFilesError, got: ${String(thrown)}`);
+    assert.match((thrown as Error).message, /mount \/etc\/app\/b\.conf/);
+    assert.equal(brokerCalls.length, 1, "expected one brokered attempt and no retry after the refusal");
+    const calls = await readFakeCalls(statePath);
+    assert.equal(calls.filter((c) => c.cmd === "restore").length, 1, "expected only the direct first attempt to have reached the fake msb");
+
     await backend.remove(handle);
   });
 });
