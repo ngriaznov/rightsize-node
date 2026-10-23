@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.16] - 2026-10-23
+
 ### Changed
 
 - **The pinned msb is now 0.7.9** (was 0.7.8). The CLI surface this library drives is
