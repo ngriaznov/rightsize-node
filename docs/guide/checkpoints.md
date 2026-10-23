@@ -212,7 +212,7 @@ async function restore(checkpoint: Checkpoint): Promise<GenericContainer> {
 
 If you leave one out:
 
-- **microsandbox**: a checkpoint taken by msb 0.7.8, the pinned version,
+- **microsandbox**: a checkpoint taken by msb 0.7.8 or later (the pin is 0.7.9)
   records its copied files and refuses to restore without them. `start()`
   throws `CheckpointMissingCopiedFilesError`; its message names the sandbox and
   the checkpoint ref and carries msb's own output, which lists the missing

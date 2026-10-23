@@ -95,7 +95,9 @@ substitute for basic hygiene inside the sandbox itself:
 - **Block public-internet egress if the workload doesn't need it.**
   `withNetworkDisabled()` blocks outbound connections to the public internet
   on microsandbox while published ports keep serving — untrusted code has no
-  reason to reach out either. See
+  reason to reach out either. (A plain HTTP request on port 80 gets an HTTP
+  403 from microsandbox itself, from msb 0.7.9, rather than a connection
+  error.) See
   [Networking](/guide/networking#disabling-public-internet-access).
 - **Never put secrets in `withEnv`.** Environment variables are visible to
   anything running inside the container, including the code you don't
