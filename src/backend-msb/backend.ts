@@ -260,6 +260,51 @@ const STATE_DB_RETRY_DELAY_MS = 500;
 const AGENT_RELAY_RETRY_DELAY_MS = 2_000;
 
 /**
+ * How long the system-log capture `bootOnce` makes after an agent-relay boot
+ * failure may take, and how many of the log's last lines it prints. The
+ * capture sits on the retry's critical path, so its timeout is shorter than
+ * `LOGS_TIMEOUT_MS`; the tail cap keeps one stderr note readable.
+ */
+const AGENT_RELAY_LOG_TIMEOUT_MS = 10_000;
+const AGENT_RELAY_LOG_TAIL_LINES = 200;
+
+/** Start of every stderr line `bootOnce` writes about its agent-relay retry. */
+const AGENT_RELAY_NOTE_PREFIX = "[rightsize] agent-relay retry: ";
+
+/** What `msb logs <name> --source system` gave back after an agent-relay boot failure. */
+type SystemLogCapture =
+  | { readonly kind: "lines"; readonly lines: readonly string[] }
+  | { readonly kind: "empty" }
+  | { readonly kind: "unreadable"; readonly reason: string };
+
+/** A one-line reason for an `invoke` that rejected (spawn failure or timeout). */
+function describeInvokeFailure(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).replace(/\s*\n\s*/g, " ");
+}
+
+/** `2000` as `2 s`; anything that is not a whole, non-zero number of seconds as `150 ms` (so `0` is `0 ms`). */
+export function formatRetryDelay(ms: number): string {
+  return ms >= 1000 && ms % 1000 === 0 ? `${ms / 1000} s` : `${ms} ms`;
+}
+
+/**
+ * The stderr block for one system-log capture: a header line, then (when the
+ * log has content) its last `AGENT_RELAY_LOG_TAIL_LINES` lines, each indented
+ * two spaces. Ends with a newline, so it can follow another note directly.
+ */
+function systemLogBlock(name: string, attempt: 1 | 2, capture: SystemLogCapture): string {
+  const header = `${AGENT_RELAY_NOTE_PREFIX}'msb logs ${name} --source system' after attempt ${attempt}`;
+  if (capture.kind === "unreadable") {
+    return `${header} could not be read (${capture.reason})\n`;
+  }
+  if (capture.kind === "empty") {
+    return `${header} produced no output\n`;
+  }
+  const shown = capture.lines.slice(-AGENT_RELAY_LOG_TAIL_LINES);
+  return `${header} (last ${shown.length} of ${capture.lines.length} lines):\n${shown.map((l) => `  ${l}\n`).join("")}`;
+}
+
+/**
  * How long the boot path keeps polling while msb's install-operation lock is
  * held, and the pause between attempts (see `isMsbInstallLockActive`) —
  * observed clearing within seconds despite the message's ~30-minute deadline,
@@ -616,6 +661,17 @@ export class MsbCliBackend implements SandboxBackend {
   // the same unsafe-cast way as the seams above so a retry test does not
   // block for the real 2s.
   private agentRelayRetryDelayMs = AGENT_RELAY_RETRY_DELAY_MS;
+  // Test-only override seams for the same retry's diagnostics: the system-log
+  // capture's timeout (real 10s), the timeout of the retry's `msb rm -f` (real
+  // STOP_TIMEOUT_MS, 60s) and the writer for the stderr notes (the real
+  // stderr, resolved at each call). Reached the same unsafe-cast way, so a test
+  // can read the notes and a hung capture or `rm -f` does not block for 10s
+  // or 60s.
+  private agentRelayLogTimeoutMs = AGENT_RELAY_LOG_TIMEOUT_MS;
+  private agentRelayRmTimeoutMs = STOP_TIMEOUT_MS;
+  private agentRelayStderr: (text: string) => void = (text) => {
+    process.stderr.write(text);
+  };
 
   constructor(
     private readonly msbPathPromise: Promise<string>,
@@ -846,16 +902,27 @@ export class MsbCliBackend implements SandboxBackend {
    * (`retryRestoreAfterAccessDenied`, `rebootUnderFreshName`).
    *
    * When an attempt's sandbox process exits cleanly before msb's agent relay
-   * comes up (see `isAgentRelayUnavailable`) this removes the failed sandbox
-   * (`msb rm -f <name>`, result ignored — msb leaves the record behind as
-   * Stopped, and a plain same-name `run` would restart that persisted config
-   * while a same-name `restore` is refused as "already exists"), waits
+   * comes up (see `isAgentRelayUnavailable`) this reads the failed sandbox's
+   * system log (`msb logs <name> --source system`, best-effort), removes the
+   * sandbox (`msb rm -f <name>`, keeping its exit code — msb leaves the record
+   * behind as Stopped, and a plain same-name `run` would restart that persisted
+   * config while a same-name `restore` is refused as "already exists"), waits
    * `AGENT_RELAY_RETRY_DELAY_MS`, and boots again with the SAME name, spec and
-   * `restoreLaunchMode`. Exactly once: a second relay failure throws a
-   * `BackendError` carrying that attempt's output, and any other error from
-   * either attempt propagates untouched for the caller's own policy. The name
-   * never changes, so the reaper ledger, `handles` and `startedNames` need no
-   * adjustment — a failed attempt registers nothing in the last two.
+   * `restoreLaunchMode`. The log has to be read first, because `rm -f` deletes
+   * the sandbox directory it lives in. Exactly once: a second relay failure
+   * throws a `BackendError` carrying both attempts' output, and any other
+   * error from either attempt propagates untouched for the caller's own
+   * policy. The name never changes, so the reaper ledger, `handles` and
+   * `startedNames` need no adjustment — a failed attempt registers nothing in
+   * the last two.
+   *
+   * Everything about the retry that is worth knowing afterwards goes to
+   * stderr: the first attempt's failure with `rm -f`'s exit code and system
+   * log, then the outcome of the second attempt (with its own system log if
+   * it failed the same way). The log text stays out of every error message:
+   * `GenericContainer` classifies start failures by string-matching the cause
+   * chain (port conflicts, name collisions), and a guest log line could
+   * contain those phrases.
    */
   private async bootOnce(
     msbPath: string,
@@ -863,6 +930,7 @@ export class MsbCliBackend implements SandboxBackend {
     state: HandleState,
     restoreLaunchMode: RestoreLaunchMode = "direct",
   ): Promise<void> {
+    let firstOutput: string;
     try {
       await this.bootAttempt(msbPath, handle, state, restoreLaunchMode);
       return;
@@ -870,21 +938,72 @@ export class MsbCliBackend implements SandboxBackend {
       if (!(first instanceof AgentRelayUnavailableError)) {
         throw first;
       }
+      firstOutput = first.output;
     }
-    await invoke(msbPath, MsbCommands.rmForce(handle.id), STOP_TIMEOUT_MS).catch(() => {});
+    const command = handle.spec.checkpointRef !== undefined ? "restore" : "run";
+    const name = handle.id;
+    const note = `${AGENT_RELAY_NOTE_PREFIX}msb ${command} for sandbox ${name}`;
+    const firstLog = await this.captureAgentRelaySystemLog(msbPath, name);
+    const rm = await invoke(msbPath, MsbCommands.rmForce(name), this.agentRelayRmTimeoutMs).then(
+      (result) => String(result.exitCode),
+      (err: unknown) => `without finishing (${describeInvokeFailure(err)})`,
+    );
+    this.agentRelayStderr(
+      `${note} exited before its agent relay came up (attempt 1 of 2); 'msb rm -f ${name}' exited ${rm}; ` +
+        `retrying in ${formatRetryDelay(this.agentRelayRetryDelayMs)}\n${systemLogBlock(name, 1, firstLog)}`,
+    );
     await sleep(this.agentRelayRetryDelayMs);
     try {
       await this.bootAttempt(msbPath, handle, state, restoreLaunchMode);
     } catch (second) {
       if (!(second instanceof AgentRelayUnavailableError)) {
+        this.agentRelayStderr(`${note} failed on attempt 2 with a different error\n`);
         throw second;
       }
+      const secondLog = await this.captureAgentRelaySystemLog(msbPath, name);
+      this.agentRelayStderr(
+        `${note} exited before its agent relay came up again (attempt 2 of 2); giving up\n` +
+          systemLogBlock(name, 2, secondLog),
+      );
       throw new BackendError(
-        `msb ${handle.spec.checkpointRef !== undefined ? "restore" : "run"} for sandbox ${handle.id}: msb's ` +
-          `sandbox process exited before its agent relay came up on both attempts (the retry ran after ` +
-          `'msb rm -f' of the failed sandbox and a short pause).\nlast attempt:\n${second.output}`,
+        `msb ${command} for sandbox ${name}: msb's sandbox process exited before its agent relay came up on ` +
+          `both attempts (the retry ran after 'msb rm -f' of the failed sandbox and a short pause). msb's ` +
+          `system log for each attempt was written to stderr.\nfirst attempt:\n${firstOutput}\n` +
+          `after retry:\n${second.output}`,
       );
     }
+    this.agentRelayStderr(`${note} booted on attempt 2\n`);
+  }
+
+  /**
+   * `msb logs <name> --source system` for `bootOnce`'s stderr notes, under
+   * `agentRelayLogTimeoutMs`. Best-effort: a spawn failure, a timeout or a
+   * non-zero exit comes back as `"unreadable"` with a one-line reason, never
+   * as a throw, so a diagnostics failure cannot block the retry it describes.
+   */
+  private async captureAgentRelaySystemLog(msbPath: string, name: string): Promise<SystemLogCapture> {
+    let result: ExecResult;
+    try {
+      result = await invoke(msbPath, MsbCommands.systemLog(name), this.agentRelayLogTimeoutMs);
+    } catch (err) {
+      return { kind: "unreadable", reason: describeInvokeFailure(err) };
+    }
+    if (result.exitCode !== 0) {
+      // The exit code, then msb's first non-blank stderr line when it printed one.
+      const why = result.stderr
+        .split("\n")
+        .map((l) => l.trim())
+        .find((l) => l !== "");
+      return { kind: "unreadable", reason: `exit code ${result.exitCode}` + (why === undefined ? "" : `: ${why}`) };
+    }
+    if (result.stdout.trim() === "") {
+      return { kind: "empty" };
+    }
+    const lines = result.stdout.split("\n");
+    if (lines[lines.length - 1] === "") {
+      lines.pop();
+    }
+    return { kind: "lines", lines };
   }
 
   /**

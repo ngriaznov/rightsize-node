@@ -81,13 +81,32 @@ function bootName(call: FakeCall): string | undefined {
 }
 
 /**
+ * Redirects the stderr notes `bootOnce` writes about its agent-relay retry
+ * into the returned array, one element per write call, so a test can read
+ * them (and the real stderr stays quiet). Same unsafe-cast seam as the retry
+ * delay's.
+ */
+function captureAgentRelayStderr(backend: MsbCliBackend): string[] {
+  const writes: string[] = [];
+  (backend as unknown as { agentRelayStderr: (text: string) => void }).agentRelayStderr = (text) => {
+    writes.push(text);
+  };
+  return writes;
+}
+
+/**
  * Shrinks `bootOnce`'s pause before its agent-relay retry from the real 2s —
  * the same unsafe-cast seam this suite uses for the checkpoint reboot's own
- * delay.
+ * delay — and captures the retry's stderr notes (see
+ * `captureAgentRelayStderr`), which the returned array holds.
  */
-function shrinkAgentRelayRetryDelay(backend: MsbCliBackend): void {
+function shrinkAgentRelayRetryDelay(backend: MsbCliBackend): string[] {
   (backend as unknown as { agentRelayRetryDelayMs: number }).agentRelayRetryDelayMs = 5;
+  return captureAgentRelayStderr(backend);
 }
+
+/** The prefix of every stderr line the agent-relay retry writes. */
+const RELAY_NOTE = "[rightsize] agent-relay retry: ";
 
 /**
  * Runs `fn` with the reaper ledger live in "sweep" mode (it exercises
@@ -499,11 +518,13 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
 
     const spec = baseSpec("rz-testrun1-relay");
     const handle = await backend.create(spec);
+    const writes = captureAgentRelayStderr(backend);
     // Default delay on purpose: this one test pins the real 2s pause.
     const startedAt = Date.now();
     await backend.start(handle);
     const elapsedMs = Date.now() - startedAt;
     assert.ok(elapsedMs >= 1900, `expected the retry to wait the real 2s pause first, took ${elapsedMs}ms`);
+    assert.match(writes[0] ?? "", /; retrying in 2 s\n/, "expected the note to print the real pause");
 
     assert.equal(handle.id, "rz-testrun1-relay", "a same-name retry must leave the handle's identity untouched");
     const calls = (await readFakeCalls(statePath)).filter((c) => c.cmd === "run" || c.cmd === "rm");
@@ -566,6 +587,8 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.match(thrown.message, /rz-testrun1-relay-twice/, "the error must name the sandbox");
     assert.match(thrown.message, /agent relay came up on both attempts/);
     assert.match(thrown.message, /before agent relay became available/, "the error must carry msb's own output");
+    assert.match(thrown.message, /written to stderr\.\nfirst attempt:\n/);
+    assert.match(thrown.message, /\nafter retry:\n/);
 
     const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
       failBootsWithAgentRelay: number;
@@ -584,7 +607,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       if (skipOnWindows()) {
         return;
       }
-      shrinkAgentRelayRetryDelay(backend);
+      const writes = shrinkAgentRelayRetryDelay(backend);
       const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
       seeded.failBootsWithAgentRelay = 1;
       seeded.agentRelayExitStatus = crashStatus;
@@ -606,6 +629,8 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       const calls = await readFakeCalls(statePath);
       assert.equal(calls.filter((c) => c.cmd === "run").length, 1, "expected a single run, no retry");
       assert.equal(calls.filter((c) => c.cmd === "rm").length, 0, "expected no rm -f of a deterministic failure");
+      assert.equal(calls.filter((c) => c.cmd === "systemLog").length, 0, "expected no system-log read without a retry");
+      assert.deepEqual(writes, [], "expected no stderr note without a retry");
       await backend.remove(handle);
     });
   }
@@ -749,6 +774,8 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.match(thrown.message, /msb restore for sandbox rz-testrun1-restore-relay-twice/);
     assert.match(thrown.message, /agent relay came up on both attempts/);
     assert.match(thrown.message, /before agent relay became available/);
+    assert.match(thrown.message, /written to stderr\.\nfirst attempt:\n/);
+    assert.match(thrown.message, /\nafter retry:\n/);
 
     const restores = (await readFakeCalls(statePath)).filter((c) => c.cmd === "restore");
     assert.equal(restores.length, 2, "expected exactly two restores, not a third");
@@ -884,6 +911,403 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
       assert.deepEqual(await readSandboxNames(cacheDir(), runId), [originalName]);
 
       await backend.remove(handle);
+    });
+  });
+
+  // What the agent-relay retry leaves behind on stderr (see `bootOnce`): the
+  // failed attempt's system log is read BEFORE `msb rm -f` deletes it, and the
+  // retry's outcome is written either way.
+  describe("agent-relay retry diagnostics", () => {
+    const SYSTEM_LOG_ARGV = (name: string): string[] => ["logs", name, "--source", "system", "--tail", "1000"];
+
+    async function seedState(patch: Record<string, unknown>): Promise<void> {
+      const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+      await fs.writeFile(statePath, JSON.stringify({ ...seeded, ...patch }));
+    }
+
+    /** The recorded `run`/`restore`/`rm`/system-log calls, in order, as `cmd` (plus `-f` for a forced rm). */
+    async function relayCalls(): Promise<string[]> {
+      return (await readFakeCalls(statePath))
+        .filter((c) => ["run", "restore", "rm", "systemLog"].includes(c.cmd))
+        .map((c) => (c.cmd === "rm" && c.args.includes("-f") ? "rm -f" : c.cmd));
+    }
+
+    /** The message of `err` and of every cause below it. */
+    function messageChain(err: unknown): string[] {
+      const messages: string[] = [];
+      for (let e: unknown = err; e instanceof Error; e = e.cause) {
+        messages.push(e.message);
+      }
+      return messages;
+    }
+
+    it("a retry that works writes the failed attempt's system log (read before rm -f) and then 'booted on attempt 2', and nothing else", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+      await seedState({
+        failBootsWithAgentRelay: 1,
+        agentRelaySystemLog: ["kernel: booting", "runtime: child exited 0 before the guest was ready"],
+      });
+
+      const handle = await backend.create(baseSpec("rz-testrun1-diag-ok"));
+      await backend.start(handle);
+
+      assert.deepEqual(
+        await relayCalls(),
+        ["run", "systemLog", "rm -f", "run"],
+        "expected the system log to be read after the failed run and before `msb rm -f` removes it",
+      );
+      const logCalls = (await readFakeCalls(statePath)).filter((c) => c.cmd === "systemLog");
+      assert.equal(logCalls.length, 1, "expected exactly one system-log read");
+      assert.deepEqual(logCalls[0]?.args, SYSTEM_LOG_ARGV("rz-testrun1-diag-ok"));
+
+      assert.deepEqual(writes, [
+        `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-ok exited before its agent relay came up (attempt 1 of 2); ` +
+          `'msb rm -f rz-testrun1-diag-ok' exited 0; retrying in 5 ms\n` +
+          `${RELAY_NOTE}'msb logs rz-testrun1-diag-ok --source system' after attempt 1 (last 2 of 2 lines):\n` +
+          `  kernel: booting\n` +
+          `  runtime: child exited 0 before the guest was ready\n`,
+        `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-ok booted on attempt 2\n`,
+      ]);
+
+      await backend.stop(handle);
+      await backend.remove(handle);
+    });
+
+    it("a restore names itself in the notes", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+      await seedState({ failBootsWithAgentRelay: 1 });
+
+      const handle = await backend.create(
+        baseSpec("rz-testrun1-diag-restore", { checkpointRef: "/fake/checkpoints/snap_diag", command: ["sleep", "60"] }),
+      );
+      await backend.start(handle);
+
+      assert.deepEqual(await relayCalls(), ["restore", "systemLog", "rm -f", "restore"]);
+      assert.equal(writes.length, 2);
+      assert.match(
+        writes[0] ?? "",
+        /^\[rightsize\] agent-relay retry: msb restore for sandbox rz-testrun1-diag-restore exited before its agent relay came up \(attempt 1 of 2\); /,
+      );
+      assert.equal(writes[1], `${RELAY_NOTE}msb restore for sandbox rz-testrun1-diag-restore booted on attempt 2\n`);
+
+      await backend.stop(handle);
+      await backend.remove(handle);
+    });
+
+    it("a retry that fails the same way writes both attempts' system logs, throws an error with both attempts' output, and keeps the log text out of it", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+      await seedState({
+        failBootsWithAgentRelay: 2,
+        agentRelayTagFailures: true,
+        // Phrases GenericContainer's start-failure classifiers key on: if the
+        // log text reached any error message, a port-conflict rename loop
+        // would start.
+        agentRelaySystemLog: ["guest: address already in use", "guest: port 8080 already allocated"],
+      });
+
+      const handle = await backend.create(baseSpec("rz-testrun1-diag-twice"));
+      let thrown: unknown;
+      try {
+        await backend.start(handle);
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+
+      assert.deepEqual(
+        await relayCalls(),
+        ["run", "systemLog", "rm -f", "run", "systemLog"],
+        "expected one capture before rm -f and one after the second attempt, and no third boot",
+      );
+
+      assert.deepEqual(writes, [
+        `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-twice exited before its agent relay came up (attempt 1 of 2); ` +
+          `'msb rm -f rz-testrun1-diag-twice' exited 0; retrying in 5 ms\n` +
+          `${RELAY_NOTE}'msb logs rz-testrun1-diag-twice --source system' after attempt 1 (last 3 of 3 lines):\n` +
+          `  guest: address already in use\n` +
+          `  guest: port 8080 already allocated\n` +
+          `  failure #1\n`,
+        `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-twice exited before its agent relay came up again (attempt 2 of 2); giving up\n` +
+          `${RELAY_NOTE}'msb logs rz-testrun1-diag-twice --source system' after attempt 2 (last 3 of 3 lines):\n` +
+          `  guest: address already in use\n` +
+          `  guest: port 8080 already allocated\n` +
+          `  failure #2\n`,
+      ]);
+
+      const message = (thrown as Error).message;
+      assert.match(message, /^msb run for sandbox rz-testrun1-diag-twice: msb's sandbox process exited before its agent relay came up on both attempts /);
+      assert.ok(message.includes("msb's system log for each attempt was written to stderr.\nfirst attempt:\n"));
+      const first = message.indexOf("first attempt:\n");
+      const firstTag = message.indexOf("failure #1");
+      const retry = message.indexOf("\nafter retry:\n");
+      const secondTag = message.indexOf("failure #2");
+      assert.ok(
+        first !== -1 && first < firstTag && firstTag < retry && retry < secondTag,
+        `expected each attempt's own msb output under its heading, got:\n${message}`,
+      );
+      for (const m of messageChain(thrown)) {
+        assert.ok(!m.includes("address already in use"), `the system log leaked into an error message: ${m}`);
+        assert.ok(!m.includes("already allocated"), `the system log leaked into an error message: ${m}`);
+      }
+      await backend.remove(handle);
+    });
+
+    it("a system log that cannot be read does not stop the retry, and the note says so", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+      await seedState({ failBootsWithAgentRelay: 1, systemLogFails: 1 });
+
+      const handle = await backend.create(baseSpec("rz-testrun1-diag-unreadable"));
+      await backend.start(handle);
+
+      assert.deepEqual(await relayCalls(), ["run", "systemLog", "rm -f", "run"]);
+      assert.deepEqual(writes, [
+        `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-unreadable exited before its agent relay came up (attempt 1 of 2); ` +
+          `'msb rm -f rz-testrun1-diag-unreadable' exited 0; retrying in 5 ms\n` +
+          `${RELAY_NOTE}'msb logs rz-testrun1-diag-unreadable --source system' after attempt 1 could not be read ` +
+          `(exit code 1: error: failed to read logs for "rz-testrun1-diag-unreadable")\n`,
+        `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-unreadable booted on attempt 2\n`,
+      ]);
+
+      await backend.stop(handle);
+      await backend.remove(handle);
+    });
+
+    // One test per case, not a loop in one test: each boots a sandbox twice,
+    // and on a loaded host three of them in one test come close to bun's
+    // default 5s test timeout.
+    const unreadableReasonCases: { title: string; name: string; stderr: string; reason: string }[] = [
+      {
+        title: "msb's first non-blank stderr line, trimmed, follows the exit code",
+        name: "rz-testrun1-diag-why-multi",
+        stderr: "\n  first real line  \nsecond line\n",
+        reason: "exit code 1: first real line",
+      },
+      { title: "no stderr leaves the exit code alone", name: "rz-testrun1-diag-why-none", stderr: "", reason: "exit code 1" },
+      { title: "blank-only stderr leaves the exit code alone", name: "rz-testrun1-diag-why-blank", stderr: "\n   \n", reason: "exit code 1" },
+    ];
+    for (const c of unreadableReasonCases) {
+      it(`a system log that cannot be read: ${c.title}`, async () => {
+        if (skipOnWindows()) {
+          return;
+        }
+        const writes = shrinkAgentRelayRetryDelay(backend);
+        await seedState({ failBootsWithAgentRelay: 1, systemLogFails: 1, systemLogFailStderr: c.stderr });
+
+        const handle = await backend.create(baseSpec(c.name));
+        await backend.start(handle);
+
+        assert.equal(
+          (writes[0] ?? "").split("\n")[1],
+          `${RELAY_NOTE}'msb logs ${c.name} --source system' after attempt 1 could not be read (${c.reason})`,
+        );
+
+        await backend.stop(handle);
+        await backend.remove(handle);
+      });
+    }
+
+    it("a system-log read that times out is killed, does not stop the retry, and the note says so", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+      (backend as unknown as { agentRelayLogTimeoutMs: number }).agentRelayLogTimeoutMs = 300;
+      await seedState({ failBootsWithAgentRelay: 1, systemLogHangs: 1 });
+
+      const handle = await backend.create(baseSpec("rz-testrun1-diag-timeout"));
+      try {
+        await backend.start(handle);
+
+        // The hung read may be killed before the fake gets far enough to
+        // record it, so the system-log call itself is not asserted here.
+        assert.deepEqual((await relayCalls()).filter((c) => c !== "systemLog"), ["run", "rm -f", "run"]);
+        assert.equal(writes.length, 2);
+        const lines = (writes[0] ?? "").split("\n");
+        assert.equal(lines.length, 3, `expected two note lines and the trailing newline, got: ${JSON.stringify(writes[0])}`);
+        assert.match(
+          lines[1] ?? "",
+          /^\[rightsize\] agent-relay retry: 'msb logs rz-testrun1-diag-timeout --source system' after attempt 1 could not be read \(.*timed out after 300ms.*\)$/,
+        );
+        assert.equal(writes[1], `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-timeout booted on attempt 2\n`);
+      } finally {
+        await backend.stop(handle);
+        await backend.remove(handle);
+      }
+    });
+
+    it("an empty system log is reported as no output", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+      await seedState({ failBootsWithAgentRelay: 1, agentRelaySystemLog: [] });
+
+      const handle = await backend.create(baseSpec("rz-testrun1-diag-empty"));
+      await backend.start(handle);
+
+      assert.deepEqual(await relayCalls(), ["run", "systemLog", "rm -f", "run"]);
+      assert.deepEqual(writes, [
+        `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-empty exited before its agent relay came up (attempt 1 of 2); ` +
+          `'msb rm -f rz-testrun1-diag-empty' exited 0; retrying in 5 ms\n` +
+          `${RELAY_NOTE}'msb logs rz-testrun1-diag-empty --source system' after attempt 1 produced no output\n`,
+        `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-empty booted on attempt 2\n`,
+      ]);
+
+      await backend.stop(handle);
+      await backend.remove(handle);
+    });
+
+    it("a long system log is cut to its last 200 lines", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+      const log = Array.from({ length: 250 }, (_, i) => `log line ${i + 1}`);
+      await seedState({ failBootsWithAgentRelay: 1, agentRelaySystemLog: log });
+
+      const handle = await backend.create(baseSpec("rz-testrun1-diag-tail"));
+      await backend.start(handle);
+
+      const note = writes[0] ?? "";
+      assert.ok(
+        note.includes("'msb logs rz-testrun1-diag-tail --source system' after attempt 1 (last 200 of 250 lines):\n"),
+        `expected the header to give 200 of 250, got:\n${note}`,
+      );
+      const shown = note.split("\n").filter((l) => l.startsWith("  log line "));
+      assert.equal(shown.length, 200);
+      assert.equal(shown[0], "  log line 51");
+      assert.equal(shown[199], "  log line 250");
+
+      await backend.stop(handle);
+      await backend.remove(handle);
+    });
+
+    it("the exit code of a failing msb rm -f is in the first note", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+      await seedState({ failBootsWithAgentRelay: 1, rmForceExitCode: 3 });
+
+      const handle = await backend.create(baseSpec("rz-testrun1-diag-rmfail"));
+      await backend.start(handle);
+
+      assert.deepEqual(await relayCalls(), ["run", "systemLog", "rm -f", "run"], "a failed rm -f must not stop the retry");
+      assert.ok(
+        (writes[0] ?? "").startsWith(
+          `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-rmfail exited before its agent relay came up (attempt 1 of 2); ` +
+            `'msb rm -f rz-testrun1-diag-rmfail' exited 3; retrying in 5 ms\n`,
+        ),
+        `got: ${JSON.stringify(writes[0])}`,
+      );
+
+      await backend.stop(handle);
+      await backend.remove(handle);
+    });
+
+    it("a msb rm -f that does not finish is noted as such, still gets the system log block, and does not stop the retry", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+      (backend as unknown as { agentRelayRmTimeoutMs: number }).agentRelayRmTimeoutMs = 500;
+      await seedState({
+        failBootsWithAgentRelay: 1,
+        rmForceHangs: 1,
+        agentRelaySystemLog: ["kernel: booting", "runtime: child exited 0 before the guest was ready"],
+      });
+
+      const handle = await backend.create(baseSpec("rz-testrun1-diag-rmhang"));
+      try {
+        await backend.start(handle);
+
+        // The hung `rm -f` may be killed before the fake gets far enough to
+        // record it, so that call itself is not asserted here.
+        assert.deepEqual((await relayCalls()).filter((c) => c !== "rm -f"), ["run", "systemLog", "run"]);
+        assert.equal(writes.length, 2);
+        const lines = (writes[0] ?? "").split("\n");
+        assert.match(
+          lines[0] ?? "",
+          /^\[rightsize\] agent-relay retry: msb run for sandbox rz-testrun1-diag-rmhang exited before its agent relay came up \(attempt 1 of 2\); 'msb rm -f rz-testrun1-diag-rmhang' exited without finishing \(.*timed out after 500ms.*\); retrying in 5 ms$/,
+        );
+        assert.deepEqual(lines.slice(1), [
+          `${RELAY_NOTE}'msb logs rz-testrun1-diag-rmhang --source system' after attempt 1 (last 2 of 2 lines):`,
+          "  kernel: booting",
+          "  runtime: child exited 0 before the guest was ready",
+          "",
+        ]);
+        assert.equal(writes[1], `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-rmhang booted on attempt 2\n`);
+      } finally {
+        await backend.stop(handle);
+        await backend.remove(handle);
+      }
+    });
+
+    it("a different error on the retry is noted and propagates unchanged", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+      await seedState({ failBootsWithAgentRelay: 1, failRunsWithGenericError: 1 });
+
+      const handle = await backend.create(baseSpec("rz-testrun1-diag-other"));
+      let thrown: unknown;
+      try {
+        await backend.start(handle);
+      } catch (err) {
+        thrown = err;
+      }
+      assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
+      assert.match(
+        (thrown as Error).message,
+        /^msb run for sandbox rz-testrun1-diag-other exited \(code 1\) before reaching Running — check the image entrypoint and 'msb run' output below:\nerror: failed to start "rz-testrun1-diag-other": out of memory$/,
+      );
+
+      assert.deepEqual(await relayCalls(), ["run", "systemLog", "rm -f", "run"], "no second capture for a non-relay failure");
+      assert.equal(writes.length, 2);
+      assert.match(writes[0] ?? "", /\(attempt 1 of 2\)/);
+      assert.equal(writes[1], `${RELAY_NOTE}msb run for sandbox rz-testrun1-diag-other failed on attempt 2 with a different error\n`);
+      await backend.remove(handle);
+    });
+
+    it("a boot that works the first time, or fails some other way, writes nothing and reads no system log", async () => {
+      if (skipOnWindows()) {
+        return;
+      }
+      const writes = shrinkAgentRelayRetryDelay(backend);
+
+      const ok = await backend.create(baseSpec("rz-testrun1-diag-quiet-ok"));
+      await backend.start(ok);
+      await backend.stop(ok);
+      await backend.remove(ok);
+
+      await seedState({ failRunsWithGenericError: 1 });
+      const bad = await backend.create(baseSpec("rz-testrun1-diag-quiet-bad"));
+      let thrown: unknown;
+      try {
+        await backend.start(bad);
+      } catch (err) {
+        thrown = err;
+      }
+      assert.match(String((thrown as Error | undefined)?.message), /before reaching Running/);
+      await backend.remove(bad);
+
+      const calls = await readFakeCalls(statePath);
+      assert.equal(calls.filter((c) => c.cmd === "systemLog").length, 0, "expected no `msb logs --source system` invocation");
+      assert.equal(calls.filter((c) => c.cmd === "rm" && c.args.includes("-f")).length, 0, "expected no `msb rm -f`");
+      assert.deepEqual(writes, [], "expected nothing on stderr");
     });
   });
 

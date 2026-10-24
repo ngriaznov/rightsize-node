@@ -110,6 +110,19 @@ jobs:
       - name: bun:test (serial IT)
         shell: bash
         run: RIGHTSIZE_BACKEND=microsandbox npm run test:bun:it 2>&1 | tee -a /tmp/it-output.log
+      # Counts how often the backend's agent-relay boot retry fired in this
+      # job (it writes one line per event to stderr, see MsbCliBackend.bootOnce)
+      # and prints the totals as one annotation, zeros included. Never fails
+      # the job.
+      - name: Count agent-relay retries
+        if: always()
+        shell: bash
+        run: |
+          count() { grep -F "agent-relay retry:" /tmp/it-output.log 2>/dev/null | grep -cF -- "$1" || true; }
+          fired=$(count "(attempt 1 of 2)")
+          booted=$(count "booted on attempt 2")
+          gaveup=$(count "(attempt 2 of 2); giving up")
+          echo "::notice title=agent-relay retry::fired ${fired:-0}, booted on attempt 2 ${booted:-0}, gave up ${gaveup:-0}"
       # msb's image cache can be left with an index pointing at layer files
       # that don't exist (a pull interrupted mid-write, or its concurrent-pull
       # race); msb then hard-errors on that image. Purge before saving so a
@@ -178,6 +191,19 @@ jobs:
         run: npm run test:bun:it 2>&1 | tee -a /tmp/it-output.log
         env:
           RIGHTSIZE_BACKEND: microsandbox
+      # Counts how often the backend's agent-relay boot retry fired in this
+      # job (it writes one line per event to stderr, see MsbCliBackend.bootOnce)
+      # and prints the totals as one annotation, zeros included. Never fails
+      # the job.
+      - name: Count agent-relay retries
+        if: always()
+        shell: bash
+        run: |
+          count() { grep -F "agent-relay retry:" /tmp/it-output.log 2>/dev/null | grep -cF -- "$1" || true; }
+          fired=$(count "(attempt 1 of 2)")
+          booted=$(count "booted on attempt 2")
+          gaveup=$(count "(attempt 2 of 2); giving up")
+          echo "::notice title=agent-relay retry::fired ${fired:-0}, booted on attempt 2 ${booted:-0}, gave up ${gaveup:-0}"
       # Same guard as msb-linux; `shell: bash` matters here since this job's
       # default shell is pwsh (bash is available on the hosted Windows images,
       # and `~` and /tmp resolve through git-bash's own path mapping).

@@ -92,22 +92,34 @@ function maybeFailBoot(state) {
 // `rm` in between lets the retry through. Called after every other boot knob
 // of its CLI surface, so a test can arm one of those first and have the
 // relay failure hit the retry attempt that follows it.
+// `agentRelaySystemLog` (an array of lines) replaces the record's system log,
+// and `agentRelayTagFailures` numbers each failure (`failure #1`, `failure
+// #2`, ...) in both the system log and the stderr output, so a test can tell
+// the two attempts of one boot apart.
 function maybeFailWithAgentRelay(state, name) {
   if ((state.failBootsWithAgentRelay ?? 0) <= 0) {
     return;
   }
   state.failBootsWithAgentRelay -= 1;
   const status = state.agentRelayExitStatus ?? "exit code: 0";
+  const tag = state.agentRelayTagFailures ? `failure #${(state.agentRelayFailureCount ?? 0) + 1}` : undefined;
+  if (tag !== undefined) {
+    state.agentRelayFailureCount = (state.agentRelayFailureCount ?? 0) + 1;
+  }
   state.sandboxes[name] = {
     status: "Stopped",
     logs: [`booting ${name}`],
-    systemLog: [`boot diagnostics for ${name}`, "sandbox process exited before its agent relay came up"],
+    systemLog: [
+      ...(state.agentRelaySystemLog ?? [`boot diagnostics for ${name}`, "sandbox process exited before its agent relay came up"]),
+      ...(tag !== undefined ? [tag] : []),
+    ],
   };
   writeState(state);
   process.stderr.write(
     `error: failed to start "${name}"\n` +
       `  \u2192 other: sandbox process exited (${status}) before agent relay became available\n` +
-      `  \u2192 run \`msb logs --source system ${name}\` for full diagnostics\n`,
+      `  \u2192 run \`msb logs --source system ${name}\` for full diagnostics\n` +
+      (tag !== undefined ? `  \u2192 ${tag}\n` : ""),
   );
   process.exit(1);
 }
@@ -142,6 +154,16 @@ if (cmd === "run") {
   // state-db failures on demand — see maybeFailBoot's own doc.
   maybeFailBoot(state);
   maybeFailWithAgentRelay(state, name);
+  // An ordinary, UNCLASSIFIED run failure (the `run` counterpart of
+  // failRestoreWithGenericError). Checked after the relay knob, so a test can
+  // arm both and have the relay failure hit the first attempt and this one the
+  // retry. Never touches sandbox state.
+  if ((state.failRunsWithGenericError ?? 0) > 0) {
+    state.failRunsWithGenericError -= 1;
+    writeState(state);
+    process.stderr.write(`error: failed to start "${name}": out of memory\n`);
+    process.exit(1);
+  }
   // Reproduces msb 0.6.16's fast-exit workload shape on demand: the attached
   // `run` process exits 0 immediately, without ever entering the watch loop
   // below (so state never shows "Running" to a poller, mirroring 0.6.16's
@@ -377,9 +399,25 @@ if (cmd === "run") {
     );
     process.exit(1);
   }
-  delete state.sandboxes[name];
-  writeState(state);
-  process.exit(0);
+  // `rmForceExitCode` makes `rm -f` (only) exit with that code and leave the
+  // record in place, for the agent-relay retry's report of rm's exit code.
+  if (args.includes("-f") && typeof state.rmForceExitCode === "number") {
+    writeState(state);
+    process.stderr.write(`error: failed to remove "${name}"\n`);
+    process.exit(state.rmForceExitCode);
+  }
+  // `rmForceHangs` counts down `rm -f` invocations that never return and leave
+  // the record in place until killed, for the retry's `rm -f` that does not
+  // finish (the caller's timeout kills it).
+  if (args.includes("-f") && (state.rmForceHangs ?? 0) > 0) {
+    state.rmForceHangs -= 1;
+    writeState(state);
+    setInterval(() => {}, 1000);
+  } else {
+    delete state.sandboxes[name];
+    writeState(state);
+    process.exit(0);
+  }
 } else if (cmd === "ls") {
   const state = readState();
   // Advances every sandbox left mid-restore by the "restore" branch above:
@@ -813,7 +851,30 @@ if (cmd === "run") {
   const sourceIdx = args.indexOf("--source");
   const source = sourceIdx !== -1 ? args[sourceIdx + 1] : "workload";
   const lines = source === "system" ? (sandbox?.systemLog ?? []) : (sandbox?.logs ?? []);
-  if (args.includes("-f")) {
+  // The system-log reads are recorded (as "systemLog") so a test can assert
+  // when the agent-relay retry reads them. `systemLogFails` and
+  // `systemLogHangs` count down invocations that exit 1 or never return until
+  // killed, for that retry's best-effort capture. A failing read prints
+  // `systemLogFailStderr` when that is set (an empty string prints nothing),
+  // else a one-line error.
+  let hang = false;
+  if (source === "system") {
+    logCall(state, "systemLog", args);
+    if ((state.systemLogFails ?? 0) > 0) {
+      state.systemLogFails -= 1;
+      writeState(state);
+      process.stderr.write(state.systemLogFailStderr ?? `error: failed to read logs for "${name}"\n`);
+      process.exit(1);
+    }
+    if ((state.systemLogHangs ?? 0) > 0) {
+      state.systemLogHangs -= 1;
+      hang = true;
+    }
+    writeState(state);
+  }
+  if (hang) {
+    setInterval(() => {}, 1000);
+  } else if (args.includes("-f")) {
     for (const l of lines) {
       process.stdout.write(l + "\n");
     }
