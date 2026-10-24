@@ -47,3 +47,32 @@ export function extractIds(body: string): string[] {
   }
   return ids;
 }
+
+/**
+ * The first failure reported inside a `POST /images/create` response body: a
+ * stream of newline-delimited JSON progress objects where a failed pull is an
+ * object with a non-empty `error` string and/or an `errorDetail.message`
+ * string (Docker still answers HTTP 200). Lines that aren't a JSON object are
+ * ignored. `undefined` when no line carries an error.
+ */
+export function extractPullStreamError(body: string): string | undefined {
+  for (const line of body.split("\n")) {
+    const parsed = parseOrUndefined(line);
+    if (parsed === undefined || parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      continue;
+    }
+    const entry = parsed as Record<string, unknown>;
+    const error = entry["error"];
+    if (typeof error === "string" && error !== "") {
+      return error;
+    }
+    const detail = entry["errorDetail"];
+    if (detail !== null && typeof detail === "object" && !Array.isArray(detail)) {
+      const message = (detail as Record<string, unknown>)["message"];
+      if (typeof message === "string" && message !== "") {
+        return message;
+      }
+    }
+  }
+  return undefined;
+}

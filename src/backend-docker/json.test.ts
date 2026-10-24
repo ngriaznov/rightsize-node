@@ -1,5 +1,5 @@
 import { describe, it, assert } from "../../test/harness.js";
-import { extractString, extractNumber, extractIds } from "./json.js";
+import { extractString, extractNumber, extractIds, extractPullStreamError } from "./json.js";
 
 describe("JSON field extractors", () => {
   it("extractString finds a top-level string field regardless of surrounding fields", () => {
@@ -36,5 +36,44 @@ describe("JSON field extractors", () => {
   it("extractIds tolerates malformed/non-array bodies by returning an empty array", () => {
     assert.deepEqual(extractIds("not json"), []);
     assert.deepEqual(extractIds("{}"), []);
+  });
+});
+
+describe("extractPullStreamError", () => {
+  it("returns undefined for a progress stream with no error, ignoring a non-JSON line", () => {
+    const body = [
+      '{"status":"Pulling from library/redis","id":"7"}',
+      "this line is not json",
+      '{"status":"Download complete","id":"abc"}',
+      "",
+    ].join("\n");
+    assert.equal(extractPullStreamError(body), undefined);
+  });
+
+  it("returns undefined for an empty body", () => {
+    assert.equal(extractPullStreamError(""), undefined);
+  });
+
+  it("finds a top-level error string", () => {
+    const body = '{"status":"Pulling from x"}\n{"error":"toomanyrequests: rate limit"}\n';
+    assert.equal(extractPullStreamError(body), "toomanyrequests: rate limit");
+  });
+
+  it("finds an errorDetail.message when there is no error string", () => {
+    assert.equal(extractPullStreamError('{"errorDetail":{"message":"unauthorized"}}'), "unauthorized");
+  });
+
+  it("prefers the error string and reports the first failing line", () => {
+    const body = '{"errorDetail":{"message":"detail"},"error":"top"}\n{"error":"later"}';
+    assert.equal(extractPullStreamError(body), "top");
+  });
+
+  it("treats an empty error string, a non-string error, and non-object lines as no error", () => {
+    const body = ['{"error":""}', '{"error":5}', '{"errorDetail":{"message":3}}', '{"errorDetail":"x"}', "[1,2]", "null", '"error"'].join("\n");
+    assert.equal(extractPullStreamError(body), undefined);
+  });
+
+  it("tolerates CRLF line endings", () => {
+    assert.equal(extractPullStreamError('{"status":"ok"}\r\n{"error":"boom"}\r\n'), "boom");
   });
 });

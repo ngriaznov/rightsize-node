@@ -180,6 +180,158 @@ describe("containerLabels — keepAlive swaps the run-id label for the reuse lab
   });
 });
 
+const PULL_IMAGE = "quay.io/keycloak/keycloak:latest";
+const PULL_URL = "/images/create?fromImage=quay.io%2Fkeycloak%2Fkeycloak&tag=latest";
+const NO_SUCH_IMAGE = { status: 404, body: '{"message":"No such image: quay.io/keycloak/keycloak:latest"}' };
+const PULL_OK = {
+  status: 200,
+  body: [
+    '{"status":"Pulling from keycloak/keycloak","id":"latest"}',
+    '{"status":"Pulling fs layer","progressDetail":{},"id":"a1b2c3"}',
+    "not json, a progress line from a proxy",
+    '{"status":"Downloading","progressDetail":{"current":1,"total":9},"id":"a1b2c3"}',
+    '{"status":"Status: Downloaded newer image for quay.io/keycloak/keycloak:latest"}',
+    "",
+  ].join("\n"),
+};
+const PULL_STREAM_ERROR = {
+  status: 200,
+  body: [
+    '{"status":"Pulling from keycloak/keycloak","id":"latest"}',
+    '{"errorDetail":{"message":"received unexpected HTTP status: 502 Bad Gateway"},"error":"received unexpected HTTP status: 502 Bad Gateway"}',
+    "",
+  ].join("\n"),
+};
+const CONTAINER_CREATED = { status: 201, body: JSON.stringify({ Id: "daemon-container-id" }) };
+
+/** Runs `create` for `PULL_IMAGE` against a daemon scripted with `responses`, returning what the daemon saw, the pauses taken, and the error thrown (if any). */
+async function createWithPull(responses: ReadonlyArray<{ status: number; body: string }>) {
+  const { close, requests, client } = await fakeDaemon(responses);
+  const pauses: number[] = [];
+  try {
+    const backend = new DockerBackend(client, (ms) => {
+      pauses.push(ms);
+      return Promise.resolve();
+    });
+    let thrown: unknown;
+    let handle;
+    try {
+      handle = await backend.create(baseSpec({ image: PULL_IMAGE }));
+    } catch (err) {
+      thrown = err;
+    }
+    const pulls = requests.filter((r) => r.method === "POST" && r.url.startsWith("/images/create"));
+    const created = requests.filter((r) => r.method === "POST" && r.url.startsWith("/containers/create"));
+    return { requests, pulls, created, pauses, thrown, handle };
+  } finally {
+    close();
+  }
+}
+
+describe("DockerBackend.create — pull-if-missing", () => {
+  it("an image that is already present is not pulled", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const r = await createWithPull([{ status: 200, body: "{}" }, CONTAINER_CREATED]);
+    assert.equal(r.pulls.length, 0);
+    assert.equal(r.created.length, 1);
+    assert.deepEqual(r.pauses, []);
+  });
+
+  it("a normal progress stream (with a non-JSON line) pulls once, takes no pause, and proceeds to create", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const r = await createWithPull([NO_SUCH_IMAGE, PULL_OK, CONTAINER_CREATED]);
+    assert.equal(r.thrown, undefined);
+    assert.equal(r.pulls.length, 1);
+    assert.equal(r.pulls[0]?.url, PULL_URL);
+    assert.equal(r.created.length, 1);
+    assert.deepEqual(r.pauses, []);
+    assert.equal(r.handle?.id, "daemon-container-id");
+  });
+
+  it("an error object in the pull stream is retried once after the fixed pause, then create proceeds", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const r = await createWithPull([NO_SUCH_IMAGE, PULL_STREAM_ERROR, PULL_OK, CONTAINER_CREATED]);
+    assert.equal(r.thrown, undefined);
+    assert.equal(r.pulls.length, 2);
+    assert.equal(r.pulls[1]?.url, PULL_URL);
+    assert.deepEqual(r.pauses, [2000]);
+    assert.equal(r.created.length, 1);
+  });
+
+  it("a bare errorDetail object (no top-level error) counts as a failed pull too", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const detailOnly = { status: 200, body: '{"errorDetail":{"message":"toomanyrequests: rate limit"}}\n' };
+    const r = await createWithPull([NO_SUCH_IMAGE, detailOnly, PULL_OK, CONTAINER_CREATED]);
+    assert.equal(r.thrown, undefined);
+    assert.equal(r.pulls.length, 2);
+    assert.equal(r.created.length, 1);
+  });
+
+  it("an error object in the stream twice fails after exactly two pulls, naming the image, Docker's message, and the retry", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const r = await createWithPull([NO_SUCH_IMAGE, PULL_STREAM_ERROR, PULL_STREAM_ERROR]);
+    assert.equal(r.pulls.length, 2);
+    assert.deepEqual(r.pauses, [2000]);
+    assert.equal(r.created.length, 0, "must not go on to create a container from an image that never arrived");
+    assert.ok(r.thrown instanceof BackendError, `expected BackendError, got: ${String(r.thrown)}`);
+    const message = (r.thrown as Error).message;
+    assert.ok(message.startsWith(`docker could not pull image '${PULL_IMAGE}'`), message);
+    assert.match(message, /received unexpected HTTP status: 502 Bad Gateway/);
+    assert.match(message, /retried once/);
+  });
+
+  it("HTTP 500 once, then success: retried after the pause and create proceeds", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const r = await createWithPull([NO_SUCH_IMAGE, { status: 500, body: '{"message":"registry unavailable"}' }, PULL_OK, CONTAINER_CREATED]);
+    assert.equal(r.thrown, undefined);
+    assert.equal(r.pulls.length, 2);
+    assert.deepEqual(r.pauses, [2000]);
+    assert.equal(r.created.length, 1);
+  });
+
+  it("HTTP 503 twice fails after exactly two pulls with Docker's body and the retry noted", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const down = { status: 503, body: '{"message":"registry unavailable"}\n' };
+    const r = await createWithPull([NO_SUCH_IMAGE, down, down]);
+    assert.equal(r.pulls.length, 2);
+    assert.ok(r.thrown instanceof BackendError, `expected BackendError, got: ${String(r.thrown)}`);
+    const message = (r.thrown as Error).message;
+    assert.ok(message.startsWith(`docker could not pull image '${PULL_IMAGE}' (HTTP 503)`), message);
+    assert.match(message, /registry unavailable/);
+    assert.match(message, /retried once/);
+  });
+
+  it("HTTP 404 on the pull fails at once: one pull, no pause, no retry note", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const missing = { status: 404, body: '{"message":"pull access denied, repository does not exist"}' };
+    const r = await createWithPull([NO_SUCH_IMAGE, missing]);
+    assert.equal(r.pulls.length, 1);
+    assert.deepEqual(r.pauses, []);
+    assert.equal(r.created.length, 0);
+    assert.ok(r.thrown instanceof BackendError, `expected BackendError, got: ${String(r.thrown)}`);
+    const message = (r.thrown as Error).message;
+    assert.ok(message.startsWith(`docker could not pull image '${PULL_IMAGE}' (HTTP 404)`), message);
+    assert.match(message, /repository does not exist/);
+    assert.equal(message.includes("retried"), false);
+  });
+});
+
 describe("DockerBackend.removeNetwork — must not depend on this instance's own in-memory cache", () => {
   it("resolves the daemon id via a by-name lookup when this instance never itself called ensureNetwork for it (a sweep's fresh instance reaping a DIFFERENT process's dead run)", async () => {
     if (skipOnWindows()) {

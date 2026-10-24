@@ -3,9 +3,9 @@ import { BackendError, PortBindConflictError } from "../core/errors.js";
 import type { BackendCapabilities, FollowHandle, NetworkLink, ReaperKillCommand, SandboxBackend, SandboxHandle } from "../core/backend.js";
 import type { ContainerSpec, ExecResult } from "../core/model.js";
 import { RunId } from "../core/run-id.js";
-import { DockerClient } from "./client.js";
+import { DockerClient, type DockerResponse } from "./client.js";
 import { FrameDemuxer, LineAssembler } from "./frames.js";
-import { extractIds, extractNumber, extractString } from "./json.js";
+import { extractIds, extractNumber, extractPullStreamError, extractString } from "./json.js";
 import { isPortBindConflictMessage } from "./port-conflict.js";
 import { labelFilterQuery, containerLabels } from "./labels.js";
 import { runDockerCli, DockerCli } from "./cli.js";
@@ -17,6 +17,14 @@ const COPY_TIMEOUT_MS = 120_000;
 // `docker save`/`load` move a full image layer set, not a single file —
 // more generous than a plain `docker cp`.
 const ARCHIVE_TIMEOUT_MS = 300_000;
+// A failed image pull (registry 5xx, rate limit, dropped connection) gets one
+// more attempt after this pause, long enough for a registry hiccup to pass
+// without stalling the start for long.
+const PULL_RETRY_DELAY_MS = 2_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 function encodeQueryValue(s: string): string {
   return encodeURIComponent(s);
@@ -36,6 +44,37 @@ function splitRepoTag(image: string): [string, string] {
   }
   const colon = slashIdx + relColon;
   return [image.slice(0, colon), image.slice(colon + 1)];
+}
+
+interface PullFailure {
+  /** Where Docker reported it: the HTTP status, or the progress stream of a 200 response. */
+  readonly where: string;
+  /** Docker's own message, as it came back. */
+  readonly message: string;
+  /** Whether a second attempt can help: an in-stream error or an HTTP 5xx, never an HTTP 4xx. */
+  readonly retryable: boolean;
+}
+
+/**
+ * Reads a `POST /images/create` response for a failed pull, or `undefined` when it succeeded.
+ *
+ * Docker answers 200 and streams newline-delimited JSON progress objects, so a pull
+ * that dies partway (registry 5xx, rate limit, network drop, auth) still arrives as
+ * a 200 with an `error`/`errorDetail` object in the stream; the status alone isn't enough.
+ */
+function pullFailure(resp: DockerResponse): PullFailure | undefined {
+  if (resp.status >= 400) {
+    return { where: `HTTP ${resp.status}`, message: resp.body.toString().trim(), retryable: resp.status >= 500 };
+  }
+  const streamError = extractPullStreamError(resp.body.toString());
+  if (streamError !== undefined) {
+    return { where: `HTTP ${resp.status}, error in the pull stream`, message: streamError, retryable: true };
+  }
+  return undefined;
+}
+
+function pullFailureMessage(image: string, failure: PullFailure, retried: boolean): string {
+  return `docker could not pull image '${image}' (${failure.where}): ${failure.message}${retried ? " (retried once)" : ""}`;
 }
 
 interface CreateContainerBody {
@@ -143,7 +182,13 @@ export class DockerBackend implements SandboxBackend {
 
   private readonly networkIds = new Map<string, string>();
 
-  constructor(private readonly client: DockerClient) {}
+  constructor(
+    private readonly client: DockerClient,
+    // Test seam: production call sites never pass this, so a retried pull
+    // really waits `PULL_RETRY_DELAY_MS`. A test passes a recorder instead of
+    // waiting it out.
+    private readonly pause: (ms: number) => Promise<void> = sleep,
+  ) {}
 
   /** Exposed for the transport regression test: the socket path this backend's client actually dials. */
   socketPathForTest(): string {
@@ -158,9 +203,17 @@ export class DockerBackend implements SandboxBackend {
     }
     const [repo, tag] = splitRepoTag(image);
     const pullPath = `/images/create?fromImage=${encodeQueryValue(repo)}&tag=${encodeQueryValue(tag)}`;
-    const resp = await this.client.request("POST", pullPath);
-    if (resp.status >= 400) {
-      throw new BackendError(`docker could not pull image '${image}' (HTTP ${resp.status}): ${resp.body.toString()}`);
+    const failure = pullFailure(await this.client.request("POST", pullPath));
+    if (failure === undefined) {
+      return;
+    }
+    if (!failure.retryable) {
+      throw new BackendError(pullFailureMessage(image, failure, false));
+    }
+    await this.pause(PULL_RETRY_DELAY_MS);
+    const retryFailure = pullFailure(await this.client.request("POST", pullPath));
+    if (retryFailure !== undefined) {
+      throw new BackendError(pullFailureMessage(image, retryFailure, true));
     }
   }
 
