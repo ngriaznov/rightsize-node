@@ -3,7 +3,8 @@
 # which versions are permanent). The `prepublishOnly` script rebuilds dist and
 # runs typecheck + the node unit suite first, so a stale or broken build cannot
 # ship. `--provenance` attaches a signed attestation linking the published
-# tarball to this repository and workflow run. See .github/RELEASING.md.
+# tarball to this repository and workflow run. Nothing publishes until the macOS
+# gate (macos.yml) passes. See .github/RELEASING.md.
 name: release
 
 on:
@@ -14,7 +15,15 @@ permissions:
   id-token: write # npm provenance attestation (OIDC)
 
 jobs:
+  # Build, unit tests and a real provisioning of the pinned msb on Apple Silicon; see
+  # macos.yml for what it checks and why it boots no sandbox.
+  macos:
+    uses: ./.github/workflows/macos.yml
+    permissions:
+      contents: read
+
   publish-to-npm:
+    needs: macos
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

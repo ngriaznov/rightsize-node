@@ -60,8 +60,13 @@ doing:
 
 > **macOS in CI:** there is no `msb-macos` job — GitHub's hosted Apple Silicon
 > runners are themselves VMs without nested virtualization, so microVMs cannot
-> boot there (Hypervisor.framework rejects VM creation). macOS support is
-> verified on real Apple Silicon hardware before release.
+> boot there (Hypervisor.framework rejects VM creation). The `macos` workflow
+> (`.github/workflows/macos.yml`) covers what a hosted runner can: build, the
+> node unit suite, and a real provisioning of the pinned msb, which must run,
+> ship an arm64 libkrunfw, and carry the hypervisor entitlement. The `release`
+> workflow runs it before publishing, and pull requests that touch the msb pin
+> run it too. The integration suite on macOS is verified on real Apple Silicon
+> hardware before release.
 
 > **Windows in CI:** there IS a `msb-windows` job, unlike `msb-macos` above —
 > a CI spike (2026-07-05) found Windows Hypervisor Platform already enabled

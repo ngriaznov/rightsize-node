@@ -34,8 +34,12 @@ of the flow.
    The tarball must contain only `dist/`, `LICENSE`, `NOTICE`, `README.md`, and
    `package.json` — no `dist-test`, no fixtures, no sources.
 5. Push `main`, then publish from CI: Actions → `release` → Run workflow.
-   `prepublishOnly` rebuilds `dist/` and runs typecheck + the node unit suite
-   inside the workflow, so a stale or broken build cannot ship, and
+   The workflow first runs the macOS gate (`macos.yml`, on a hosted Apple
+   Silicon runner): build, the node unit suite, and a real provisioning of the
+   pinned msb, which must report its version, ship an arm64 libkrunfw, and be
+   signed with the hypervisor entitlement. Nothing publishes unless it passes.
+   `prepublishOnly` then rebuilds `dist/` and runs typecheck + the node unit suite
+   inside the publish job, so a stale or broken build cannot ship, and
    `--provenance` attaches a signed attestation linking the tarball to the
    repository and run. The publish step passes `--access public` alongside
    `--provenance`: npm requires it for a package's first publish under

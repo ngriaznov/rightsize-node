@@ -301,9 +301,10 @@ npm run docs:verify                                         # typechecks every d
 ```
 
 CI runs the matrix on Linux (KVM), Windows, and a Docker-only job, both
-Node and Bun. macOS support is verified on real Apple Silicon hardware
-outside CI — GitHub's hosted Apple Silicon runners can't do nested
-virtualization, so msb can't boot there.
+Node and Bun. GitHub's hosted Apple Silicon runners can't do nested
+virtualization, so msb can't boot there: a macOS job builds the package, runs
+the node unit suite and provisions the pinned msb on one before every release,
+and the integration suite is verified on real Apple Silicon hardware outside CI.
 
 See [`CONTRIBUTING.md`](https://github.com/ngriaznov/rightsize-node/blob/main/.github/CONTRIBUTING.md)
 for what each `tsconfig*.json` is for, the full npm script reference, and
