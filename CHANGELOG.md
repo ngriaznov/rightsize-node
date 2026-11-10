@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.18] - 2026-11-10
+
 ### Added
 
 - **The msb agent-relay boot retry now leaves evidence.** When msb's sandbox process exits
