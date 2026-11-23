@@ -1,5 +1,23 @@
 import { describe, it, assert } from "../../test/harness.js";
-import { parseSnapshotCreateArtifactPath } from "./snapshot-create.js";
+import { parseSnapshotCreateArtifactPath, stripWindowsVerbatimPrefix } from "./snapshot-create.js";
+
+describe("stripWindowsVerbatimPrefix", () => {
+  it("drops the extended-length prefix msb 0.8 prints on Windows", () => {
+    assert.equal(
+      stripWindowsVerbatimPrefix("\\\\?\\C:\\Users\\r\\checkpoints\\rz-ckpt-x\\snap_ab"),
+      "C:\\Users\\r\\checkpoints\\rz-ckpt-x\\snap_ab",
+    );
+  });
+
+  it("turns the UNC form back into a plain UNC path", () => {
+    assert.equal(stripWindowsVerbatimPrefix("\\\\?\\UNC\\server\\share\\ck"), "\\\\server\\share\\ck");
+  });
+
+  it("leaves other paths alone", () => {
+    assert.equal(stripWindowsVerbatimPrefix("/cache/checkpoints/rz-ckpt-x/snap_ab"), "/cache/checkpoints/rz-ckpt-x/snap_ab");
+    assert.equal(stripWindowsVerbatimPrefix("C:\\ck\\snap_ab"), "C:\\ck\\snap_ab");
+  });
+});
 
 describe("parseSnapshotCreateArtifactPath", () => {
   it("returns the absolute path from the last non-empty line (real msb 0.7.1 shape)", () => {

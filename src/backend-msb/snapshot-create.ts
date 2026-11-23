@@ -25,9 +25,28 @@ export function parseSnapshotCreateArtifactPath(stdout: string): string | undefi
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
-  const lastLine = lines.at(-1);
+  const last = lines.at(-1);
+  const lastLine = last === undefined ? undefined : stripWindowsVerbatimPrefix(last);
   if (lastLine === undefined || !path.isAbsolute(lastLine)) {
     return undefined;
   }
   return lastLine;
+}
+
+/**
+ * `path` without Windows' extended-length prefix: `\\?\C:\...` becomes `C:\...` and
+ * `\\?\UNC\server\share\...` becomes `\\server\share\...`; any other path comes back
+ * unchanged. On Windows msb 0.8 prints the artifact path of `msb snapshot create` in
+ * the prefixed form. Stripping it keeps the ref in the same form as the checkpoints
+ * directory it lives under (and as the Kotlin and Rust backends store it); msb
+ * accepts the plain form as input, and Node handles long paths without the prefix.
+ */
+export function stripWindowsVerbatimPrefix(p: string): string {
+  if (p.startsWith("\\\\?\\UNC\\")) {
+    return `\\\\${p.slice("\\\\?\\UNC\\".length)}`;
+  }
+  if (p.startsWith("\\\\?\\")) {
+    return p.slice("\\\\?\\".length);
+  }
+  return p;
 }
