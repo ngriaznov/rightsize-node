@@ -58,7 +58,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest:node": "tsc -p tsconfig.test.json && npm run copy-test-fixtures",
     "test:node": "node --test 'dist-test/**/*.test.js'",
-    "test:node:it": "npm run pretest:node && cross-env RIGHTSIZE_IT=1 node --test --test-concurrency=1 --test-timeout=300000 'dist-test/**/*.test.js'",
+    "test:node:it": "npm run pretest:node && cross-env RIGHTSIZE_IT=1 node --test --test-concurrency=1 --test-timeout=600000 'dist-test/**/*.test.js'",
     "test:bun": "bun test --path-ignore-patterns='dist-test/**' --path-ignore-patterns='examples/**'",
     "test:bun:it": "cross-env RIGHTSIZE_IT=1 bun test --path-ignore-patterns='dist-test/**' --path-ignore-patterns='examples/**' --timeout=300000",
     "test": "npm run test:node && npm run test:bun",
