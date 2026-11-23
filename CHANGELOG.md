@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.8.1] - 2026-11-23
+
 ### Changed
 
 - **The pinned msb is now 0.8.1** (was 0.7.14), and rightsize's version now follows the msb
