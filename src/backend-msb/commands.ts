@@ -84,10 +84,10 @@ export const MsbCommands = {
       argv.push("--mount-file", fileMountValue(mount));
     }
     // `checkpointRef` never reaches here: msb 0.7.1 removed `run --from-snapshot`
-    // outright (clap rejects it as an unexpected argument now), so a spec that
-    // carries a checkpointRef is routed to `restore()` below, one layer up in
-    // `MsbCliBackend.bootOnce` — this function only ever builds an ordinary
-    // image boot.
+    // (0.8.1 accepts it again, but this library still restores through `msb
+    // restore`), so a spec that carries a checkpointRef is routed to
+    // `restore()` below, one layer up in `MsbCliBackend.bootOnce` — this
+    // function only ever builds an ordinary image boot.
     argv.push(spec.image);
     if (spec.command !== undefined) {
       // undefined => the image's own ENTRYPOINT/CMD runs unmodified.
@@ -98,9 +98,10 @@ export const MsbCommands = {
 
   /**
    * `msb restore <ref> --name <name> [-m SIZE] [--no-net] [-p HOST:GUEST]...
-   * [--volume SOURCE:GUEST:OPTS]...` — the checkpoint-reboot argv,
-   * replacing the removed `run --from-snapshot` (msb 0.7.1 moved restore to
-   * this dedicated subcommand). NEVER emits `--disk-only`: EMPIRICALLY
+   * [--volume SOURCE:GUEST:OPTS]...` — the checkpoint-reboot argv, in place
+   * of `run --from-snapshot` (msb 0.7.1 moved restore to this dedicated
+   * subcommand; 0.8.1 accepts the old flag again, this library keeps using
+   * `restore`). NEVER emits `--disk-only`: EMPIRICALLY
    * VERIFIED against a real msb 0.7.1 binary, a disk-scope snapshot — the
    * only kind `msb snapshot create --from-sandbox` produces, and therefore
    * the only kind this library's checkpoints ever restore — REJECTS that
@@ -217,24 +218,21 @@ export const MsbCommands = {
   },
 
   /**
-   * `msb snapshot create --from-sandbox <sandbox> <name>` — requires
-   * `sandbox` STOPPED. `name` is a caller-supplied label, EMPIRICALLY
-   * VERIFIED against a real msb 0.7.1 binary to no longer determine where
-   * the artifact lands: it only appears in msb's own index (as
-   * `<sandbox>:<name>`, visible in `msb snapshot list`) and in `snapshot
-   * inspect` output. The artifact itself always lands under
-   * `<destDir-or-default>/<sandbox>/snap_<32-hex-digest>` — a
-   * content-addressed path `name` has no say over — which is why
-   * `MsbCliBackend.createCheckpoint` parses it back out of this command's
-   * own stdout (see `parseSnapshotCreateArtifactPath`) instead of
+   * `msb snapshot create --from-sandbox <sandbox> <group>` — requires
+   * `sandbox` STOPPED. Since msb 0.8.0 the positional is a NEW snapshot
+   * GROUP, not a member label: msb refuses a group that already exists
+   * (`snapshot already exists: <group>`) and names the single member it
+   * creates itself (`snap_<32-hex-digest>`). The artifact therefore lands
+   * under `<destDir-or-default>/<group>/snap_<digest>` — which is why
+   * `MsbCliBackend.createCheckpoint` parses the path back out of this
+   * command's own stdout (see `parseSnapshotCreateArtifactPath`) instead of
    * constructing it. `destDir` (this library's own `--dest-dir`, when the
-   * ref is a path ref) still controls the artifact's PARENT directory —
-   * `<destDir>/<sandbox>/snap_<digest>` when given, msb's own default
-   * snapshot store (`~/.microsandbox/snapshots/<sandbox>/snap_<digest>`)
+   * ref is a path ref) still controls the group's PARENT directory; msb's
+   * own default snapshot store (`~/.microsandbox/snapshots`) is used
    * otherwise.
    */
-  snapshotCreate(sandbox: string, name: string, destDir?: string): string[] {
-    const argv = ["snapshot", "create", "--from-sandbox", sandbox, name];
+  snapshotCreate(sandbox: string, group: string, destDir?: string): string[] {
+    const argv = ["snapshot", "create", "--from-sandbox", sandbox, group];
     if (destDir !== undefined) {
       argv.push("--dest-dir", destDir);
     }
@@ -242,63 +240,61 @@ export const MsbCommands = {
   },
 
   /**
-   * `msb snapshot rm <ref> -f` — best-effort per `removeCheckpoint`'s own
-   * contract; "not found" is fine. `ref` must be the snapshot's own artifact
-   * PATH, never a bare name or `group:member` form: EMPIRICALLY VERIFIED
-   * against a real msb 0.7.1 binary, name-based removal does not resolve —
-   * the artifact path is the only address that reliably works. `-f` forces
-   * the removal; without it a plain `msb snapshot rm` prompts for
-   * confirmation, which would hang a non-interactive CLI invocation forever.
-   * A non-zero exit can ALSO mean msb refused because `ref` is the current
-   * head of older siblings from the same source sandbox — see
-   * `isSnapshotHeadRemovalRefused`, which `removeCheckpoint` propagates
-   * rather than swallowing alongside an ordinary "not found."
+   * Removes a checkpoint, addressed the way msb 0.8 wants: the GROUP
+   * DIRECTORY (`dirname` of the stored member path) plus, unless the whole
+   * group goes, the member name (`basename`). A member path is not accepted
+   * as the positional. `removeWholeGroup` picks `msb snapshot rm <groupDir>
+   * --all` — the only way to delete the group's `group.json` too, which
+   * `--checkpoint` leaves behind and which blocks reusing the group name —
+   * and is only right when `member` is the group's only member. Otherwise
+   * it is `msb snapshot rm <groupDir> --checkpoint <member> -f`; `-f` stops
+   * the interactive confirmation prompt, which would hang a non-interactive
+   * CLI invocation forever, and msb rejects it together with `--all`.
    */
-  snapshotRemove(ref: string): string[] {
-    return ["snapshot", "rm", ref, "-f"];
+  snapshotRemove(groupDir: string, member: string, removeWholeGroup: boolean): string[] {
+    return removeWholeGroup
+      ? ["snapshot", "rm", groupDir, "--all"]
+      : ["snapshot", "rm", groupDir, "--checkpoint", member, "-f"];
   },
 
   /**
    * `msb snapshot inspect <ref>` — exit 0 means the snapshot exists,
    * non-zero means it doesn't (or the probe itself failed); `hasCheckpoint`'s
-   * backend call for a bare-name ref. `ref` should be the snapshot's own
-   * artifact PATH for the same reason `snapshotRemove` requires one —
-   * EMPIRICALLY VERIFIED against a real msb 0.7.1 binary, name-based inspect
-   * does not resolve either.
+   * backend call for a bare-name ref only. Path refs are answered by a
+   * filesystem check instead: msb 0.8.1 takes a GROUP here and rejects a
+   * member path.
    */
   snapshotInspect(ref: string): string[] {
     return ["snapshot", "inspect", ref];
   },
 
   /**
-   * `msb snapshot save <ref> <dest>` — writes a `.tar.zst` artifact archive;
-   * deliberately never `--with-image` (see the checkpoints guide — this
-   * library doesn't bundle the OCI image into the archive yet, though
-   * upstream supports it). Upstream renamed the subcommand
-   * from `export` to `save` for msb 0.7.1 (EMPIRICALLY VERIFIED against a
-   * real 0.7.1 binary — `snapshot export` no longer exists at all); `<ref>`
-   * and `<dest>` are still plain positionals with the explicit filename
-   * preserved, so nothing about the argv shape besides the verb changes.
-   * `exportCheckpoint`'s backend call.
+   * `msb snapshot save <groupDir> --checkpoint <member> <dest>` — writes a
+   * `.tar.zst` artifact archive; deliberately never `--with-image` (see the
+   * checkpoints guide — this library doesn't bundle the OCI image into the
+   * archive yet, though upstream supports it). Upstream renamed the
+   * subcommand from `export` to `save` for msb 0.7.1; msb 0.8.0 made the
+   * positional a group and added `--checkpoint` to pick the member, so a
+   * member path no longer resolves. `exportCheckpoint`'s backend call.
    */
-  snapshotExport(ref: string, dest: string): string[] {
-    return ["snapshot", "save", ref, dest];
+  snapshotExport(groupDir: string, member: string, dest: string): string[] {
+    return ["snapshot", "save", groupDir, "--checkpoint", member, dest];
   },
 
   /**
-   * `msb snapshot load <archive> --dest <destDir>` — upstream renamed the
-   * subcommand from `import` to `load` for msb 0.7.1 (EMPIRICALLY VERIFIED
-   * against a real 0.7.1 binary — `snapshot import` no longer exists at
-   * all) and added `--dest`, which this always passes: omitting it imports
-   * into msb's own global default snapshot store instead of this library's
-   * checkpoints directory, which is exactly the placement bug `--dest`
-   * exists to avoid (mirrors `snapshotCreate`'s own `--dest-dir`, a
-   * differently-spelled flag on a different subcommand). `destDir` is
-   * always the checkpoints cache directory (see `MsbCliBackend.importCheckpoint`).
-   * `importCheckpoint`'s backend call.
+   * `msb snapshot load <group> --file <archive> --dest <destDir>` — msb 0.8.0
+   * made the new group's name a required positional and the archive a
+   * `--file` option (the 0.7.x positional archive is gone). `--dest` is
+   * always passed: omitting it imports into msb's own global default
+   * snapshot store instead of this library's checkpoints directory, which is
+   * exactly the placement bug `--dest` exists to avoid (mirrors
+   * `snapshotCreate`'s own `--dest-dir`, a differently-spelled flag on a
+   * different subcommand). `destDir` is always the checkpoints cache
+   * directory (see `MsbCliBackend.importCheckpoint`); the member lands at
+   * `<destDir>/<group>/<id>`. `importCheckpoint`'s backend call.
    */
-  snapshotImport(archive: string, destDir: string): string[] {
-    return ["snapshot", "load", archive, "--dest", destDir];
+  snapshotImport(group: string, archive: string, destDir: string): string[] {
+    return ["snapshot", "load", group, "--file", archive, "--dest", destDir];
   },
 
   /** `msb copy -q <hostPath> <name>:<containerPath>` — host-to-guest transfer, `cp -r`-style destination naming for a directory source. */

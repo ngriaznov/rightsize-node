@@ -584,11 +584,22 @@ describe("MsbCommands", () => {
     ]);
   });
 
-  it("snapshotRemove: appends -f (force) after the ref", () => {
-    assert.deepEqual(MsbCommands.snapshotRemove("/cache/checkpoints/box-1/snap_abcdef012345"), [
+  it("snapshotRemove: a whole group is --all, with no -f", () => {
+    assert.deepEqual(MsbCommands.snapshotRemove("/cache/checkpoints/rz-ckpt-x", "snap_abcdef012345", true), [
       "snapshot",
       "rm",
-      "/cache/checkpoints/box-1/snap_abcdef012345",
+      "/cache/checkpoints/rz-ckpt-x",
+      "--all",
+    ]);
+  });
+
+  it("snapshotRemove: one member of a shared group is --checkpoint <member> -f", () => {
+    assert.deepEqual(MsbCommands.snapshotRemove("/cache/checkpoints/rz-ckpt-x", "snap_abcdef012345", false), [
+      "snapshot",
+      "rm",
+      "/cache/checkpoints/rz-ckpt-x",
+      "--checkpoint",
+      "snap_abcdef012345",
       "-f",
     ]);
   });
@@ -597,19 +608,19 @@ describe("MsbCommands", () => {
     assert.deepEqual(MsbCommands.snapshotInspect("rz-ckpt-abcdef012345"), ["snapshot", "inspect", "rz-ckpt-abcdef012345"]);
   });
 
-  it("snapshotExport", () => {
-    assert.deepEqual(MsbCommands.snapshotExport("rz-ckpt-abcdef012345", "/out/archive.tar.zst"), [
-      "snapshot",
-      "save",
-      "rz-ckpt-abcdef012345",
-      "/out/archive.tar.zst",
-    ]);
+  it("snapshotExport: group directory, --checkpoint member, then the destination", () => {
+    assert.deepEqual(
+      MsbCommands.snapshotExport("/cache/checkpoints/rz-ckpt-x", "snap_abcdef012345", "/out/archive.tar.zst"),
+      ["snapshot", "save", "/cache/checkpoints/rz-ckpt-x", "--checkpoint", "snap_abcdef012345", "/out/archive.tar.zst"],
+    );
   });
 
-  it("snapshotImport: always carries --dest, never omitted", () => {
-    assert.deepEqual(MsbCommands.snapshotImport("/in/archive.tar.zst", "/cache/checkpoints"), [
+  it("snapshotImport: group positional, --file archive, and --dest always present", () => {
+    assert.deepEqual(MsbCommands.snapshotImport("rz-ckpt-import-0123456789ab", "/in/archive.tar.zst", "/cache/checkpoints"), [
       "snapshot",
       "load",
+      "rz-ckpt-import-0123456789ab",
+      "--file",
       "/in/archive.tar.zst",
       "--dest",
       "/cache/checkpoints",

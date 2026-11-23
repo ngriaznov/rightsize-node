@@ -600,15 +600,15 @@ if (cmd === "run") {
     process.exit(0);
   }
 } else if (cmd === "snapshot" && args[1] === "create") {
-  // snapshot create --from-sandbox <sandbox> <name> [--dest-dir <dir>] — msb
-  // 0.7.1's own snapshot-store layout (EMPIRICALLY VERIFIED against a real
-  // 0.7.1 binary): the artifact ALWAYS lands nested under
-  // <destDir-or-default>/<sandbox>/snap_<32-hex-digest>, never at
-  // <destDir>/<name> — `name` never determines the path (it only ends up in
-  // msb's own index, keyed by `<sandbox>:<name>`, which this fixture doesn't
-  // bother modeling since nothing here reads it back that way). The
-  // artifact path is printed as the LAST stdout line, after a snapshot-id
-  // line — the exact shape `parseSnapshotCreateArtifactPath` parses.
+  // snapshot create --from-sandbox <sandbox> <group> [--dest-dir <dir>] — msb
+  // 0.8's own snapshot-store layout: the positional is a NEW snapshot GROUP
+  // (a second create under the same group name fails with "snapshot already
+  // exists: <group>", as long as the group directory is still there), and
+  // msb names the one member itself. The artifact lands at
+  // <destDir-or-default>/<group>/snap_<32-hex-digest>, with a group.json
+  // beside it, and the path is printed as the LAST stdout line after a
+  // snapshot-id line — the exact shape `parseSnapshotCreateArtifactPath`
+  // parses.
   const fromIdx = args.indexOf("--from-sandbox");
   const from = args[fromIdx + 1];
   const name = args[fromIdx + 2];
@@ -623,15 +623,20 @@ if (cmd === "run") {
   }
   // No --dest-dir: msb's own default snapshot store. Rooted under the fake
   // state file's own directory (a real, writable per-test tmp dir) rather
-  // than a literal fake path, so this fixture can actually mkdirSync it —
-  // unlike the fake paths `snapshot load`'s digest-dir naming below uses,
-  // which nothing here ever creates on disk.
+  // than a literal fake path, so this fixture can actually mkdirSync it.
   const destDir =
     destDirIdx !== -1 ? args[destDirIdx + 1] : path.join(path.dirname(statePath ?? "."), "msb-default-snapshots");
+  const groupDir = path.join(destDir, name);
+  if (fs.existsSync(groupDir)) {
+    writeState(state);
+    process.stderr.write(`error: snapshot already exists: ${name}\n`);
+    process.exit(1);
+  }
   const digest = crypto.randomBytes(16).toString("hex");
   const snapId = `snap_${digest}`;
-  const artifactPath = path.join(destDir, from, snapId);
+  const artifactPath = path.join(groupDir, snapId);
   fs.mkdirSync(artifactPath, { recursive: true });
+  fs.writeFileSync(path.join(groupDir, "group.json"), JSON.stringify({ name }));
   fs.writeFileSync(path.join(artifactPath, "snapshot.json"), JSON.stringify({ from, name }));
   // Like msb 0.7.8, record the source sandbox's copied files (start-time bind
   // mounts) in the snapshot: their content is not captured, only the fact
@@ -659,12 +664,9 @@ if (cmd === "run") {
 } else if (cmd === "snapshot" && args[1] === "inspect") {
   // snapshot inspect <name> — exit 0 if the snapshot exists, exit 1
   // otherwise. hasCheckpoint's backend call, but only for a BARE-NAME ref:
-  // an absolute-path ref (every `snapshot create`/`snapshot load` artifact
-  // since 0.7.1, including an imported one now that `importCheckpoint`
-  // hands back the loaded artifact's own path — see backend.ts) is answered
-  // by hasCheckpoint's own direct filesystem check instead and never
-  // reaches this fixture at all, so only `state.snapshots` (bare-name
-  // pre-dest-dir checkpoints) is checked here.
+  // an absolute-path ref is answered by hasCheckpoint's own direct
+  // filesystem check instead and never reaches this fixture at all, so only
+  // `state.snapshots` (bare-name pre-dest-dir checkpoints) is checked here.
   const name = args[2];
   const state = readState();
   // Reproduces a genuine, non-"not found" probe failure on demand (an
@@ -684,51 +686,84 @@ if (cmd === "run") {
     process.stdout.write(JSON.stringify({ name }));
     process.exit(0);
   }
-  // Wording captured verbatim from the real msb 0.6.6 binary — the exact
-  // framing isSnapshotNotFoundError matches against.
-  process.stderr.write(`error: snapshot not found: ${name}\n`);
+  // msb 0.8.1's wording for a missing bare group name or member — one of the
+  // two framings isSnapshotNotFoundError matches against.
+  process.stderr.write("error: io error: No such file or directory (os error 2)\n");
   process.exit(1);
 } else if (cmd === "snapshot" && args[1] === "rm") {
-  // snapshot rm <ref> -f — best-effort: a missing ref is still a clean exit,
-  // matching the real command's "not found" contract removeCheckpoint
-  // relies on. `ref` is the FULL artifact path since msb 0.7.1 (name-based
-  // removal does not resolve for real — see MsbCommands.snapshotRemove's
-  // own doc), and this fixture's `state.snapshots` is keyed the same way
-  // (see the "create" branch above).
-  const ref = args[2];
+  // snapshot rm <groupDir> (--all | --checkpoint <member> -f) — msb 0.8's
+  // group-addressed removal. `--all` deletes the whole group directory;
+  // `--checkpoint` deletes just the member and leaves group.json behind.
+  // A missing group or member is msb's "io error ... (os error 2)" with a
+  // non-zero exit, which removeCheckpoint swallows. The call is logged as
+  // `snapshotRemove` so a test can assert the exact argv.
+  const groupDir = args[2];
+  const all = args.includes("--all");
+  const cpIdx = args.indexOf("--checkpoint");
+  const member = cpIdx !== -1 ? args[cpIdx + 1] : undefined;
   const state = readState();
   logCall(state, "snapshotRemove", args);
-  if ((state.failSnapshotRmWithHeadRefusal ?? 0) > 0) {
-    // Reproduces msb's own "this is still the current head of older
-    // siblings from the same source sandbox" refusal on demand — captured
-    // verbatim (see isSnapshotHeadRemovalRefused) — so a test can drive
-    // removeCheckpoint's must-propagate path without needing a real second,
-    // older sibling snapshot underneath.
-    state.failSnapshotRmWithHeadRefusal -= 1;
+  if (all && args.includes("-f")) {
     writeState(state);
-    const from = (state.snapshots ?? {})[ref]?.from ?? "unknown-sandbox";
-    process.stderr.write(
-      `error: invalid config: cannot remove current head ${path.basename(ref)}; first select another ` +
-        `snapshot with 'msb snapshot head ${from}:${path.basename(ref)}'\n`,
-    );
+    process.stderr.write("error: the argument '--all' cannot be used with '--force'\n");
+    process.exit(2);
+  }
+  if (!all && member === undefined) {
+    writeState(state);
+    process.stderr.write("error: the following required arguments were not provided: --checkpoint <CHECKPOINT>\n");
+    process.exit(2);
+  }
+  const missing = () => {
+    writeState(state);
+    process.stderr.write("error: io error: No such file or directory (os error 2)\n");
+    process.exit(1);
+  };
+  if (!fs.existsSync(groupDir)) {
+    missing();
+  }
+  if (!fs.existsSync(path.join(groupDir, "group.json"))) {
+    // A directory that is not a snapshot group (no group.json): the real
+    // command refuses it instead of deleting anything.
+    writeState(state);
+    process.stderr.write(`error: snapshot not found: snapshot group ${groupDir}\n`);
     process.exit(1);
   }
-  if (state.snapshots) {
-    delete state.snapshots[ref];
+  const forget = (artifactPath) => {
+    if (state.snapshots) {
+      delete state.snapshots[artifactPath];
+    }
+  };
+  if (all) {
+    for (const entry of fs.readdirSync(groupDir)) {
+      forget(path.join(groupDir, entry));
+    }
+    fs.rmSync(groupDir, { recursive: true, force: true });
+  } else {
+    const memberPath = path.join(groupDir, member);
+    if (!fs.existsSync(memberPath)) {
+      missing();
+    }
+    forget(memberPath);
+    fs.rmSync(memberPath, { recursive: true, force: true });
   }
   writeState(state);
   process.exit(0);
 } else if (cmd === "snapshot" && args[1] === "save") {
-  // snapshot export <ref> <dest> — exportCheckpoint's backend call. Writes a
-  // recognizable payload file naming the source ref, so a test can assert
-  // byte-identity through the archive round trip without a real .tar.zst.
-  const ref = args[2];
-  const dest = args[3];
+  // snapshot save <groupDir> --checkpoint <member> <dest> — exportCheckpoint's
+  // backend call. Writes a recognizable payload file naming the source
+  // member path, so a test can assert byte-identity through the archive
+  // round trip without a real .tar.zst. A member path as the positional is
+  // not accepted by the real command, and neither is a missing group.
+  const groupDir = args[2];
+  const cpIdx = args.indexOf("--checkpoint");
+  const member = cpIdx !== -1 ? args[cpIdx + 1] : undefined;
+  const dest = args.filter((a, i) => i > 2 && i !== cpIdx && i !== cpIdx + 1).at(-1);
+  const ref = member === undefined ? groupDir : path.join(groupDir, member);
   const state = readState();
   logCall(state, "snapshotExport", args);
   if (!(state.snapshots && ref in state.snapshots)) {
     writeState(state);
-    process.stderr.write(`error: snapshot not found: ${ref}\n`);
+    process.stderr.write("error: io error: No such file or directory (os error 2)\n");
     process.exit(1);
   }
   if ((state.failSnapshotExport ?? 0) > 0) {
@@ -741,21 +776,15 @@ if (cmd === "run") {
   writeState(state);
   process.exit(0);
 } else if (cmd === "snapshot" && args[1] === "load") {
-  // snapshot load <archive> --dest <destDir> — importCheckpoint's backend
-  // call. EMPIRICALLY VERIFIED shape against a real msb 0.7.1 binary: a
-  // successful load prints a "group msb-<hex>: head snap_<digest>
-  // (Initialized)" line, a digest line, then the loaded artifact's own
-  // ABSOLUTE path — <destDir>/<generated-group>/snap_<digest> — as its LAST
-  // line, the exact shape parseImportedArtifactPath parses. Content-
-  // addressed: state.importedSnapshots is keyed by that artifact path (built
-  // from the archive's own bytes), so importing byte-identical content
-  // twice hits the already-exists branch below both times after the first —
-  // reproducing the real binary's "re-importing the same digest is success,
-  // not failure" dedup. `--dest` is required by MsbCommands.snapshotImport,
-  // but this fixture still falls back to a real, writable directory if it's
-  // ever missing (e.g. a hand-built argv in a test), the same fallback
-  // "snapshot create" uses for a missing --dest-dir.
-  const archive = args[2];
+  // snapshot load <group> --file <archive> --dest <destDir> — importCheckpoint's
+  // backend call. msb 0.8.1 shape: the member lands at
+  // <destDir>/<group>/<snap id> and the output is a single `Added: <id>`
+  // line (or `Reused: <id>` when that group already held it), exit 0 either
+  // way; no path is printed. The id is derived from the archive's bytes, so
+  // identical content yields the same id. `failSnapshotImportReused` forces
+  // the `Reused:` wording for a test of that branch.
+  const group = args[2];
+  const archive = args[args.indexOf("--file") + 1];
   const destIdx = args.indexOf("--dest");
   const destDir = destIdx !== -1 ? args[destIdx + 1] : path.join(path.dirname(statePath ?? "."), "msb-default-snapshots");
   const state = readState();
@@ -778,43 +807,30 @@ if (cmd === "run") {
     process.exit(1);
   }
   const digest = crypto.createHash("sha256").update(content).digest("hex");
-  const group = `msb-${digest.slice(0, 12)}`;
   const snapId = `snap_${digest.slice(0, 32)}`;
   const artifactPath = path.join(destDir, group, snapId);
-  state.importedSnapshots = state.importedSnapshots ?? {};
-  if (artifactPath in state.importedSnapshots) {
-    writeState(state);
-    // Wording captured verbatim from the real msb 0.6.6 binary (not
-    // re-verified against 0.7.1's already-exists shape specifically — see
-    // isSnapshotAlreadyExistsError's own doc) — the exact framing
-    // isSnapshotAlreadyExistsError matches against. The printed line still
-    // ends with the artifact path, same as the success case below.
-    process.stderr.write(`error: snapshot already exists: ${artifactPath}\n`);
-    process.exit(1);
+  const reused = fs.existsSync(artifactPath) || (state.snapshotImportReused ?? 0) > 0;
+  if ((state.snapshotImportReused ?? 0) > 0) {
+    state.snapshotImportReused -= 1;
   }
   if ((state.failSnapshotImportBadOutput ?? 0) > 0) {
-    // Reproduces an msb output this backend cannot parse — a last stdout
-    // line that is not an absolute path (e.g. just the "(Initialized)"
-    // status line, msb's own wording for a state, not a path) — so a test
-    // can drive MsbCliBackend.importCheckpoint's defensive parse-failure
-    // path without a real msb binary ever actually misbehaving this way.
-    // The artifact is still created (msb itself succeeded; this is purely
-    // about the stdout this fixture chooses to print), matching the fact
-    // that a real such failure would be a parsing bug in this library, not
-    // an msb failure.
+    // Reproduces an msb output this backend cannot parse — no `Added:` or
+    // `Reused:` line at all — so a test can drive
+    // MsbCliBackend.importCheckpoint's defensive failure path without a real
+    // msb binary ever actually misbehaving this way.
     state.failSnapshotImportBadOutput -= 1;
-    fs.mkdirSync(artifactPath, { recursive: true });
-    fs.writeFileSync(path.join(artifactPath, "snapshot.json"), JSON.stringify({ importedFrom: archive, digest }));
-    state.importedSnapshots[artifactPath] = { digest, importedFrom: archive };
     writeState(state);
     process.stdout.write(`group ${group}: head ${snapId} (Initialized)\n`);
     process.exit(0);
   }
   fs.mkdirSync(artifactPath, { recursive: true });
+  fs.writeFileSync(path.join(path.dirname(artifactPath), "group.json"), JSON.stringify({ name: group }));
   fs.writeFileSync(path.join(artifactPath, "snapshot.json"), JSON.stringify({ importedFrom: archive, digest }));
+  state.importedSnapshots = state.importedSnapshots ?? {};
   state.importedSnapshots[artifactPath] = { digest, importedFrom: archive };
   writeState(state);
-  process.stdout.write(`group ${group}: head ${snapId} (Initialized)\ndigest: sha256:${digest}\n${artifactPath}\n`);
+  process.stderr.write(`group ${group}: head ${snapId} (Initialized)\n`);
+  process.stdout.write(`${reused ? "Reused" : "Added"}: ${snapId}\n`);
   process.exit(0);
 } else if (cmd === "copy") {
   // copy -q <src> <dst> — records the call so a test can assert the exact

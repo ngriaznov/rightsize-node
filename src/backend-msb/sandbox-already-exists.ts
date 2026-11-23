@@ -24,9 +24,9 @@
  * for this, only combined process output, and a collision can be worded
  * around either the sandbox's name or (rarely, alternate msb builds) its
  * dedicated "already in use" phrasing. Only ever checked against a
- * `msb restore` invocation's own output — a `msb snapshot load` "already
- * exists" (see `isSnapshotAlreadyExistsError`) is a completely different
- * command and never appears here.
+ * `msb restore` invocation's own output — a `msb snapshot create` "snapshot
+ * already exists" is a completely different command and never appears
+ * here.
  */
 export function isSandboxAlreadyExistsFailure(output: string): boolean {
   const m = output.toLowerCase();

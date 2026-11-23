@@ -213,17 +213,15 @@ export interface SandboxBackend {
    * itself. docker preserves the original tag on `docker load`, so its
    * effective ref IS `ref`; microsandbox's `snapshot load --dest
    * <checkpointsDir>` writes under a path msb itself generates (never the
-   * caller's `ref`, never a name the caller can choose), which this backend
-   * parses straight out of `load`'s own printed output — no separate
-   * confirmation call needed, since 0.7.1 already prints the full, directly
-   * usable path (see `MsbCliBackend.importCheckpoint`). An already-exists
-   * failure for a content-addressed archive is treated as success. `ref` is
-   * the archive's own recorded ref (from `checkpoint.json`), passed through
-   * for backends (docker) that have no new ref to derive. Only ever called
-   * once the generic layer has already validated the archive's
-   * `checkpoint.json` (version, name, backend) against the active backend;
-   * any failure other than "already imported" surfaces the underlying
-   * tool's stderr in a `BackendError`.
+   * caller's `ref`, never a name the caller can choose). msb 0.8 `load`
+   * prints only `Added:`/`Reused:` lines and no path, so this backend builds
+   * the ref as `<checkpointsDir>/<fresh group>/<id>` (see
+   * `MsbCliBackend.importCheckpoint`). `ref` is the archive's own recorded
+   * ref (from `checkpoint.json`), passed through for backends (docker) that
+   * have no new ref to derive. Only ever called once the generic layer has
+   * already validated the archive's `checkpoint.json` (version, name,
+   * backend) against the active backend; any failure surfaces the
+   * underlying tool's stderr in a `BackendError`.
    */
   importCheckpoint(srcFile: string, ref: string): Promise<string>;
   /**

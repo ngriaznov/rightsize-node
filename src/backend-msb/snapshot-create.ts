@@ -5,9 +5,9 @@ import * as path from "node:path";
  * `msb snapshot create --from-sandbox ...` invocation's stdout. EMPIRICALLY
  * VERIFIED against a real msb 0.7.1 binary: the command prints the snapshot
  * ID line first, then the absolute artifact path as its final line —
- * `<destDir-or-default>/<sourceSandbox>/snap_<32-hex-digest>` (see
- * `MsbCommands.snapshotCreate`'s own doc for why the caller-supplied name
- * never determines this path). `MsbCliBackend.createCheckpoint` uses the
+ * `<destDir-or-default>/<group>/snap_<32-hex-digest>` (see
+ * `MsbCommands.snapshotCreate`'s own doc: the caller-supplied name is the
+ * group, and msb names the member itself). `MsbCliBackend.createCheckpoint` uses the
  * returned path — never the ref it asked msb to create the snapshot under —
  * as the effective checkpoint ref for every later restore/rm/inspect call.
  *

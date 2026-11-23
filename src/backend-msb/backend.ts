@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
@@ -27,10 +28,9 @@ import { isMsbStateDbError } from "./state-db.js";
 import { isAgentRelayUnavailable } from "./agent-relay.js";
 import { isAgentEndpointNotReady } from "./agent-endpoint.js";
 import { isSnapshotNotFoundError } from "./snapshot-not-found.js";
-import { isSnapshotAlreadyExistsError, parseImportedArtifactPath } from "./snapshot-import.js";
+import { parseImportedMemberId } from "./snapshot-import.js";
 import { isSnapshotSaveAccessDeniedFailure, salvageStagedArchive } from "./snapshot-save-fsync.js";
 import { parseSnapshotCreateArtifactPath } from "./snapshot-create.js";
-import { isSnapshotHeadRemovalRefused } from "./snapshot-rm.js";
 import { undeliveredLines } from "./follow-replay.js";
 import {
   requireNoDuplicateGuestPorts,
@@ -411,6 +411,26 @@ async function looksLikeCheckpointArtifactDir(ref: string): Promise<boolean> {
     .access(path.join(ref, "snapshot.json"))
     .then(() => true)
     .catch(() => false);
+}
+
+/**
+ * True if `dir` is a checkpoint group directory this library created: an
+ * `rz-ckpt-*` name, a `group.json`, and nothing but `group.json`,
+ * `group-source.json` and `snap_*` entries. The whole-group fallback delete in
+ * `removeCheckpoint` is gated on this so a caller-supplied path never loses
+ * unrelated files.
+ */
+async function isCheckpointGroupDir(dir: string): Promise<boolean> {
+  if (!path.basename(dir).startsWith("rz-ckpt-")) {
+    return false;
+  }
+  const names = await fs.readdir(dir).catch(() => undefined);
+  if (names === undefined || !names.includes("group.json")) {
+    return false;
+  }
+  return names.every(
+    (name) => name === "group.json" || name === "group-source.json" || /^snap_[0-9a-f]+$/i.test(name),
+  );
 }
 
 interface HandleState {
@@ -2062,12 +2082,11 @@ export class MsbCliBackend implements SandboxBackend {
    * for it has no handle state and is refused before anything is stopped.
    *
    * `ref` is the WORKING ref this method is asked to checkpoint under — its
-   * basename becomes the snapshot create call's `<name>` argument (still
-   * meaningful: it lands in msb's own index, see `MsbCommands.snapshotCreate`'s
-   * own doc) and, for a path ref, its dirname becomes `--dest-dir`. It is
-   * NOT necessarily where the artifact ends up: EMPIRICALLY VERIFIED against
-   * a real msb 0.7.1 binary, `snapshot create` always writes under
-   * `<destDir-or-default>/<sandbox>/snap_<32-hex-digest>`, a path `name`
+   * basename becomes the new msb snapshot GROUP's name (see
+   * `MsbCommands.snapshotCreate`'s own doc) and, for a path ref, its dirname
+   * becomes `--dest-dir`. It is NOT where the artifact ends up: msb 0.8
+   * names the single member itself and writes
+   * `<destDir-or-default>/<group>/snap_<32-hex-digest>`, a path the caller
    * never determines. This method therefore parses that real artifact path
    * back out of the command's own stdout (last non-empty line, required to
    * be absolute — see `parseSnapshotCreateArtifactPath`) and returns THAT as
@@ -2121,18 +2140,25 @@ export class MsbCliBackend implements SandboxBackend {
     await this.stop(handle);
 
     // A path ref (see checkpoint/ref.ts) hands msb the ref's own basename as
-    // the snapshot NAME and the parent as --dest-dir — the parent directory
-    // is honored, but (since msb 0.7.1) the artifact itself lands nested
-    // under <parent>/<sandbox>/snap_<digest>, never literally at `ref`; see
-    // this method's own doc. A bare-name ref (pre-dest-dir checkpoints,
+    // the new snapshot GROUP's name and the parent as --dest-dir — the
+    // artifact itself lands nested under <parent>/<group>/snap_<digest>,
+    // never literally at `ref`; see this method's own doc. A bare-name ref (pre-dest-dir checkpoints,
     // still restorable) keeps going through msb's own default snapshot
     // store, unchanged.
     const isPathRef = path.isAbsolute(ref);
+    let group = path.basename(ref);
     if (isPathRef) {
       await fs.mkdir(path.dirname(ref), { recursive: true });
+      // msb 0.8 refuses a group whose directory exists (`snapshot already
+      // exists`). A same-name re-checkpoint reaches this while the prior
+      // checkpoint's group is still on disk — it is only removed once the
+      // new one is confirmed — so the new group gets a random suffix then.
+      if (await fs.access(ref).then(() => true, () => false)) {
+        group = `${group}-${randomBytes(4).toString("hex")}`;
+      }
     }
     const snapshotArgv = isPathRef
-      ? MsbCommands.snapshotCreate(originalName, path.basename(ref), path.dirname(ref))
+      ? MsbCommands.snapshotCreate(originalName, group, path.dirname(ref))
       : MsbCommands.snapshotCreate(originalName, ref);
     const snap = await invoke(msbPath, snapshotArgv, CHECKPOINT_TIMEOUT_MS);
     if (snap.exitCode !== 0) {
@@ -2209,56 +2235,62 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
-   * Best-effort `msb snapshot rm <ref> -f` — "not found" is success, the
-   * same contract as `removeByName`. `ref` is passed FULL, never reduced to
-   * `path.basename(ref)`: EMPIRICALLY VERIFIED against a real msb 0.7.1
-   * binary, name-based removal does not resolve at all — the artifact PATH
-   * is the only address that reliably works (see `MsbCommands.snapshotRemove`'s
-   * own doc). Every real caller already hands this the EFFECTIVE ref
-   * `createCheckpoint` returned (an absolute path since 0.7.1), so this is
-   * also simply correct for the common case, not just a defensive choice.
+   * Best-effort `msb snapshot rm` of the checkpoint at `ref`, an artifact
+   * path `<checkpointsDir>/<group>/snap_<id>`. msb 0.8 addresses removal by
+   * GROUP directory (a member path is refused), so the group is
+   * `path.dirname(ref)` and the member `path.basename(ref)`. When the member
+   * is the only `snap_*` entry in its group the whole group goes
+   * (`--all`): `--checkpoint` would leave `group.json` behind, and msb then
+   * refuses to create a group of that name again. When the group holds other
+   * members the call is `--checkpoint <member> -f`, so a checkpoint the
+   * caller did not name is never removed. A missing group or member means
+   * the checkpoint is already gone — msb's non-zero exit is swallowed like
+   * any other failure, the same contract as `removeByName`. msb 0.8 no
+   * longer refuses to remove a group's current head.
    *
-   * One failure shape is deliberately NOT swallowed alongside "not found":
-   * msb refuses to remove a snapshot that is still the current HEAD of
-   * older siblings from the same source sandbox (see
-   * `isSnapshotHeadRemovalRefused`) — that refusal propagates as a
-   * `BackendError` naming msb's own remedy, rather than silently doing
-   * nothing, since automatic head rotation is out of scope for this method
-   * (see the checkpoints guide's cleanup section for the documented
-   * limitation).
-   *
-   * msb's own removal deletes both its index entry and the dest-dir
-   * artifact for a path ref, but afterwards this also best-effort
-   * recursively deletes the ref path itself: if msb's index ever loses
+   * msb's own removal deletes the dest-dir artifact, but afterwards this
+   * also best-effort recursively deletes it: if msb ever fails or loses
    * track of an artifact without deleting it, the directory would otherwise
-   * linger under the cache dir forever. That recursive delete is gated on
-   * `looksLikeCheckpointArtifactDir` first — a `ref` is caller-supplied (a
-   * corrupt registry entry, a hand-edited env var, …), and a `fs.rm(ref, {
-   * recursive: true })` on an unverified path would happily wipe out an
-   * arbitrary directory that merely happens to share its name.
+   * linger under the cache dir forever. That delete targets the group
+   * directory when the member was its only one (or the group holds no member
+   * at all) and the directory passes `isCheckpointGroupDir`, else just the
+   * member directory, gated on `looksLikeCheckpointArtifactDir`. A `ref` is
+   * caller-supplied (a corrupt registry entry, a hand-edited env var, …), and
+   * a `fs.rm(ref, { recursive: true })` on an unverified path would happily
+   * wipe out an arbitrary directory that merely happens to share its name.
+   *
+   * A bare-name ref has no group directory to address, so it is a no-op.
    */
   async removeCheckpoint(ref: string): Promise<void> {
-    const msbPath = await this.msbPath();
-    const isPathRef = path.isAbsolute(ref);
-    const result = await invoke(msbPath, MsbCommands.snapshotRemove(ref), CHECKPOINT_TIMEOUT_MS).catch(() => undefined);
-    if (result !== undefined && result.exitCode !== 0 && isSnapshotHeadRemovalRefused(result.stderr)) {
-      throw new BackendError(
-        `msb snapshot rm ${ref} -f was refused (exit ${result.exitCode}): ${result.stderr.trim()} — this ` +
-          `checkpoint is still the newest snapshot of other, older ones from the same source sandbox; ` +
-          `select another snapshot as head first ('msb snapshot head ...', see msb's own message above), ` +
-          `or remove the older siblings first.`,
-      );
+    if (!path.isAbsolute(ref)) {
+      return;
     }
-    if (isPathRef && (await looksLikeCheckpointArtifactDir(ref))) {
+    const msbPath = await this.msbPath();
+    const groupDir = path.dirname(ref);
+    const member = path.basename(ref);
+    const members = await fs
+      .readdir(groupDir)
+      .then((names) => names.filter((name) => /^snap_[0-9a-f]+$/i.test(name)))
+      .catch(() => undefined);
+    if (members === undefined) {
+      return; // no group directory: already gone
+    }
+    const onlyMember = members.every((name) => name === member);
+    await invoke(msbPath, MsbCommands.snapshotRemove(groupDir, member, onlyMember), CHECKPOINT_TIMEOUT_MS).catch(
+      () => undefined,
+    );
+    if (onlyMember && (await isCheckpointGroupDir(groupDir))) {
+      await fs.rm(groupDir, { recursive: true, force: true }).catch(() => {});
+    } else if (await looksLikeCheckpointArtifactDir(ref)) {
       await fs.rm(ref, { recursive: true, force: true }).catch(() => {});
     }
   }
 
   /**
    * `msb snapshot inspect <ref>` — exit 0 means the snapshot exists. A
-   * non-zero exit whose stderr carries msb's own "snapshot not found"
-   * framing (see `isSnapshotNotFoundError`, confirmed verbatim against the
-   * real msb 0.6.8 binary) resolves `false` — a genuine miss. Any OTHER
+   * non-zero exit whose stderr carries msb's own "snapshot not found" or
+   * `io error: No such file or directory` framing (see
+   * `isSnapshotNotFoundError`) resolves `false` — a genuine miss. Any OTHER
    * non-zero exit (a corrupted state db, a permission error, a malformed
    * argument, an msb crash) throws `BackendError` carrying the raw stderr
    * instead of collapsing to `false`: `invoke()` itself only rejects on a
@@ -2293,7 +2325,9 @@ export class MsbCliBackend implements SandboxBackend {
   }
 
   /**
-   * `msb snapshot save <ref> <destFile>` — writes the `.tar.zst` artifact
+   * `msb snapshot save <groupDir> --checkpoint <member> <destFile>`, with the
+   * group directory and member taken from `ref` (`dirname`/`basename` of the
+   * stored member path) — writes the `.tar.zst` artifact
    * `Checkpoints.exportTo` bundles into its own archive container. Never
    * `--with-image` (see the checkpoints guide's own note: this library
    * doesn't bundle the OCI image into the archive, so the destination
@@ -2315,7 +2349,9 @@ export class MsbCliBackend implements SandboxBackend {
    */
   async exportCheckpoint(ref: string, destFile: string): Promise<void> {
     const msbPath = await this.msbPath();
-    const result = await invoke(msbPath, MsbCommands.snapshotExport(ref, destFile), CHECKPOINT_TIMEOUT_MS);
+    const groupDir = path.dirname(ref);
+    const member = path.basename(ref);
+    const result = await invoke(msbPath, MsbCommands.snapshotExport(groupDir, member, destFile), CHECKPOINT_TIMEOUT_MS);
     if (result.exitCode !== 0) {
       if (
         process.platform === "win32" &&
@@ -2325,48 +2361,33 @@ export class MsbCliBackend implements SandboxBackend {
         return;
       }
       throw new BackendError(
-        `msb snapshot save ${ref} ${destFile} failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+        `msb snapshot save ${groupDir} --checkpoint ${member} ${destFile} failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
       );
     }
   }
 
   /**
-   * `msb snapshot load <archive> --dest <checkpointsDir>`, then resolves the
-   * EFFECTIVE ref: EMPIRICALLY VERIFIED against a real msb 0.7.1 binary, a
-   * successful load prints a `group msb-<hex>: head snap_<digest>
-   * (Initialized)` line, a digest line, and finally the loaded artifact's
-   * own absolute path as its LAST line — `<checkpointsDir>/<generated-
-   * group>/snap_<digest>`, never the archive's own recorded `ref` — parsed
-   * back out by `parseImportedArtifactPath` (the same last-non-empty-line,
-   * must-be-absolute defensive pattern `parseSnapshotCreateArtifactPath`
-   * uses for `snapshot create`). `checkpointsDir` is always this backend's
-   * own checkpoints cache directory (`<cacheDir>/checkpoints`, the same
-   * directory `checkpointRef()` mints created-checkpoint refs under) —
-   * omitting `--dest` would import into msb's own global default snapshot
-   * store instead, outside anywhere this library looks for or cleans up
-   * checkpoints. Created fresh (mkdir -p) before the load, since nothing
-   * guarantees a caller ever created a checkpoint locally first (an
-   * imported-only machine has no reason to have this directory yet).
+   * `msb snapshot load <group> --file <archive> --dest <checkpointsDir>`,
+   * then resolves the EFFECTIVE ref. msb 0.8.1 prints one `Added: snap_<id>`
+   * (or `Reused: snap_<id>`, exit 0) line and no path, so the ref is built
+   * as `<checkpointsDir>/<group>/<id>`, where `<group>` is a fresh name per
+   * import (`rz-ckpt-import-` plus 12 random hex characters) — msb rejects a
+   * group that clashes with an existing one, and a new group per import
+   * keeps imports from ever touching each other's members. The id comes from
+   * `parseImportedMemberId` (stdout first, then stderr), and the member
+   * directory must hold a `snapshot.json` before the ref is handed back.
+   * Output with no `Added:`/`Reused:` line throws a `BackendError` quoting
+   * the raw output verbatim rather than guessing a ref.
    *
-   * This replaces the pre-0.7.1 shape entirely: `snapshot load` used to
-   * write under a digest-derived directory name with no `--dest` of its
-   * own, so this method had to parse out just that bare NAME and then
-   * separately CONFIRM it via `msb snapshot list --format json` before
-   * handing it back (the only way to get a usable ref at all, since the
-   * bare name alone still had to resolve against msb's default store). 0.7.1
-   * prints the full, directly-usable, already-`--dest`-scoped path as part
-   * of `load`'s own output, so that whole list-and-confirm round trip is
-   * gone — dead code that this migration deletes outright, not merely
-   * bypassed.
-   *
-   * An already-exists failure — msb's own content-addressed dedup — is
-   * treated as success, since the artifact is already present under that
-   * digest either way, and its stderr is parsed the same way as a success's
-   * stdout; any OTHER import failure surfaces msb's own stderr in a
-   * `BackendError`, and unparseable output (no recognizable absolute last
-   * line — e.g. only the "group ... (Initialized)" line, msb's OWN wording
-   * for a state that is not itself a path) throws a `BackendError` quoting
-   * the raw output verbatim rather than misreading a status line as a ref.
+   * `checkpointsDir` is always this backend's own checkpoints cache
+   * directory (`<cacheDir>/checkpoints`, the same directory `checkpointRef()`
+   * mints created-checkpoint refs under) — omitting `--dest` would import
+   * into msb's own global default snapshot store instead, outside anywhere
+   * this library looks for or cleans up checkpoints. Created fresh (mkdir -p)
+   * before the load, since nothing guarantees a caller ever created a
+   * checkpoint locally first (an imported-only machine has no reason to have
+   * this directory yet). Import needs a destination filesystem with hard
+   * links and atomic directory exchange; msb's own error says so otherwise.
    * `_ref` (the archive's own recorded ref) is unused here — msb's importer
    * never takes one, unlike docker's, where the effective ref really is the
    * ref passed in.
@@ -2376,25 +2397,32 @@ export class MsbCliBackend implements SandboxBackend {
     const checkpointsDir = path.join(cacheDir(), "checkpoints");
     await fs.mkdir(checkpointsDir, { recursive: true });
 
-    const imported = await invoke(msbPath, MsbCommands.snapshotImport(srcFile, checkpointsDir), CHECKPOINT_TIMEOUT_MS);
-
-    let artifactPath: string | undefined;
-    if (imported.exitCode === 0) {
-      artifactPath = parseImportedArtifactPath(imported.stdout);
-    } else if (isSnapshotAlreadyExistsError(imported.stderr)) {
-      artifactPath = parseImportedArtifactPath(imported.stderr);
-    } else {
+    const group = `rz-ckpt-import-${randomBytes(6).toString("hex")}`;
+    const imported = await invoke(
+      msbPath,
+      MsbCommands.snapshotImport(group, srcFile, checkpointsDir),
+      CHECKPOINT_TIMEOUT_MS,
+    );
+    if (imported.exitCode !== 0) {
       throw new BackendError(
-        `msb snapshot load ${srcFile} --dest ${checkpointsDir} failed (exit ${imported.exitCode}): ${imported.stderr.trim()}`,
+        `msb snapshot load ${group} --file ${srcFile} --dest ${checkpointsDir} failed (exit ${imported.exitCode}): ${imported.stderr.trim()}`,
       );
     }
-    if (artifactPath === undefined) {
+    const id = parseImportedMemberId(imported.stdout) ?? parseImportedMemberId(imported.stderr);
+    if (id === undefined) {
       throw new BackendError(
-        `msb snapshot load ${srcFile} --dest ${checkpointsDir} did not print a recognizable artifact path as its ` +
-          `last line — output:\n${imported.stdout}${imported.stderr}`,
+        `msb snapshot load ${group} --file ${srcFile} --dest ${checkpointsDir} did not report an imported ` +
+          `checkpoint (no 'Added:' or 'Reused:' line) — output:\n${imported.stdout}${imported.stderr}`,
       );
     }
-    return artifactPath;
+    const ref = path.join(checkpointsDir, group, id);
+    if (!(await fs.access(path.join(ref, "snapshot.json")).then(() => true, () => false))) {
+      throw new BackendError(
+        `msb snapshot load ${group} --file ${srcFile} --dest ${checkpointsDir} reported ${id}, but ` +
+          `${path.join(ref, "snapshot.json")} does not exist — output:\n${imported.stdout}${imported.stderr}`,
+      );
+    }
+    return ref;
   }
 
   private async runningSandboxNames(msbPath: string): Promise<Set<string>> {

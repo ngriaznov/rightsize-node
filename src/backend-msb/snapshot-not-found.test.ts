@@ -6,6 +6,14 @@ describe("isSnapshotNotFoundError", () => {
     assert.ok(isSnapshotNotFoundError("error: snapshot not found: /home/user/.microsandbox/snapshots/rz-ckpt-abc123"));
   });
 
+  it("matches the msb 0.8.1 missing group/member shape", () => {
+    assert.ok(isSnapshotNotFoundError("error: io error: No such file or directory (os error 2)"));
+  });
+
+  it("matches the localized Windows io error shape", () => {
+    assert.ok(isSnapshotNotFoundError("error: io error: The system cannot find the file specified. (os error 2)"));
+  });
+
   it("matches when embedded in a larger stderr blob", () => {
     assert.ok(isSnapshotNotFoundError("some preceding line\nerror: snapshot not found: rz-ckpt-abc123\n"));
   });

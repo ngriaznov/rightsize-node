@@ -1523,9 +1523,15 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
 
       // Re-checkpointing under the SAME name mints a second, different
       // content-addressed artifact (a fresh snap_<digest> each time — see
-      // the fake fixture's own snapshot-create branch).
+      // the fake fixture's own snapshot-create branch) in a second group,
+      // since msb 0.8 refuses to reuse the first one's name while it exists.
       const second = await container.checkpoint("seeded");
       assert.ok(second.ref !== first.ref, "expected a fresh effective ref on the second checkpoint too");
+      assert.match(
+        path.basename(path.dirname(second.ref)),
+        /^rz-ckpt-seeded-[0-9a-f]{8}$/,
+        "expected the re-checkpoint to use a fresh group name while the first group still existed",
+      );
 
       // The actual fix, end to end: the FIRST checkpoint's real artifact is
       // gone — both from msb's own index and from disk — not merely
@@ -1544,8 +1550,8 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
         callLog: Array<{ cmd: string; args: string[] }>;
       };
       assert.equal(first.ref in (state.snapshots ?? {}), false, "expected msb's own index to no longer carry the prior artifact");
-      const removalCall = state.callLog.find((c) => c.cmd === "snapshotRemove" && c.args.includes(first.ref));
-      assert.ok(removalCall !== undefined, "expected an 'msb snapshot rm' call against the PRIOR entry's recorded effective ref");
+      const removalCall = state.callLog.find((c) => c.cmd === "snapshotRemove" && c.args.includes(path.dirname(first.ref)));
+      assert.ok(removalCall !== undefined, "expected an 'msb snapshot rm' call against the PRIOR entry's recorded group directory");
 
       // The SECOND checkpoint's own artifact must survive untouched.
       assert.equal(await backend.hasCheckpoint(second.ref), true, "expected the latest checkpoint's own artifact to remain");
@@ -1618,7 +1624,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
         callLog: Array<{ cmd: string; args: string[] }>;
       };
       assert.ok(first.ref in (state.snapshots ?? {}), "expected msb's own index to still carry the prior artifact");
-      const removalCall = state.callLog.find((c) => c.cmd === "snapshotRemove" && c.args.includes(first.ref));
+      const removalCall = state.callLog.find((c) => c.cmd === "snapshotRemove" && c.args.includes(path.dirname(first.ref)));
       assert.equal(removalCall, undefined, "expected no 'msb snapshot rm' call against the prior real ref before the new checkpoint was confirmed to exist");
 
       const read = await readCheckpointRegistry(cacheDirPath, "seeded");
@@ -2780,8 +2786,15 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-toremove");
 
     await backend.removeCheckpoint(effectiveRef);
-    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { snapshots?: Record<string, unknown> };
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      snapshots?: Record<string, unknown>;
+      callLog: Array<{ cmd: string; args: string[] }>;
+    };
     assert.equal(effectiveRef in (state.snapshots ?? {}), false);
+    // The only member of its group: the whole group goes, not just the member.
+    const rmCall = state.callLog.filter((c) => c.cmd === "snapshotRemove").at(-1);
+    assert.deepEqual(rmCall?.args, ["snapshot", "rm", path.dirname(effectiveRef), "--all"]);
+    await assert.rejects(fs.access(path.dirname(effectiveRef)), "expected the group directory to be gone");
 
     await backend.removeCheckpoint(path.join(path.dirname(effectiveRef), "snap_never0000000000000000000000000"));
 
@@ -2789,34 +2802,69 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
-  it("removeCheckpoint propagates msb's head-removal refusal rather than swallowing it alongside 'not found'", async () => {
+  it("removeCheckpoint in a group that holds another member removes only that member, with --checkpoint <member> -f", async () => {
     if (skipOnWindows()) {
       return;
     }
-    const spec = baseSpec("rz-testrun1-ckpt-rm-head", { command: ["sleep", "60"] });
-    const handle = await backend.create(spec);
-    await backend.start(handle);
-    const effectiveRef = await backend.createCheckpoint(handle, "rz-ckpt-head");
-
-    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
-    seeded.failSnapshotRmWithHeadRefusal = 1;
-    await fs.writeFile(statePath, JSON.stringify(seeded));
-
-    let thrown: unknown;
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-shared-group-remove-test-"));
     try {
-      await backend.removeCheckpoint(effectiveRef);
-    } catch (err) {
-      thrown = err;
+      const groupDir = path.join(dir, "rz-ckpt-shared");
+      const mine = path.join(groupDir, "snap_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+      const other = path.join(groupDir, "snap_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+      for (const member of [mine, other]) {
+        await fs.mkdir(member, { recursive: true });
+        await fs.writeFile(path.join(member, "snapshot.json"), "{}");
+      }
+      await fs.writeFile(path.join(groupDir, "group.json"), "{}");
+
+      await backend.removeCheckpoint(mine);
+
+      const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+      const rmCall = state.callLog.filter((c) => c.cmd === "snapshotRemove").at(-1);
+      assert.deepEqual(rmCall?.args, ["snapshot", "rm", groupDir, "--checkpoint", path.basename(mine), "-f"]);
+      await assert.rejects(fs.access(mine), "expected the named member to be gone");
+      await fs.access(path.join(other, "snapshot.json")); // the other member must survive
+      await fs.access(path.join(groupDir, "group.json"));
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
     }
-    assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
-    assert.match((thrown as Error).message, /cannot remove current head/);
+  });
 
-    // Never swallowed into a silent no-op: the artifact is still there.
-    assert.equal(await backend.hasCheckpoint(effectiveRef), true, "expected the refused removal to have left the artifact intact");
+  it("removeCheckpoint on a group whose member is already gone clears the group via --all", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-empty-group-remove-test-"));
+    try {
+      const groupDir = path.join(dir, "rz-ckpt-empty");
+      await fs.mkdir(groupDir, { recursive: true });
+      await fs.writeFile(path.join(groupDir, "group.json"), "{}");
 
-    await backend.removeCheckpoint(effectiveRef);
-    await backend.stop(handle);
-    await backend.remove(handle);
+      await backend.removeCheckpoint(path.join(groupDir, "snap_dddddddddddddddddddddddddddddddd"));
+
+      const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+      const rmCall = state.callLog.filter((c) => c.cmd === "snapshotRemove").at(-1);
+      assert.deepEqual(rmCall?.args, ["snapshot", "rm", groupDir, "--all"]);
+      await assert.rejects(fs.access(groupDir), "expected the empty group directory to be removed");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("removeCheckpoint on a group that is already gone is silent and never calls msb", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rightsize-msb-missing-group-remove-test-"));
+    try {
+      const ref = path.join(dir, "rz-ckpt-gone", "snap_cccccccccccccccccccccccccccccccc");
+      await backend.removeCheckpoint(ref);
+
+      const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog?: Array<{ cmd: string }> };
+      assert.equal((state.callLog ?? []).filter((c) => c.cmd === "snapshotRemove").length, 0);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("hasCheckpoint on a path ref checks the filesystem directly, never through msb: true only once snapshot.json exists", async () => {
@@ -2835,7 +2883,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     }
   });
 
-  it("removeCheckpoint on a path ref runs msb snapshot rm with the FULL artifact path (never just the basename) plus -f, then clears any leftover artifact directory", async () => {
+  it("removeCheckpoint falls back to deleting the member directory when msb refuses a directory that has no group.json", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -2849,13 +2897,12 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
 
       const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
       const rmCall = state.callLog.filter((c) => c.cmd === "snapshotRemove").at(-1);
-      assert.deepEqual(
-        rmCall?.args,
-        ["snapshot", "rm", ref, "-f"],
-        "expected the full artifact path and -f — name-based removal does not resolve on msb 0.7.1",
-      );
+      assert.deepEqual(rmCall?.args, ["snapshot", "rm", dir, "--all"], "expected the group directory (the ref's parent), not the member path");
 
+      // msb said no (the fake refuses a directory without group.json), so the
+      // guarded manual delete removed the member only — never the parent.
       await assert.rejects(fs.access(ref), "expected the leftover artifact directory to have been removed");
+      await fs.access(dir);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
@@ -2921,7 +2968,11 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.equal(await backend.hasCheckpoint("rz-ckpt-exists"), true);
     assert.equal(await backend.hasCheckpoint("rz-ckpt-never-existed"), false);
 
-    await backend.removeCheckpoint("rz-ckpt-exists");
+    // removeCheckpoint has no group directory to address for a bare name, so
+    // drop the entry from the fixture's index directly.
+    const dropped = JSON.parse(await fs.readFile(statePath, "utf8"));
+    delete dropped.snapshots["rz-ckpt-exists"];
+    await fs.writeFile(statePath, JSON.stringify(dropped));
     assert.equal(await backend.hasCheckpoint("rz-ckpt-exists"), false, "expected hasCheckpoint to reflect a removed snapshot as absent");
   });
 
@@ -2954,7 +3005,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.equal(await backend.hasCheckpoint("rz-ckpt-probeerr"), true);
   });
 
-  it("exportCheckpoint drives msb snapshot save <ref> <dest>, writing the payload file", async () => {
+  it("exportCheckpoint drives msb snapshot save <groupDir> --checkpoint <member> <dest>, writing the payload file", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -2971,7 +3022,14 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
 
       const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
       const exportCall = state.callLog.find((c) => c.cmd === "snapshotExport");
-      assert.deepEqual(exportCall?.args, ["snapshot", "save", effectiveRef, dest]);
+      assert.deepEqual(exportCall?.args, [
+        "snapshot",
+        "save",
+        path.dirname(effectiveRef),
+        "--checkpoint",
+        path.basename(effectiveRef),
+        dest,
+      ]);
     } finally {
       await fs.rm(dest, { force: true });
     }
@@ -3023,7 +3081,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
         thrown = err;
       }
       assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
-      assert.match((thrown as Error).message, /snapshot not found/);
+      assert.match((thrown as Error).message, /No such file or directory/);
       assert.deepEqual(await fs.readdir(dir), [path.basename(staged)]);
       assert.equal(await fs.readFile(staged, "utf8"), "leftover-bytes");
     } finally {
@@ -3031,7 +3089,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     }
   });
 
-  it("importCheckpoint resolves the effective ref via the loaded artifact path msb's own 'snapshot load' prints, treating a re-import of the same bytes as success", async () => {
+  it("importCheckpoint loads into a fresh rz-ckpt-import-<12 hex> group and builds the ref from msb's Added: line", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -3045,29 +3103,38 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
 
     try {
       const effectiveRef = await backend.importCheckpoint(artifactPath, checkpointRef);
-      // The loaded artifact path, not a bare digest-dir name: absolute,
-      // nested under this backend's own checkpoints cache directory (never
-      // msb's global default store — see MsbCommands.snapshotImport's own
-      // doc on why --dest is always passed), basename shaped like any other
-      // snapshot artifact.
+      // Absolute, nested under this backend's own checkpoints cache directory
+      // (never msb's global default store — see MsbCommands.snapshotImport's
+      // own doc on why --dest is always passed), group directory named for
+      // the import, basename shaped like any other snapshot member.
       assert.ok(path.isAbsolute(effectiveRef), `expected an absolute path ref, got ${effectiveRef}`);
       assert.equal(path.dirname(path.dirname(effectiveRef)), path.join(cacheDir(), "checkpoints"));
+      assert.match(path.basename(path.dirname(effectiveRef)), /^rz-ckpt-import-[0-9a-f]{12}$/);
       assert.match(path.basename(effectiveRef), /^snap_[0-9a-f]+$/i);
       assert.ok(effectiveRef !== checkpointRef, "expected the imported ref to be distinct from the original snapshot's own ref");
 
-      // The exact regression this backend once had (pre-0.7.1): importCheckpoint
-      // returning a ref `hasCheckpoint` could not actually probe (msb's full
-      // `sha256:<64hex>` digest, which never resolves as a snapshot ref).
-      // Asserting hasCheckpoint(effectiveRef) here pins that the returned
-      // ref is one the backend can actually probe — now via a plain
+      const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { callLog: Array<{ cmd: string; args: string[] }> };
+      const loadCall = state.callLog.filter((c) => c.cmd === "snapshotImport").at(-1);
+      assert.deepEqual(loadCall?.args, [
+        "snapshot",
+        "load",
+        path.basename(path.dirname(effectiveRef)),
+        "--file",
+        artifactPath,
+        "--dest",
+        path.join(cacheDir(), "checkpoints"),
+      ]);
+
+      // The returned ref is one the backend can actually probe — a plain
       // filesystem check, since it is a path ref.
       assert.equal(await backend.hasCheckpoint(effectiveRef), true);
 
-      // Re-importing the SAME bytes hits msb's own already-exists path
-      // (content-addressed dedup) and must resolve to the SAME artifact
-      // path, not throw — that's success, not failure, for identical content.
+      // Importing the same bytes again uses another fresh group and also
+      // succeeds; both imports stay on disk.
       const secondRef = await backend.importCheckpoint(artifactPath, checkpointRef);
-      assert.equal(secondRef, effectiveRef);
+      assert.ok(secondRef !== effectiveRef, "expected a fresh group for the second import");
+      assert.equal(await backend.hasCheckpoint(secondRef), true);
+      assert.equal(await backend.hasCheckpoint(effectiveRef), true);
     } finally {
       await fs.rm(artifactPath, { force: true });
     }
@@ -3077,7 +3144,25 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await backend.remove(handle);
   });
 
-  it("importCheckpoint surfaces msb's own stderr for a non-already-exists failure", async () => {
+  it("importCheckpoint accepts msb's Reused: line the same way as Added:", async () => {
+    if (skipOnWindows()) {
+      return;
+    }
+    const artifactPath = path.join(os.tmpdir(), `rightsize-msb-import-reused-test-${Date.now()}.artifact`);
+    await fs.writeFile(artifactPath, "some-bytes-for-reused-case");
+    const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
+    seeded.snapshotImportReused = 1;
+    await fs.writeFile(statePath, JSON.stringify(seeded));
+    try {
+      const ref = await backend.importCheckpoint(artifactPath, "unused-ref");
+      assert.match(path.basename(ref), /^snap_[0-9a-f]+$/i);
+      assert.equal(await backend.hasCheckpoint(ref), true);
+    } finally {
+      await fs.rm(artifactPath, { force: true });
+    }
+  });
+
+  it("importCheckpoint surfaces msb's own stderr for a failed load", async () => {
     if (skipOnWindows()) {
       return;
     }
@@ -3099,14 +3184,13 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     await fs.rm(artifactPath, { force: true });
   });
 
-  it("importCheckpoint throws a clear, red-proof error when msb's load output has no recognizable artifact path", async () => {
+  it("importCheckpoint throws a clear error when msb's load output has no Added:/Reused: line", async () => {
     if (skipOnWindows()) {
       return;
     }
-    // Reproduces the exact shape that broke the pre-0.7.1 locate-via-list
-    // logic: msb's own "group ... (Initialized)" status line with no
-    // trailing absolute path — see fake-msb.mjs's failSnapshotImportBadOutput
-    // knob and parseImportedArtifactPath's own doc.
+    // msb's own "group ... (Initialized)" status line with no `Added:` or
+    // `Reused:` line — see fake-msb.mjs's failSnapshotImportBadOutput knob and
+    // parseImportedMemberId's own doc.
     const artifactPath = path.join(os.tmpdir(), `rightsize-msb-import-badoutput-test-${Date.now()}.artifact`);
     await fs.writeFile(artifactPath, "some-bytes-for-bad-output-case");
     const seeded = JSON.parse(await fs.readFile(statePath, "utf8"));
@@ -3122,7 +3206,7 @@ describe("MsbCliBackend against a scripted fake msb binary", () => {
     assert.ok(thrown instanceof BackendError, `expected BackendError, got: ${String(thrown)}`);
     assert.match(
       (thrown as Error).message,
-      /did not print a recognizable artifact path/,
+      /no 'Added:' or 'Reused:' line/,
       "expected a clear, actionable message rather than a misread ref or a crash",
     );
     assert.match((thrown as Error).message, /Initialized/, "expected the raw, unparsed msb output quoted verbatim");

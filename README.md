@@ -172,7 +172,8 @@ backend-specific rather than behavioral divergences:
   installed atomically under `~/.cache/rightsize/` (`%LOCALAPPDATA%\rightsize`
   on Windows) - the binary lands last, so a crashed install is detected and
   repaired, never half-trusted. A cross-process file lock keeps parallel
-  processes from racing.
+  processes from racing. rightsize's version is the version of the msb
+  release it pins: rightsize 0.8.1 runs msb 0.8.1.
 - **Attached-mode supervision.** Each container is a held child process
   supervising its microVM; the image's ENTRYPOINT runs exactly as it would
   under Docker.
